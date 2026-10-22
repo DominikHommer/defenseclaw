@@ -292,9 +292,9 @@ func ValidateStrictServiceRuntimeFilePath(path, label, serviceAccount string, na
 // ValidateStrictServiceRuntimeDirPath is ValidateStrictServiceRuntimeFilePath
 // for a folder: the folder and the namedDirs folders nearest above it get
 // the strict leaf check, every folder above them the narrow ancestor mask,
-// all fatal. The lifecycle uses it to tell whether another account could
-// have changed the protected foreign-hook session record tree (GAP-0352
-// review).
+// all fatal. The Windows lifecycle and status use it to tell whether the
+// protected foreign-hook session record folder is one the hook trusts
+// (GAP-0352 review).
 func ValidateStrictServiceRuntimeDirPath(path, label, serviceAccount string, namedDirs int) error {
 	if label == "" {
 		label = "managed runtime folder"

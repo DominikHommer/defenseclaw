@@ -100,3 +100,41 @@ func TestPublishedSessionPrepareReplacesAFolderThatIsNotTheGateways(t *testing.T
 		t.Fatalf("an intact folder is kept: %v %v", err, granted)
 	}
 }
+
+// Kill switch: the key file is root's alone. The gateway may remove it (it
+// owns the folder the key is in) but never make one: the hook's trust check
+// refuses a key the gateway service uid owns (it accepts that uid for a
+// record), and the key read skips it.
+func TestThePublishedSessionKeyMustBeRoots(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root owns every test file")
+	}
+	root := filepath.Join(t.TempDir(), "sessions")
+	if err := os.Mkdir(root, 0o711); err != nil {
+		t.Fatal(err)
+	}
+	path, err := createPublishedSessionKey(root, PublishedSessionTrust{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := PublishedSessionTrust{ServiceUID: os.Geteuid()}
+	if err := ValidatePublishedSessionPath(path, service); err == nil || !strings.HasSuffix(err.Error(), ", not root") {
+		t.Fatalf("a key file of the gateway service uid must be refused: %v", err)
+	}
+	record := filepath.Join(root, "copilot-p-x.json")
+	if err := os.WriteFile(record, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidatePublishedSessionPath(record, service); err != nil && strings.HasSuffix(err.Error(), ", not root") {
+		t.Fatalf("a record of the gateway service uid is not refused for its owner: %v", err)
+	}
+	if _, err := ReadPublishedSessionKey(root); err == nil {
+		t.Fatal("a key file root does not own must be no key")
+	}
+	if err := KillPublishedSessionKey(root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(path); err != nil {
+		t.Fatalf("the kill only removes root's keys: %v", err)
+	}
+}

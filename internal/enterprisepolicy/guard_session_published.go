@@ -12,6 +12,11 @@ package enterprisepolicy
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,7 +25,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -34,75 +41,61 @@ import (
 // chose fail mode open, a guarded connector's hook must still not allow a
 // session the gateway blocked: the agent may run a hook it loaded when the
 // session started, even after its file was deleted. So after every session
-// exchange the gateway also writes its answer for the session and for the
-// agent process (blocked, or the allow that clears a block) into a record
-// the user can read but not change:
+// exchange the gateway also writes its answer for the agent process and for
+// the session into a record the user can read but not change:
 //
-//   - Linux and macOS: <HookSessionDir>/<identity digest>/, where
-//     HookSessionDir is created by the root lifecycle (ensure) and owned by
-//     the service account (mode 0711), and the per-user folder is created by
-//     the gateway (service account, mode 0700) with one access-list entry
-//     that lets only that uid read it (a POSIX ACL on Linux, a macOS ACL
-//     entry). The records in it are 0644.
-//   - Windows: %ProgramData%\Cisco\DefenseClaw-HookSessions\<digest>\,
-//     created by the SYSTEM lifecycle; the gateway creates the per-user
+//   - Linux and macOS: <HookSessionDir>/<identity digest>/. The root
+//     lifecycle creates HookSessionDir, owned by the service account (mode
+//     0711). The gateway creates the per-user folder (mode 0700) with one
+//     access-list entry that lets only that uid read it.
+//   - Windows: %ProgramData%\Cisco\DefenseClaw-HookSessions\<digest>\. The
+//     SYSTEM lifecycle creates the root; the gateway creates the per-user
 //     folder with a protected DACL (SYSTEM and Administrators full, the
 //     gateway service modify, that user read).
 //
-// During such an outage the hook reads the record of its own account after
-// it checked that every path element is a real folder or file that only
-// root/SYSTEM, Administrators or the gateway service can change. The call
-// is allowed only when a record proves that the gateway did not block the
-// agent process (or, when the process cannot be named, the session) and no
-// record blocks it. A missing, unreadable, untrusted or corrupt record
-// blocks. The guardian deletes an account's records for a connector when it
-// removes one of its hooks, because the gateway then denies the agent
-// processes that started before the removal.
+// One kill switch (1.0.4 guard loop, lead directive). Every allow record
+// carries a MAC made with the record folder's key. The key is the name of
+// one file next to the record folder, <folder name>.key-<64 hex>, that only
+// root or SYSTEM creates (CreatePublishedSessionKey). A record whose MAC
+// does not verify with the current key proves nothing. Every revocation
+// removes the key first and only then does anything else:
 //
-// Revoking a record must not depend on deleting or replacing it: on
-// Windows the account may hold its record open for reading without delete
-// sharing, which refuses both. So a block, a guardian removal or a
-// withdrawn answer that cannot delete a record overrides it twice, so that
-// no single write decides: it sets the record's modification time to
-// publishedSessionRevokedTime (metadata only: it needs no free space, and a
-// reader's sharing mode does not refuse it), which the hook reads as
-// expired, and it writes the record's deny marker (<record>.deny), a new
-// file that carries the gateway's reason. While a marker exists the hook
-// denies the call whatever the record says; only a later allow that
-// replaced the record clears both.
+//   - the gateway, before it records a block and before it publishes any
+//     denial (KillPublishedSessionKey: one unlink, then the folder is
+//     flushed; the gateway may remove the file but never create one);
+//   - the hook guardian, before it records a removal, and it creates a new
+//     key only after the ledger write;
+//   - the lifecycle (install, upgrade, repair, ensure, uninstall), before it
+//     changes anything, and it creates a new key only once the run
+//     succeeded.
 //
-// The hook accepts only a record of its agent process, never a session
-// record alone: an agent started during the outage may resume the session
-// ID of an earlier one. And it accepts no answer older than
-// publishedSessionMaxAge, or dated after now by more than
-// publishedSessionClockSkew (a clock that was ahead and was set back would
-// otherwise stretch the limit by as much).
+// A new key never brings an earlier record back: its name is random, and
+// no account but root or SYSTEM can give a file that name. So no revocation
+// has to find the records it ends, and no account that kept a way to move
+// records or folders around (a retained Windows handle, a macOS access-list
+// entry) can make an earlier allow count again.
 //
-// No removal state lives in this tree: a standard user can list its root,
-// and while an administrator leaves the root writable an account could
-// delete or move away whatever it held. A removal the guardian cannot write
-// to its ledger, or that it records while the account's part of the tree is
-// in a state the hook refuses, leaves the account's pending mark instead
-// (MarkForeignHookRemovalPending): metadata of the account's private
-// session store in the gateway's data directory, which no standard user can
-// reach and which needs no free space. While it is set the gateway denies
-// every guarded call of the account, so it publishes only blocks for it.
-// The guardian clears it once a later pass recorded an account-wide removal
-// in its ledger and revoked the account's records in a tree the hook trusts.
+// During such an outage the hook allows a call only when all of these hold,
+// and blocks otherwise:
 //
-// The lifecycle puts back the owner and access of the record folder. When
-// the root, a folder above it or anything in the tree was in a state the
-// hook refuses (another account could change it, for example move its
-// folder away while the guardian revoked it and bring it back after), even
-// when the root holds no account folder, the lifecycle first closes the root
-// to every account and then invalidates every record in it
-// (PublishedSessionTreeProblem, InvalidatePublishedSessionRecords), so
-// restoring the access does not restore trust in what that account could
-// have changed.
+//   - the record folder has exactly one key file that root, SYSTEM or
+//     Administrators own, and the hook's trust check accepts it and every
+//     folder above it;
+//   - the records of the agent process and of the session (every key part
+//     the call names) say not blocked, carry a MAC that verifies with that
+//     key, and are at most publishedSessionMaxAge old. A record the call
+//     needs that is missing, untrusted, corrupt or dead blocks. A blocking
+//     record denies with the gateway's reason, whatever its MAC;
+//   - the volume of the record folder is not read-only (where no key could
+//     be removed), and the key is the same at the end of the check.
+//
+// No removal state lives in this tree. The guardian's ledger, and an
+// account's pending mark (MarkForeignHookRemovalPending) for a removal the
+// guardian could not record, are in folders no standard user can reach.
 
 const (
-	// publishedSessionVersion is the record schema.
-	publishedSessionVersion = 1
+	// publishedSessionVersion is the record schema: 3 carries the MAC.
+	publishedSessionVersion = 3
 	// publishedSessionRecordLimit bounds one record.
 	publishedSessionRecordLimit = 8 << 10
 	// publishedSessionReasonLimit bounds the gateway reason a record keeps.
@@ -110,47 +103,84 @@ const (
 	// publishedSessionDirLimit bounds the records kept per account. A
 	// record pruned past it reads as missing, which blocks.
 	publishedSessionDirLimit = 1024
-	// publishedSessionDenySuffix replaces a record's .json for its deny
-	// marker.
-	publishedSessionDenySuffix = ".deny"
-	// publishedSessionMaxAge is the oldest answer the hook accepts, by the
-	// record's time and its modification time: the gateway's own session
-	// records last as long.
-	publishedSessionMaxAge = sessionRecordTTL
+	// PublishedSessionKeyInfix follows the record folder's name in the name
+	// of its key file.
+	PublishedSessionKeyInfix = ".key-"
+	// publishedSessionKeyBytes is the size of a key.
+	publishedSessionKeyBytes = 32
+	// publishedSessionMaxAge is the oldest answer the hook accepts during an
+	// outage. The gateway writes the record again at every exchange, so an
+	// agent in use keeps a fresh one; an outage that lasts longer blocks.
+	publishedSessionMaxAge = 15 * time.Minute
 	// publishedSessionClockSkew is how far after now the hook still accepts
-	// a record's time and modification time. The gateway and the hook read
-	// the same clock, so this only covers a small step back of it.
+	// a record's time. The gateway and the hook read the same clock, so this
+	// only covers a small step back of it.
 	publishedSessionClockSkew = time.Minute
-	// publishedSessionTreeLimit bounds the files PublishedSessionTreeProblem
-	// checks; a larger tree counts as one another account may have changed.
-	publishedSessionTreeLimit = 1 << 14
+	// publishedSessionKeyRemoveAttempts bounds how often a key file a
+	// reader holds for a moment is removed again.
+	publishedSessionKeyRemoveAttempts = 3
 )
 
-// publishedSessionRevokedTime is the modification time a revocation gives a
-// record it cannot delete: far older than publishedSessionMaxAge.
-var publishedSessionRevokedTime = time.Unix(0, 0).UTC()
-
-// publishedSessionRename replaces a record, publishedSessionRemove deletes
-// one, publishedSessionExpire sets its modification time to
-// publishedSessionRevokedTime and publishedSessionCreate creates a deny
-// marker (replaceable in tests, which stand in for a Windows reader that
-// holds a record open without delete sharing, and for a full volume).
+// publishedSessionRemoveKey removes a key file, publishedSessionCreateKeyFile
+// creates one and publishedSessionList lists a folder (replaceable in
+// tests, which stand in for a key file that cannot be removed or created
+// and a folder that cannot be listed).
 var (
-	publishedSessionRename = os.Rename
-	publishedSessionRemove = os.Remove
-	publishedSessionExpire = expirePublishedSessionRecord
-	publishedSessionCreate = func(name string) (*os.File, error) {
-		return os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	publishedSessionRemoveKey     = os.Remove
+	publishedSessionCreateKeyFile = createPublishedSessionKeyFile
+	publishedSessionList          = func(dir string) ([]string, error) {
+		folder, err := os.Open(dir)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = folder.Close() }()
+		return folder.Readdirnames(-1)
 	}
 )
 
+// publishedSessionKeyOwner reports whether the key file at path is a
+// regular file that root, SYSTEM or Administrators own
+// (publishedSessionKeyOwnerCheck). An error, other than a file that is not
+// a key at all, blocks.
+var (
+	publishedSessionKeyOwnerMu sync.RWMutex
+	publishedSessionKeyOwner   = publishedSessionKeyOwnerCheck
+)
+
+// OverridePublishedSessionKeyOwnerForTest replaces the owner check of key
+// files, for tests that cannot run as root or SYSTEM.
+func OverridePublishedSessionKeyOwnerForTest(check func(path string) (bool, error)) (restore func()) {
+	publishedSessionKeyOwnerMu.Lock()
+	previous := publishedSessionKeyOwner
+	publishedSessionKeyOwner = check
+	publishedSessionKeyOwnerMu.Unlock()
+	return func() {
+		publishedSessionKeyOwnerMu.Lock()
+		publishedSessionKeyOwner = previous
+		publishedSessionKeyOwnerMu.Unlock()
+	}
+}
+
+func publishedSessionKeyOwned(path string) (bool, error) {
+	publishedSessionKeyOwnerMu.RLock()
+	check := publishedSessionKeyOwner
+	publishedSessionKeyOwnerMu.RUnlock()
+	return check(path)
+}
+
+// publishedSessionVolumeReadOnly reports whether the volume of a path is
+// mounted read-only (replaceable in tests, which cannot mount one).
+var publishedSessionVolumeReadOnly = publishedSessionVolumeIsReadOnly
+
 // ErrPublishedSessionUnavailable is a protected session record that does
-// not prove the session unblocked: missing, unreadable, untrusted or
-// corrupt.
+// not prove the session unblocked: missing, unreadable, untrusted, corrupt,
+// stale or dead (its MAC does not verify with the current key).
 var ErrPublishedSessionUnavailable = errors.New("protected foreign-hook session record unavailable")
 
 // PublishedSessionRecord is the gateway's last answer for one agent process
-// ("p") or session ("s") of one connector.
+// ("p") or session ("s") of one connector. An allow carries the MAC
+// (publishedSessionMAC) made with the key that was current when the
+// gateway read its inputs.
 type PublishedSessionRecord struct {
 	Version   int    `json:"v"`
 	Connector string `json:"connector"`
@@ -159,16 +189,32 @@ type PublishedSessionRecord struct {
 	Blocked   bool   `json:"blocked"`
 	Reason    string `json:"reason,omitempty"`
 	At        string `json:"at"`
+	MAC       string `json:"mac,omitempty"`
 }
 
 // PublishedSessionTrust names the accounts besides root/SYSTEM and
 // Administrators that may own and write the protected record: the gateway
 // service uid (Linux, macOS; from the root-owned runtime descriptor) or
-// service account (Windows).
+// service account (Windows, which a key file lets remove it). A key file is
+// never the service's.
 type PublishedSessionTrust struct {
 	ServiceUID     int
 	ServiceAccount string
 }
+
+// SessionRecordKey is the key of a record folder: the key file and the
+// secret its name holds. The zero value is no key: an allow published with
+// it proves nothing.
+type SessionRecordKey struct {
+	path   string
+	secret []byte
+}
+
+// ID names the key (its file); "" for no key.
+func (k SessionRecordKey) ID() string { return k.path }
+
+// IsZero reports no key.
+func (k SessionRecordKey) IsZero() bool { return len(k.secret) == 0 }
 
 // PublishedSessionIdentityDir is the folder of one account below root: the
 // first 20 bytes of the SHA-256 of the canonical account identity (a
@@ -198,11 +244,6 @@ func publishedSessionPath(dir, connectorName, kind, id string) string {
 	return filepath.Join(dir, name)
 }
 
-// publishedSessionDenyPath is the deny marker of the record at path.
-func publishedSessionDenyPath(path string) string {
-	return strings.TrimSuffix(path, ".json") + publishedSessionDenySuffix
-}
-
 // publishedSessionConnector is a connector name that is safe in a record
 // file name.
 func publishedSessionConnector(name string) bool {
@@ -217,15 +258,300 @@ func publishedSessionConnector(name string) bool {
 	return true
 }
 
+// PublishedSessionKeyDir is the folder the key file of the record folder
+// root is in: the folder above root (on Linux and macOS the hook socket
+// folder, which only root and the gateway service can change; on Windows
+// %ProgramData%\Cisco, where no standard user may rename or delete a file
+// another account made).
+func PublishedSessionKeyDir(root string) (string, bool) {
+	dir, _, ok := publishedSessionKeyPlace(root)
+	return dir, ok
+}
+
+// publishedSessionKeyPlace is the key folder of root and the prefix of its
+// key file's name.
+func publishedSessionKeyPlace(root string) (dir, prefix string, ok bool) {
+	root = strings.TrimSpace(root)
+	if root == "" || !filepath.IsAbs(root) {
+		return "", "", false
+	}
+	root = filepath.Clean(root)
+	if root == filepath.Dir(root) {
+		return "", "", false
+	}
+	return filepath.Dir(root), filepath.Base(root) + PublishedSessionKeyInfix, true
+}
+
+// IsPublishedSessionKeyName reports a file name that has the form of a key
+// file name: <anything>.key-<64 lower-case hex>.
+func IsPublishedSessionKeyName(name string) bool {
+	i := strings.LastIndex(name, PublishedSessionKeyInfix)
+	if i <= 0 {
+		return false
+	}
+	_, ok := publishedSessionKeySecret(name[i+len(PublishedSessionKeyInfix):])
+	return ok
+}
+
+// publishedSessionKeySecret decodes the secret of a key file name's suffix.
+func publishedSessionKeySecret(suffix string) ([]byte, bool) {
+	if len(suffix) != 2*publishedSessionKeyBytes || strings.ToLower(suffix) != suffix {
+		return nil, false
+	}
+	secret, err := hex.DecodeString(suffix)
+	return secret, err == nil
+}
+
+// publishedSessionKeys lists the key files of the record folder root that
+// root, SYSTEM or Administrators own. A file with the key prefix that
+// another account owns is not a key (on Windows a standard user may create
+// one in %ProgramData%\Cisco) and is skipped; a key folder that cannot be
+// listed, or a file whose owner cannot be read, is an error.
+func publishedSessionKeys(root string) ([]SessionRecordKey, error) {
+	dir, prefix, ok := publishedSessionKeyPlace(root)
+	if !ok {
+		return nil, fmt.Errorf("no protected session record folder %q", root)
+	}
+	names, err := publishedSessionList(dir)
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(names)
+	var keys []SessionRecordKey
+	for _, name := range names {
+		if !hasPrefixFold(name, prefix) {
+			continue
+		}
+		secret, ok := publishedSessionKeySecret(name[len(prefix):])
+		if !ok {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		owned, err := publishedSessionKeyOwned(path)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+		if owned {
+			keys = append(keys, SessionRecordKey{path: path, secret: secret})
+		}
+	}
+	return keys, nil
+}
+
+// ReadPublishedSessionKey is the current key of the record folder root:
+// its one key file. None, more than one, or a key folder that cannot be
+// read is an error; an allow published without a key proves nothing.
+func ReadPublishedSessionKey(root string) (SessionRecordKey, error) {
+	keys, err := publishedSessionKeys(root)
+	if err != nil {
+		return SessionRecordKey{}, err
+	}
+	switch len(keys) {
+	case 1:
+		return keys[0], nil
+	case 0:
+		return SessionRecordKey{}, fmt.Errorf("the protected session record folder %s has no key", root)
+	}
+	return SessionRecordKey{}, fmt.Errorf("the protected session record folder %s has %d keys", root, len(keys))
+}
+
+// readPublishedSessionKeyForHook is ReadPublishedSessionKey after trust
+// accepted the key file and every folder above it
+// (ValidatePublishedSessionPath, which also requires a root, SYSTEM or
+// Administrators owner).
+func readPublishedSessionKeyForHook(root string, trust func(string) error) (SessionRecordKey, error) {
+	key, err := ReadPublishedSessionKey(root)
+	if err != nil {
+		return SessionRecordKey{}, err
+	}
+	if err := trust(key.path); err != nil {
+		return SessionRecordKey{}, err
+	}
+	return key, nil
+}
+
+// KillPublishedSessionKey removes every key file of the record folder root,
+// so that no record written before proves anything during an outage, and
+// flushes the key folder. Each removal is one unlink. The gateway calls it
+// before it records a block and before it publishes a denial; the guardian
+// and the lifecycle through RetirePublishedSessionKey. A key folder that
+// does not exist has no key. A key file that is still there is an error.
+func KillPublishedSessionKey(root string) error {
+	dir, _, ok := publishedSessionKeyPlace(root)
+	if !ok {
+		return fmt.Errorf("no protected session record folder %q", root)
+	}
+	keys, err := publishedSessionKeys(root)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, key := range keys {
+		for attempt := 1; ; attempt++ {
+			err := publishedSessionRemoveKey(key.path)
+			if err == nil || errors.Is(err, fs.ErrNotExist) {
+				break
+			}
+			if attempt == publishedSessionKeyRemoveAttempts {
+				errs = append(errs, fmt.Errorf("remove the protected session record key %s: %w", key.path, err))
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	if len(keys) != 0 {
+		if err := publishedSessionSyncDir(dir); err != nil {
+			errs = append(errs, fmt.Errorf("flush %s: %w", dir, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// RetirePublishedSessionKey is KillPublishedSessionKey for root or SYSTEM.
+// When a key file cannot be removed, it adds a second one next to it: the
+// hook trusts no record folder with more than one key, so the earlier
+// records still prove nothing. The error says which of the two took.
+func RetirePublishedSessionKey(root string, trust PublishedSessionTrust) error {
+	err := KillPublishedSessionKey(root)
+	if err == nil {
+		return nil
+	}
+	if _, decoyErr := createPublishedSessionKey(root, trust); decoyErr != nil {
+		return fmt.Errorf("%w; no second key could be added either, so an allow written before may still pass during a gateway outage: %v", err, decoyErr)
+	}
+	return fmt.Errorf("%w; a second key was added, so the hook trusts neither until a later run removes both", err)
+}
+
+// CreatePublishedSessionKey starts a new key of the record folder root
+// (root or SYSTEM only): it retires every key (RetirePublishedSessionKey)
+// and creates a key file with a fresh random name, then flushes the key
+// folder. Only an allow published after it, with removals read after it,
+// proves anything. A key file that could not be removed stays next to the
+// new one, which the hook refuses. The record folder must exist.
+func CreatePublishedSessionKey(root string, trust PublishedSessionTrust) error {
+	info, err := os.Lstat(strings.TrimSpace(root))
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+		return fmt.Errorf("%s is not a folder", root)
+	}
+	if err := KillPublishedSessionKey(root); err != nil {
+		// Whatever the new key is, the hook refuses a folder with two.
+		_, createErr := createPublishedSessionKey(root, trust)
+		return errors.Join(err, createErr)
+	}
+	_, err = createPublishedSessionKey(root, trust)
+	return err
+}
+
+// EnsurePublishedSessionKey gives the record folder root a key when it has
+// none, or more than one (CreatePublishedSessionKey). The hook guardian
+// runs it at every pass, so outage allows work again after a gateway
+// removed the key. A new key never makes an earlier record count, so this
+// is safe at any time. A record folder that does not exist gets none.
+func EnsurePublishedSessionKey(root string, trust PublishedSessionTrust) error {
+	info, err := os.Lstat(strings.TrimSpace(root))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+		return nil
+	}
+	if keys, err := publishedSessionKeys(root); err == nil && len(keys) == 1 {
+		return nil
+	}
+	return CreatePublishedSessionKey(root, trust)
+}
+
+// createPublishedSessionKey creates one key file of root with a fresh
+// random name (createPublishedSessionKeyFile: the name appears at once, in
+// one create that fails when it exists) and flushes the key folder.
+func createPublishedSessionKey(root string, trust PublishedSessionTrust) (string, error) {
+	dir, prefix, ok := publishedSessionKeyPlace(root)
+	if !ok {
+		return "", fmt.Errorf("no protected session record folder %q", root)
+	}
+	var secret [publishedSessionKeyBytes]byte
+	if _, err := rand.Read(secret[:]); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, prefix+hex.EncodeToString(secret[:]))
+	if err := publishedSessionCreateKeyFile(path, trust); err != nil {
+		return "", fmt.Errorf("create the protected session record key %s: %w", path, err)
+	}
+	if err := publishedSessionSyncDir(dir); err != nil {
+		return path, fmt.Errorf("flush %s: %w", dir, err)
+	}
+	return path, nil
+}
+
+// RemovePublishedSessionKeys removes every key file of the record folder
+// root and every file with its key prefix that this account may remove:
+// for uninstall, which removes the folder.
+func RemovePublishedSessionKeys(root string) error {
+	if err := KillPublishedSessionKey(root); err != nil {
+		return err
+	}
+	dir, prefix, _ := publishedSessionKeyPlace(root)
+	names, err := publishedSessionList(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		if hasPrefixFold(name, prefix) && IsPublishedSessionKeyName(name) {
+			_ = os.Remove(filepath.Join(dir, name))
+		}
+	}
+	return nil
+}
+
+// publishedSessionMAC is the MAC of record for the account identity
+// (canonical) with secret: HMAC-SHA256 over every field, each with its
+// length.
+func publishedSessionMAC(secret []byte, identity string, record PublishedSessionRecord) string {
+	mac := hmac.New(sha256.New, secret)
+	for _, field := range []string{
+		"defenseclaw protected foreign-hook session record", strconv.Itoa(record.Version), identity,
+		record.Connector, record.Kind, record.ID, strconv.FormatBool(record.Blocked), record.Reason, record.At,
+	} {
+		var size [4]byte
+		binary.BigEndian.PutUint32(size[:], uint32(len(field)))
+		_, _ = mac.Write(size[:])
+		_, _ = mac.Write([]byte(field))
+	}
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// publishedSessionMACValid reports a record whose MAC verifies with key.
+func publishedSessionMACValid(key SessionRecordKey, identity string, record PublishedSessionRecord) bool {
+	if key.IsZero() || record.MAC == "" {
+		return false
+	}
+	want := publishedSessionMAC(key.secret, identity, record)
+	return hmac.Equal([]byte(want), []byte(record.MAC))
+}
+
 // PublishForeignHookSessionDecision writes the gateway's answer for one
-// session exchange into the protected record of identity under root: a
+// session exchange into the protected records of identity under root: a
 // denial records the agent process and the session as blocked, an allow
-// records them as not blocked (which clears an earlier block, and the deny
-// marker a revocation left). A denial that cannot be written revokes the
-// earlier record (revokePublishedSessionRecord), so it never keeps proving
-// the session unblocked. root missing is not an error: the hook then finds
-// no record and blocks during an outage.
-func PublishForeignHookSessionDecision(root, identity string, key SessionKey, decision GuardDecision, now time.Time) error {
+// records them as not blocked, with a MAC made with recordKey, the key the
+// gateway read before it read the guardian's removals
+// (ReadPublishedSessionKey). An allow without a key proves nothing. A
+// denial needs no MAC: the gateway removed the key before it (an earlier
+// allow is dead), and a blocking record denies whatever its MAC. root
+// missing is not an error: the hook then finds no record and blocks during
+// an outage.
+func PublishForeignHookSessionDecision(root, identity string, key SessionKey, decision GuardDecision, recordKey SessionRecordKey, now time.Time) error {
 	if strings.TrimSpace(root) == "" {
 		return nil
 	}
@@ -241,10 +567,40 @@ func PublishForeignHookSessionDecision(root, identity string, key SessionKey, de
 		return nil
 	}
 	canonical, _ := connector.CanonicalUserScopedIdentity(identity)
-	ensureErr := publishedSessionPrepare(root, dir, canonical)
+	if err := publishedSessionPrepare(root, dir, canonical); err != nil {
+		// A folder that is not ours is not written to.
+		return err
+	}
 	if now.IsZero() {
 		now = time.Now()
 	}
+	var errs []error
+	created := false
+	for _, entry := range publishedSessionAnswer(dir, canonical, name, key, decision, recordKey, now) {
+		if _, err := os.Lstat(entry.path); errors.Is(err, fs.ErrNotExist) {
+			created = true
+		}
+		if err := writePublishedSessionRecord(entry.path, entry.record); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if created {
+		prunePublishedSessionRecords(dir, now)
+	}
+	return errors.Join(errs...)
+}
+
+// publishedSessionEntry is one record of an answer and where it goes.
+type publishedSessionEntry struct {
+	path   string
+	record PublishedSessionRecord
+}
+
+// publishedSessionAnswer is the records of one answer of the gateway for
+// key in the account folder dir of the account canonical: a denial blocks,
+// with no MAC, and an allow carries the MAC made with recordKey (none
+// without a key).
+func publishedSessionAnswer(dir, canonical, name string, key SessionKey, decision GuardDecision, recordKey SessionRecordKey, now time.Time) []publishedSessionEntry {
 	record := PublishedSessionRecord{
 		Version:   publishedSessionVersion,
 		Connector: name,
@@ -254,284 +610,112 @@ func PublishForeignHookSessionDecision(root, identity string, key SessionKey, de
 	if decision.Deny {
 		record.Reason = clipPublishedReason(decision.Reason)
 	}
-	var errs []error
-	if ensureErr != nil {
-		errs = append(errs, ensureErr)
-	}
-	created := false
+	var entries []publishedSessionEntry
 	for _, entry := range []struct{ kind, id string }{{sessionKindProcess, key.Process}, {sessionKindSession, key.Session}} {
 		if entry.id == "" {
 			continue
 		}
-		path := publishedSessionPath(dir, name, entry.kind, entry.id)
-		record.Kind, record.ID = entry.kind, entry.id
-		if ensureErr != nil {
-			// A folder that is not ours is not written to; a blocked answer
-			// must still not leave an allow behind.
-			if decision.Deny {
-				if err := revokePublishedSessionRecord(path, record); err != nil {
-					errs = append(errs, err)
-				}
-			}
-			continue
+		record.Kind, record.ID, record.MAC = entry.kind, entry.id, ""
+		if !decision.Deny && !recordKey.IsZero() {
+			record.MAC = publishedSessionMAC(recordKey.secret, canonical, record)
 		}
-		if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
-			created = true
-		}
-		if err := writePublishedSessionRecord(path, record); err != nil {
-			errs = append(errs, err)
-			if decision.Deny {
-				if err := revokePublishedSessionRecord(path, record); err != nil {
-					errs = append(errs, err)
-				}
-			} else if err := publishedSessionRemove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				// The earlier answer stays: an allow, or a block that
-				// still denies.
-				errs = append(errs, err)
-			}
-			continue
-		}
-		if !decision.Deny {
-			// The record now holds the allow, so the marker of an earlier
-			// revocation goes. One that cannot be removed keeps denying.
-			if err := publishedSessionRemove(publishedSessionDenyPath(path)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				errs = append(errs, err)
-			}
-		}
+		entries = append(entries, publishedSessionEntry{publishedSessionPath(dir, name, entry.kind, entry.id), record})
 	}
-	if created && ensureErr == nil {
-		prunePublishedSessionRecords(dir, now)
-	}
-	return errors.Join(errs...)
+	return entries
 }
 
-// RemovePublishedForeignHookSessions revokes the protected records of
-// identity for connectors (revokePublishedSessionRecord). The guardian calls
-// it as root or SYSTEM after it removed a hook of one of them and recorded
-// the removal in its ledger: the gateway denies every agent process of the
-// connector that started before the removal, so no earlier allow may stand
-// for an outage. Revoking after the ledger write is what keeps an exchange
-// the gateway answered from the earlier ledger from leaving an allow behind
-// (the gateway withdraws an answer whose ledger changed before it was
-// published; WithdrawPublishedForeignHookSession).
-func RemovePublishedForeignHookSessions(root, identity string, connectors []string) error {
+// WritePublishedSessionRecordsForTest writes the records the gateway
+// publishes for one answer, with the record folder's current key (none when
+// it has none), into an account folder it creates without the gateway's
+// access list: for tests in other packages, which cannot run as the gateway
+// service or give an access-list entry.
+func WritePublishedSessionRecordsForTest(root, identity string, key SessionKey, decision GuardDecision, now time.Time) error {
 	dir, ok := PublishedSessionIdentityDir(root, identity)
-	if !ok {
-		return nil
-	}
-	info, err := os.Lstat(dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return os.Remove(dir)
-	}
-	names := make([]string, 0, len(connectors))
-	for _, name := range connectors {
-		if name = strings.ToLower(strings.TrimSpace(name)); publishedSessionConnector(name) {
-			names = append(names, name)
-		}
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return err
-	}
-	at := time.Now().UTC().Format(time.RFC3339)
-	var errs []error
-	for _, entry := range entries {
-		file := entry.Name()
-		if !strings.HasSuffix(file, ".json") {
-			// A deny marker only denies; a temporary file proves nothing.
-			continue
-		}
-		for _, name := range names {
-			if strings.HasPrefix(file, name+"-") {
-				record := PublishedSessionRecord{Version: publishedSessionVersion, Connector: name, Blocked: true, At: at}
-				if err := revokePublishedSessionRecord(filepath.Join(dir, file), record); err != nil {
-					errs = append(errs, err)
-				}
-				break
-			}
-		}
-	}
-	return errors.Join(errs...)
-}
-
-// WithdrawPublishedForeignHookSession revokes the protected records of one
-// session key of identity, so during an outage the hook finds no answer for
-// its agent process or session and blocks. The gateway calls it when the
-// guardian changed its removal ledger after the exchange had read it: that
-// answer may allow a process the new ledger denies.
-func WithdrawPublishedForeignHookSession(root, identity string, key SessionKey) error {
 	name := strings.TrimSpace(key.Connector)
-	dir, ok := PublishedSessionIdentityDir(root, identity)
 	if !ok || !key.valid() || !publishedSessionConnector(name) {
-		return nil
+		return errors.New("invalid account or session key")
 	}
-	if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
-		return nil
+	canonical, _ := connector.CanonicalUserScopedIdentity(identity)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
 	}
-	at := time.Now().UTC().Format(time.RFC3339)
+	recordKey, _ := ReadPublishedSessionKey(root)
 	var errs []error
-	for _, entry := range []struct{ kind, id string }{{sessionKindProcess, key.Process}, {sessionKindSession, key.Session}} {
-		if entry.id == "" {
-			continue
-		}
-		record := PublishedSessionRecord{Version: publishedSessionVersion, Connector: name, Kind: entry.kind, ID: entry.id, Blocked: true, At: at}
-		if err := revokePublishedSessionRecord(publishedSessionPath(dir, name, entry.kind, entry.id), record); err != nil {
-			errs = append(errs, err)
-		}
+	for _, entry := range publishedSessionAnswer(dir, canonical, name, key, decision, recordKey, now) {
+		errs = append(errs, writePublishedSessionRecord(entry.path, entry.record))
 	}
 	return errors.Join(errs...)
-}
-
-// revokePublishedSessionRecord makes the record at path stop proving its
-// agent process or session unblocked. It deletes the record; when that
-// fails (on Windows a reader that holds the record open without delete
-// sharing refuses the deletion, and refused the replacement before it), it
-// expires the record (publishedSessionExpire) and writes its deny marker,
-// both of which the hook checks after it read the record. Either one
-// revokes, so a full volume that refuses the marker does not leave the
-// allow standing. record (blocked) is the marker's content.
-func revokePublishedSessionRecord(path string, record PublishedSessionRecord) error {
-	err := publishedSessionRemove(path)
-	if err == nil || errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	expireErr := publishedSessionExpire(path)
-	markErr := writePublishedSessionDenyMarker(path, record)
-	if expireErr == nil || errors.Is(expireErr, fs.ErrNotExist) || markErr == nil {
-		return nil
-	}
-	return errors.Join(err, expireErr, markErr)
-}
-
-// writePublishedSessionDenyMarker creates the deny marker of the record at
-// path in place: no temporary file and no rename, which a reader could
-// refuse. The marker denies by existing; its content only carries the
-// reason, so a marker that is already there is enough.
-func writePublishedSessionDenyMarker(path string, record PublishedSessionRecord) error {
-	marker := publishedSessionDenyPath(path)
-	parent := filepath.Dir(marker)
-	info, err := os.Lstat(parent)
-	if err != nil {
-		return err
-	}
-	if info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 || !info.IsDir() {
-		return fmt.Errorf("%s is not a folder", parent)
-	}
-	record.Blocked = true
-	data, err := json.Marshal(record)
-	if err != nil {
-		return err
-	}
-	file, err := publishedSessionCreate(marker)
-	if err != nil {
-		if _, statErr := os.Lstat(marker); statErr == nil {
-			return nil
-		}
-		return err
-	}
-	_ = publishedSessionFileMode(file)
-	_, _ = file.Write(data)
-	_ = file.Close()
-	return nil
 }
 
 // CheckPublishedForeignHookSession decides a guarded call during a gateway
-// outage from the protected record of identity under root. It returns the
-// scan's decision when a trusted record of the agent process proves it not
-// blocked, no record or deny marker blocks it, and every record it read is
-// still in place and fresh (publishedSessionMaxAge, publishedSessionClockSkew);
-// a denial with the gateway's reason when a record or marker blocks it; and
-// ErrPublishedSessionUnavailable otherwise. A session record alone never
-// proves an allow: an agent process the hook cannot name may be one that
-// started during the outage and resumed the session ID. trust checks a
-// record path and every folder above it (ValidatePublishedSessionPath in
-// production).
+// outage from the protected records of identity under root. It returns the
+// scan's decision when the records of the agent process and of the session
+// (each the call names) are trusted, not blocked, fresh, and carry a MAC
+// that verifies with the record folder's one key, and the volume is not
+// read-only; a denial with the gateway's reason when a record blocks it;
+// and ErrPublishedSessionUnavailable otherwise. An agent process the hook
+// cannot name is never proven: it may be one that started during the
+// outage and resumed the session ID. trust checks a record or key file path
+// and every folder above it (ValidatePublishedSessionPath in production).
 func CheckPublishedForeignHookSession(root, identity string, key SessionKey, decision GuardDecision, trust func(path string) error) (GuardDecision, error) {
 	name := strings.TrimSpace(key.Connector)
 	dir, ok := PublishedSessionIdentityDir(root, identity)
+	canonical, _ := connector.CanonicalUserScopedIdentity(identity)
 	if !ok || !key.valid() || !publishedSessionConnector(name) || trust == nil {
 		return decision, ErrPublishedSessionUnavailable
 	}
-	now := time.Now()
-	proven := false
-	type readRecord struct {
-		path string
-		info os.FileInfo
-		at   time.Time
+	// The key first: a record read after it was written under it or under
+	// an earlier one.
+	recordKey, err := readPublishedSessionKeyForHook(root, trust)
+	if err != nil {
+		return decision, fmt.Errorf("%w: the record folder's key: %v", ErrPublishedSessionUnavailable, err)
 	}
-	var read []readRecord
+	now := time.Now()
+	var allows []PublishedSessionRecord
+	missing := key.Process == ""
 	for _, entry := range []struct{ kind, id string }{{sessionKindProcess, key.Process}, {sessionKindSession, key.Session}} {
 		if entry.id == "" {
 			continue
 		}
 		path := publishedSessionPath(dir, name, entry.kind, entry.id)
-		record, info, exists, err := readPublishedSessionRecord(path, trust)
+		record, exists, err := readPublishedSessionRecord(path, trust)
 		if err != nil {
 			return decision, fmt.Errorf("%w: %v", ErrPublishedSessionUnavailable, err)
 		}
 		if !exists {
+			missing = true
 			continue
 		}
 		if record.Version != publishedSessionVersion || record.Connector != name || record.Kind != entry.kind || record.ID != entry.id {
 			return decision, fmt.Errorf("%w: %s does not belong to this agent session", ErrPublishedSessionUnavailable, path)
 		}
-		at, err := time.Parse(time.RFC3339, record.At)
-		if err != nil {
-			return decision, fmt.Errorf("%w: %s has no valid time", ErrPublishedSessionUnavailable, path)
-		}
 		if record.Blocked {
 			return publishedBlockDecision(decision, name, record), nil
 		}
-		read = append(read, readRecord{path, info, at})
-		// Only the process record is proof: the gateway carries a block of
-		// the process to every session it runs, and an agent process is
-		// never another one.
-		if entry.kind == sessionKindProcess {
-			proven = true
+		allows = append(allows, record)
+	}
+	if missing {
+		return decision, fmt.Errorf("%w: no record proves this agent process and session", ErrPublishedSessionUnavailable)
+	}
+	for _, record := range allows {
+		at, err := time.Parse(time.RFC3339, record.At)
+		if err != nil || !publishedSessionAgeFresh(now.Sub(at)) {
+			return decision, fmt.Errorf("%w: the %s record is stale or has no valid time", ErrPublishedSessionUnavailable, record.Kind)
+		}
+		if !publishedSessionMACValid(recordKey, canonical, record) {
+			return decision, fmt.Errorf("%w: the %s record was not written under the record folder's current key", ErrPublishedSessionUnavailable, record.Kind)
 		}
 	}
-	// The deny markers are checked after the records were read: a
-	// revocation that could not delete or replace a record wrote its marker
-	// before it returned, so a record read before that is overruled here.
-	for _, entry := range []struct{ kind, id string }{{sessionKindProcess, key.Process}, {sessionKindSession, key.Session}} {
-		if entry.id == "" {
-			continue
-		}
-		path := publishedSessionPath(dir, name, entry.kind, entry.id)
-		record, denied, err := readPublishedSessionDenyMarker(path, name, entry.kind, entry.id, trust)
-		if err != nil {
-			return decision, fmt.Errorf("%w: %v", ErrPublishedSessionUnavailable, err)
-		}
-		if denied {
-			return publishedBlockDecision(decision, name, record), nil
-		}
+	// A record folder on a volume that is read-only proves nothing: no key
+	// could be removed there.
+	if readOnly, err := publishedSessionVolumeReadOnly(root); err != nil || readOnly {
+		return decision, fmt.Errorf("%w: the record folder's volume is read-only, or its state cannot be read: %v", ErrPublishedSessionUnavailable, err)
 	}
-	if !proven {
-		return decision, ErrPublishedSessionUnavailable
-	}
-	// Last, every record read must still be the same file, and fresh: a
-	// revocation that could not delete a record expired it before it
-	// returned, so a record read before that is overruled here too.
-	for _, entry := range read {
-		info, err := os.Lstat(entry.path)
-		if err != nil || !os.SameFile(entry.info, info) || !publishedSessionFresh(info.ModTime(), entry.at, now) ||
-			!publishedSessionFresh(entry.info.ModTime(), entry.at, now) {
-			return decision, fmt.Errorf("%w: %s was revoked, replaced or expired", ErrPublishedSessionUnavailable, entry.path)
-		}
+	// Last, the key again: one removed while this check ran ends the allow.
+	if again, err := readPublishedSessionKeyForHook(root, trust); err != nil || again.ID() != recordKey.ID() {
+		return decision, fmt.Errorf("%w: the record folder's key changed while the record was checked", ErrPublishedSessionUnavailable)
 	}
 	return decision, nil
-}
-
-// publishedSessionFresh reports an answer the gateway gave, and a record it
-// wrote, no longer than publishedSessionMaxAge ago.
-func publishedSessionFresh(modified, at, now time.Time) bool {
-	return publishedSessionAgeFresh(now.Sub(modified)) && publishedSessionAgeFresh(now.Sub(at))
 }
 
 // publishedSessionAgeFresh reports an age within publishedSessionMaxAge
@@ -541,24 +725,6 @@ func publishedSessionFresh(modified, at, now time.Time) bool {
 // the limit.
 func publishedSessionAgeFresh(age time.Duration) bool {
 	return age >= -publishedSessionClockSkew && age <= publishedSessionMaxAge
-}
-
-// readPublishedSessionDenyMarker reports whether the record at path has a
-// deny marker, with the marker's record when it is a trusted record of this
-// key (else an empty one, which gives the generic reason). Anything at the
-// marker path denies.
-func readPublishedSessionDenyMarker(path, connectorName, kind, id string, trust func(string) error) (PublishedSessionRecord, bool, error) {
-	marker := publishedSessionDenyPath(path)
-	if _, err := os.Lstat(marker); errors.Is(err, fs.ErrNotExist) {
-		return PublishedSessionRecord{}, false, nil
-	} else if err != nil {
-		return PublishedSessionRecord{}, false, err
-	}
-	record, _, _, err := readPublishedSessionRecord(marker, trust)
-	if err != nil || record.Version != publishedSessionVersion || record.Connector != connectorName || record.Kind != kind || record.ID != id {
-		return PublishedSessionRecord{}, true, nil
-	}
-	return record, true, nil
 }
 
 // publishedBlockDecision denies a call the gateway's record blocks, with the
@@ -600,41 +766,34 @@ func clipPublishedReason(reason string) string {
 }
 
 // readPublishedSessionRecord reads one record after trust accepted it and
-// every folder above it, with the file information of the record it read.
-// A missing record does not exist; anything else that cannot be checked,
-// read or decoded is an error.
-func readPublishedSessionRecord(path string, trust func(string) error) (PublishedSessionRecord, os.FileInfo, bool, error) {
-	info, err := os.Lstat(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		// The folders above must be trusted for "missing" to mean missing;
-		// either way the record proves nothing.
-		return PublishedSessionRecord{}, nil, false, nil
+// every folder above it. A missing record does not exist; anything else
+// that cannot be checked, read or decoded is an error.
+func readPublishedSessionRecord(path string, trust func(string) error) (PublishedSessionRecord, bool, error) {
+	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
+		return PublishedSessionRecord{}, false, nil
 	} else if err != nil {
-		return PublishedSessionRecord{}, nil, true, err
+		return PublishedSessionRecord{}, true, err
 	}
-	// SameFile reads the Windows file ID on first use, by path: read it now,
-	// while the path still names the record this information describes.
-	_ = os.SameFile(info, info)
 	if err := trust(path); err != nil {
-		return PublishedSessionRecord{}, nil, true, err
+		return PublishedSessionRecord{}, true, err
 	}
 	data, exists, err := readGuardFileLimit(path, publishedSessionRecordLimit)
 	if err != nil {
-		return PublishedSessionRecord{}, nil, true, err
+		return PublishedSessionRecord{}, true, err
 	}
 	if !exists {
-		return PublishedSessionRecord{}, nil, false, nil
+		return PublishedSessionRecord{}, false, nil
 	}
 	var record PublishedSessionRecord
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&record); err != nil {
-		return PublishedSessionRecord{}, nil, true, fmt.Errorf("%s: %w", path, err)
+		return PublishedSessionRecord{}, true, fmt.Errorf("%s: %w", path, err)
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return PublishedSessionRecord{}, nil, true, fmt.Errorf("%s: trailing content", path)
+		return PublishedSessionRecord{}, true, fmt.Errorf("%s: trailing content", path)
 	}
-	return record, info, true, nil
+	return record, true, nil
 }
 
 // writePublishedSessionRecord replaces one record atomically in its folder.
@@ -678,7 +837,7 @@ func writePublishedSessionRecord(path string, record PublishedSessionRecord) err
 	// A hook that is reading the record holds it open; on Windows that
 	// refuses the replace for a moment.
 	for attempt := 0; ; attempt++ {
-		err := publishedSessionRename(name, path)
+		err := os.Rename(name, path)
 		if err == nil {
 			return nil
 		}
@@ -690,12 +849,10 @@ func writePublishedSessionRecord(path string, record PublishedSessionRecord) err
 	}
 }
 
-// prunePublishedSessionRecords removes records older than sessionRecordTTL
-// or dated after now (publishedSessionAgeFresh) and, past
-// publishedSessionDirLimit, the oldest ones, plus temporary files
-// a crashed writer left. A pruned record reads as missing, which blocks. A
-// deny marker goes only once its record is gone: while the record stays (a
-// reader may hold it open), the marker keeps it from proving an allow.
+// prunePublishedSessionRecords removes records older than
+// publishedSessionMaxAge or dated after now (publishedSessionAgeFresh) and,
+// past publishedSessionDirLimit, the oldest ones, plus temporary files a
+// crashed writer left. A pruned record reads as missing, which blocks.
 func prunePublishedSessionRecords(dir string, now time.Time) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -706,24 +863,12 @@ func prunePublishedSessionRecords(dir string, now time.Time) {
 		mod  time.Time
 	}
 	var kept []aged
-	var markers []string
-	defer func() {
-		for _, marker := range markers {
-			if _, err := os.Lstat(strings.TrimSuffix(marker, publishedSessionDenySuffix) + ".json"); errors.Is(err, fs.ErrNotExist) {
-				_ = os.Remove(marker)
-			}
-		}
-	}()
 	for _, entry := range entries {
 		info, err := entry.Info()
 		if err != nil || !info.Mode().IsRegular() {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
-		if strings.HasSuffix(entry.Name(), publishedSessionDenySuffix) {
-			markers = append(markers, path)
-			continue
-		}
 		if strings.HasPrefix(entry.Name(), ".") {
 			if now.Sub(info.ModTime()) > time.Hour {
 				_ = os.Remove(path)
@@ -731,9 +876,7 @@ func prunePublishedSessionRecords(dir string, now time.Time) {
 			continue
 		}
 		if !publishedSessionAgeFresh(now.Sub(info.ModTime())) {
-			// Past its TTL, or dated after now. A reader may hold it open;
-			// then it stays expired, and its marker stays too.
-			_ = publishedSessionRemove(path)
+			_ = os.Remove(path)
 			continue
 		}
 		kept = append(kept, aged{path, info.ModTime()})
@@ -743,10 +886,14 @@ func prunePublishedSessionRecords(dir string, now time.Time) {
 	}
 	sort.Slice(kept, func(i, j int) bool { return kept[i].mod.Before(kept[j].mod) })
 	for _, entry := range kept[:len(kept)-publishedSessionDirLimit] {
-		if publishedSessionRemove(entry.path) != nil {
-			_ = publishedSessionExpire(entry.path)
-		}
+		_ = os.Remove(entry.path)
 	}
+}
+
+// hasPrefixFold reports whether name starts with prefix, ignoring case (the
+// Windows file system does).
+func hasPrefixFold(name, prefix string) bool {
+	return len(name) >= len(prefix) && strings.EqualFold(name[:len(prefix)], prefix)
 }
 
 // ForeignHookSessionStoreDir is the gateway's private session store of one
@@ -774,13 +921,12 @@ func foreignHookRemovalPendingDir(dataDir, identity string) (string, bool) {
 // ForeignHookRemovalPending reports whether the guardian holds identity's
 // guarded calls closed (MarkForeignHookRemovalPending): it removed one of
 // the account's hooks and could not record the removal in its ledger yet,
-// or could not trust its revocation of the account's protected session
-// records. The mark is metadata of the account's private session store
-// under the gateway's data directory dataDir (ForeignHookSessionStoreDir),
-// out of every standard user's reach, so no account can clear it, whatever
-// it can do to the record tree. While it is set the gateway denies every
-// guarded call of the account. A store that is not a folder or cannot be
-// inspected is an error, which denies the same way.
+// or could not remove the record key before it. The mark is metadata of
+// the account's private session store under the gateway's data directory
+// dataDir (ForeignHookSessionStoreDir), out of every standard user's reach.
+// While it is set the gateway denies every guarded call of the account. A
+// store that is not a folder or cannot be inspected is an error, which
+// denies the same way.
 func ForeignHookRemovalPending(dataDir, identity string) (bool, error) {
 	dir, ok := foreignHookRemovalPendingDir(dataDir, identity)
 	if !ok {
@@ -802,12 +948,11 @@ func ForeignHookRemovalPending(dataDir, identity string) (bool, error) {
 // MarkForeignHookRemovalPending holds identity's guarded calls closed
 // (ForeignHookRemovalPending) until ClearForeignHookRemovalPending. The
 // guardian (root or SYSTEM) calls it when its ledger did not take a
-// removal, and when it revoked the account's records in a tree the hook
-// refuses: another account could have moved the account's folder away and
-// bring it back once the access is put back. The mark needs no free space
-// (publishedSessionSetPending), so the failure that refused the ledger does
-// not refuse it. A missing store is created for it, owned like the data
-// directory, so the gateway can use it once the mark is cleared.
+// removal, and when it could not remove the record key before one. The
+// mark needs no free space (publishedSessionSetPending), so the failure
+// that refused the ledger does not refuse it. A missing store is created
+// for it, owned like the data directory, so the gateway can use it once
+// the mark is cleared.
 func MarkForeignHookRemovalPending(dataDir, identity string) error {
 	dir, ok := foreignHookRemovalPendingDir(dataDir, identity)
 	if !ok {
@@ -830,14 +975,11 @@ func MarkForeignHookRemovalPending(dataDir, identity string) error {
 }
 
 // ClearForeignHookRemovalPending ends the hold of
-// MarkForeignHookRemovalPending once the guardian's ledger names an
-// account-wide removal that covers it and the account's part of the record
-// tree under root is one the hook trusts. The account's records are revoked
-// first (the ledger now denies the agent processes they were answers for),
-// and the emptied record folder goes, so the gateway makes its own again. A
-// record that cannot be revoked keeps the mark. An empty store (one the
-// mark created) goes too.
-func ClearForeignHookRemovalPending(dataDir, root, identity string) error {
+// MarkForeignHookRemovalPending. The guardian calls it once its ledger names
+// an account-wide removal that covers the hold, written after it removed
+// the record key, so no allow written before, or while the account was
+// held, proves anything. An empty store (one the mark created) goes too.
+func ClearForeignHookRemovalPending(dataDir, identity string) error {
 	dir, ok := foreignHookRemovalPendingDir(dataDir, identity)
 	if !ok {
 		return nil
@@ -852,198 +994,9 @@ func ClearForeignHookRemovalPending(dataDir, root, identity string) error {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !publishedSessionPendingFlag(info) {
 		return nil
 	}
-	if records, ok := PublishedSessionIdentityDir(root, identity); ok {
-		recordsInfo, err := os.Lstat(records)
-		switch {
-		case errors.Is(err, fs.ErrNotExist):
-		case err != nil:
-			return err
-		case !recordsInfo.IsDir() || recordsInfo.Mode()&os.ModeSymlink != 0:
-			if err := os.Remove(records); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				return err
-			}
-		default:
-			if err := revokePublishedSessionFolder(records); err != nil {
-				return err
-			}
-			// Only an empty folder goes: a record that could not be
-			// deleted stays revoked, with its marker.
-			_ = os.Remove(records)
-		}
-	}
 	if err := publishedSessionSetPending(dir, false); err != nil {
 		return err
 	}
 	_ = os.Remove(dir)
 	return nil
-}
-
-// revokePublishedSessionFolder revokes every record in dir
-// (revokePublishedSessionRecord) and removes the folder's other files. A
-// deny marker goes only when its record is gone. The error names the
-// records that could not be revoked.
-func revokePublishedSessionFolder(dir string) error {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return err
-	}
-	at := time.Now().UTC().Format(time.RFC3339)
-	var errs []error
-	var markers []string
-	for _, entry := range entries {
-		name := entry.Name()
-		path := filepath.Join(dir, name)
-		switch {
-		case strings.HasSuffix(name, publishedSessionDenySuffix):
-			markers = append(markers, path)
-		case strings.HasSuffix(name, ".json") && !strings.HasPrefix(name, "."):
-			record := PublishedSessionRecord{Version: publishedSessionVersion, Blocked: true, At: at}
-			if err := revokePublishedSessionRecord(path, record); err != nil {
-				errs = append(errs, err)
-			}
-		default:
-			// A temporary file of a writer, or anything else: no record.
-			_ = os.RemoveAll(path)
-		}
-	}
-	for _, marker := range markers {
-		if _, err := os.Lstat(strings.TrimSuffix(marker, publishedSessionDenySuffix) + ".json"); errors.Is(err, fs.ErrNotExist) {
-			_ = os.Remove(marker)
-		}
-	}
-	return errors.Join(errs...)
-}
-
-// publishedSessionFileTrust and publishedSessionFolderTrust check one record
-// or folder of the tree and every folder above it the way the hook does
-// (replaceable in tests, whose temporary folders the test account owns).
-var (
-	publishedSessionFileTrust   = ValidatePublishedSessionPath
-	publishedSessionFolderTrust = validatePublishedSessionFolder
-)
-
-// PublishedSessionAccountProblem reports what the hook would refuse in the
-// part of the record tree under root that the records of identity depend
-// on: the root and every folder above it, the account's folder and the
-// files in it. The guardian asks when it revokes the account's records: in
-// a tree another account could change, that account may have moved the
-// folder away, to bring it back once the access is put back, so the
-// revocation is not trusted and the account stays held
-// (MarkForeignHookRemovalPending). A missing root is no problem.
-func PublishedSessionAccountProblem(root, identity string, trust PublishedSessionTrust) error {
-	dir, ok := PublishedSessionIdentityDir(root, identity)
-	if !ok {
-		return nil
-	}
-	if _, err := os.Lstat(root); errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	if err := publishedSessionFolderTrust(root, trust, 0); err != nil {
-		return err
-	}
-	if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	_, err := publishedSessionFolderProblem(dir, trust, 0)
-	return err
-}
-
-// PublishedSessionTreeProblem reports what in the record tree under root the
-// hook would refuse: the root or a folder above it, an account folder, a
-// file in one, or an entry that is no account folder. The lifecycle asks
-// before it puts the tree's owner and access back. Whatever the hook
-// refuses, another account may have changed (with write access to the root,
-// an account can move its folder away while the guardian revokes its
-// records, and bring it back after), so the lifecycle then closes the root
-// and invalidates the records (InvalidatePublishedSessionRecords) before it
-// restores the access. The root and the folders above it are checked even
-// when the root is empty: the folder that was moved away can come back
-// until the root is closed. A missing root is no problem.
-func PublishedSessionTreeProblem(root string, trust PublishedSessionTrust) error {
-	if _, err := os.Lstat(root); errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	if err := publishedSessionFolderTrust(root, trust, 0); err != nil {
-		return err
-	}
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return err
-	}
-	checked := 0
-	for _, entry := range entries {
-		path := filepath.Join(root, entry.Name())
-		if !entry.IsDir() {
-			return fmt.Errorf("%s is not an account folder", path)
-		}
-		if checked, err = publishedSessionFolderProblem(path, trust, checked); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// publishedSessionFolderProblem checks one account folder and the files in
-// it the way the hook does. checked counts the files of the tree so far,
-// against publishedSessionTreeLimit; a larger tree is a problem.
-func publishedSessionFolderProblem(dir string, trust PublishedSessionTrust, checked int) (int, error) {
-	if err := publishedSessionFolderTrust(dir, trust, 1); err != nil {
-		return checked, err
-	}
-	files, err := os.ReadDir(dir)
-	if err != nil {
-		return checked, err
-	}
-	for _, file := range files {
-		if checked++; checked > publishedSessionTreeLimit {
-			return checked, fmt.Errorf("%s holds more records than the check covers", filepath.Dir(dir))
-		}
-		if err := publishedSessionFileTrust(filepath.Join(dir, file.Name()), trust); err != nil {
-			return checked, err
-		}
-	}
-	return checked, nil
-}
-
-// InvalidatePublishedSessionRecords revokes every account's records under
-// root (revokePublishedSessionFolder), for a tree another account could
-// have changed (PublishedSessionTreeProblem). The caller closes root to
-// every account first, so nothing comes back into it while this runs.
-// Every emptied account folder goes (the gateway makes a new one at the
-// account's next exchange), and so does anything in root that is not an
-// account folder.
-func InvalidatePublishedSessionRecords(root string) error {
-	entries, err := os.ReadDir(root)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	var errs []error
-	for _, entry := range entries {
-		path := filepath.Join(root, entry.Name())
-		info, err := os.Lstat(path)
-		if errors.Is(err, fs.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		if !info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
-			if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				errs = append(errs, err)
-			}
-			continue
-		}
-		if err := revokePublishedSessionFolder(path); err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		// Only an empty folder goes: a record that could not be deleted
-		// stays revoked, with its marker.
-		_ = os.Remove(path)
-	}
-	return errors.Join(errs...)
 }

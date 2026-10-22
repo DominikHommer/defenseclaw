@@ -110,8 +110,9 @@ func TestForeignHookSessionExchangeErrorMarksOnlyAnOpenOutage(t *testing.T) {
 }
 
 // protectedRecordFixture points the guard at a temporary protected session
-// record root for account 4242; trust fails for the paths in untrusted (the
-// production check refuses a record or folder the user can change).
+// record root for account 4242, with a key the test account made; trust
+// fails for the paths in untrusted (the production check refuses a record,
+// a key or a folder the user can change).
 type protectedRecordFixture struct {
 	root      string
 	untrusted map[string]bool
@@ -122,7 +123,21 @@ const protectedRecordIdentity = "4242"
 
 func newProtectedRecordFixture(t *testing.T) *protectedRecordFixture {
 	t.Helper()
-	records := &protectedRecordFixture{root: t.TempDir(), untrusted: map[string]bool{}}
+	records := &protectedRecordFixture{root: filepath.Join(t.TempDir(), "sessions"), untrusted: map[string]bool{}}
+	if err := os.Mkdir(records.root, 0o711); err != nil {
+		t.Fatal(err)
+	}
+	restoreOwner := enterprisepolicy.OverridePublishedSessionKeyOwnerForTest(func(path string) (bool, error) {
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return info.Mode().IsRegular(), nil
+	})
+	records.newKey(t)
 	previousRecord, previousTrust, previousIdentity := hookForeignGuardSessionRecord, hookForeignGuardSessionRecordTrust, hookForeignGuardIdentity
 	hookForeignGuardSessionRecord = func(serviceUID int) (string, enterprisepolicy.PublishedSessionTrust, bool) {
 		records.consulted++
@@ -137,38 +152,65 @@ func newProtectedRecordFixture(t *testing.T) *protectedRecordFixture {
 	hookForeignGuardIdentity = func() (string, bool) { return protectedRecordIdentity, true }
 	t.Cleanup(func() {
 		hookForeignGuardSessionRecord, hookForeignGuardSessionRecordTrust, hookForeignGuardIdentity = previousRecord, previousTrust, previousIdentity
+		restoreOwner()
 	})
 	return records
 }
 
-// write stores the gateway's answer for one key, as the gateway does.
+// newKey makes a new record key, as the lifecycle and the guardian do: every
+// earlier allow proves nothing.
+func (r *protectedRecordFixture) newKey(t *testing.T) {
+	t.Helper()
+	if err := enterprisepolicy.CreatePublishedSessionKey(r.root, enterpriseForeignHookSessionKeyTrust()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// key is the path of the current record key.
+func (r *protectedRecordFixture) key(t *testing.T) string {
+	t.Helper()
+	key, err := enterprisepolicy.ReadPublishedSessionKey(r.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key.ID()
+}
+
+// write stores the gateway's answer for one key part (kind "p" or "s"), as
+// the gateway does: an allow with the current key. It returns the record's
+// path.
 func (r *protectedRecordFixture) write(t *testing.T, connector, kind, id string, blocked bool, reason string) string {
 	t.Helper()
+	key := enterprisepolicy.SessionKey{Connector: connector, Process: id}
+	if kind == "s" {
+		key = enterprisepolicy.SessionKey{Connector: connector, Session: id}
+	}
+	if err := enterprisepolicy.WritePublishedSessionRecordsForTest(r.root, protectedRecordIdentity, key,
+		enterprisepolicy.GuardDecision{Deny: blocked, Reason: reason}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	path, ok := enterprisepolicy.PublishedSessionRecordPath(r.root, protectedRecordIdentity, connector, kind, id)
 	if !ok {
 		t.Fatalf("no record path for %s %s %s", connector, kind, id)
 	}
-	data, err := json.Marshal(enterprisepolicy.PublishedSessionRecord{Version: 1, Connector: connector, Kind: kind, ID: id,
-		Blocked: blocked, Reason: reason, At: time.Now().UTC().Format(time.RFC3339)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		t.Fatal(err)
-	}
 	return path
 }
 
+// allow stores the gateway's allow for an agent process and its session.
+func (r *protectedRecordFixture) allow(t *testing.T, connector, process, session string) string {
+	t.Helper()
+	r.write(t, connector, "s", session, false, "")
+	return r.write(t, connector, "p", process, false, "")
+}
+
 // GAP-0352: under the administrator's open, a gateway outage lets a guarded
-// connector's call go on only when the gateway's protected session record
-// proves the agent process not blocked. A missing, untrusted, corrupt or
-// foreign record blocks with the outage's reason; a blocking record denies
-// with the gateway's reason; nothing under the account's home is read; an
-// unapproved hook the scan finds blocks with its own reason; and an outage
-// that does not follow open (unset, closed, strict) never reads the record.
+// connector's call go on only when the gateway's protected session records
+// prove the agent process and its session not blocked, under the current
+// key. A missing, untrusted, corrupt, foreign or dead record blocks with
+// the outage's reason; a blocking record denies with the gateway's reason;
+// nothing under the account's home is read; an unapproved hook the scan
+// finds blocks with its own reason; and an outage that does not follow open
+// (unset, closed, strict) never reads the record.
 func TestForeignHookGuardOpenOutageFollowsTheProtectedSessionRecord(t *testing.T) {
 	notRunning := fmt.Errorf("dial hook socket: %w", hookexec.ErrManagedGatewayNotRunning)
 	openOutage := func(string, string, time.Time, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
@@ -202,7 +244,9 @@ func TestForeignHookGuardOpenOutageFollowsTheProtectedSessionRecord(t *testing.T
 		blocked("a home record")
 
 		processRecord := records.write(t, connector, "p", process, false, "")
-		allowed("a record that proves the process unblocked")
+		blocked("a process record without the session's")
+		records.allow(t, connector, process, "s-1")
+		allowed("records that prove the process and the session unblocked")
 
 		reason := hookexec.ForeignHookBlockedReasonPrefix + " When this agent session started, the project hook file /repo/x.json defined a hook. Restart the agent."
 		records.write(t, connector, "s", "s-1", true, reason)
@@ -222,10 +266,13 @@ func TestForeignHookGuardOpenOutageFollowsTheProtectedSessionRecord(t *testing.T
 		blocked("a record the user can change")
 		delete(records.untrusted, processRecord)
 
+		now := time.Now().UTC().Format(time.RFC3339)
 		for name, content := range map[string]string{
-			"a corrupt record":            `{"v":1,`,
-			"a record of another process": `{"v":1,"connector":"` + connector + `","kind":"p","id":"other","blocked":false,"at":"2026-10-21T00:00:00Z"}`,
-			"a record of another agent":   `{"v":1,"connector":"codex","kind":"p","id":"` + process + `","blocked":false,"at":"2026-10-21T00:00:00Z"}`,
+			"a corrupt record":             `{"v":3,`,
+			"a record of another process":  `{"v":3,"connector":"` + connector + `","kind":"p","id":"other","blocked":false,"at":"` + now + `","mac":"00"}`,
+			"a record of another agent":    `{"v":3,"connector":"codex","kind":"p","id":"` + process + `","blocked":false,"at":"` + now + `","mac":"00"}`,
+			"a record without a valid MAC": `{"v":3,"connector":"` + connector + `","kind":"p","id":"` + process + `","blocked":false,"at":"` + now + `","mac":"00"}`,
+			"a record of an earlier build": `{"v":2,"connector":"` + connector + `","kind":"p","id":"` + process + `","blocked":false,"at":"` + now + `","gen":"1"}`,
 		} {
 			if err := os.WriteFile(processRecord, []byte(content), 0o644); err != nil {
 				t.Fatal(err)
@@ -238,7 +285,7 @@ func TestForeignHookGuardOpenOutageFollowsTheProtectedSessionRecord(t *testing.T
 		blocked("a deleted record")
 
 		// An outage that does not follow open never reads the record.
-		records.write(t, connector, "p", process, false, "")
+		records.allow(t, connector, process, "s-1")
 		records.consulted = 0
 		hookForeignGuardExchange = func(string, string, time.Time, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
 			return enterprisepolicy.GuardDecision{}, notRunning
@@ -252,19 +299,28 @@ func TestForeignHookGuardOpenOutageFollowsTheProtectedSessionRecord(t *testing.T
 
 		// Review P2: an agent process the hook cannot name is not proven by a
 		// clean session record (it may have started during the outage and
-		// resumed the session ID), and a record older than the limit proves
-		// nothing.
-		records.write(t, connector, "s", "s-1", false, "")
+		// resumed the session ID).
 		fixture.process = ""
 		blocked("an unnamed agent process with a clean session record")
 		fixture.process = process
-		old := time.Now().Add(-8 * 24 * time.Hour)
-		if err := os.Chtimes(processRecord, old, old); err != nil {
+
+		// The kill switch: a record of an earlier key proves nothing, and
+		// neither does any record without exactly one key the hook trusts.
+		records.newKey(t)
+		blocked("records of an earlier key")
+		records.allow(t, connector, process, "s-1")
+		allowed("the records of the next exchange")
+		key := records.key(t)
+		records.untrusted[key] = true
+		blocked("a key file the user can change")
+		delete(records.untrusted, key)
+		if err := enterprisepolicy.KillPublishedSessionKey(records.root); err != nil {
 			t.Fatal(err)
 		}
-		blocked("a record older than the limit")
-		records.write(t, connector, "p", process, false, "")
-		allowed("a fresh record")
+		blocked("no key")
+		records.newKey(t)
+		records.allow(t, connector, process, "s-1")
+		allowed("the records of the new key")
 	}
 
 	// An unapproved hook the scan finds blocks with its own reason, record
@@ -273,7 +329,7 @@ func TestForeignHookGuardOpenOutageFollowsTheProtectedSessionRecord(t *testing.T
 	fixture.guard("copilot")
 	fixture.process = process
 	records := newProtectedRecordFixture(t)
-	records.write(t, "copilot", "p", process, false, "")
+	records.allow(t, "copilot", process, "s-1")
 	hookForeignGuardExchange = openOutage
 	foreign := filepath.Join(fixture.project, ".github", "hooks", "x.json")
 	fixture.write(t, foreign, `{"hooks": {"preToolUse": [{"bash": "./rewrite.sh"}]}}`)
@@ -313,7 +369,7 @@ func TestForeignHookCheckFollowsTheProtectedSessionRecordDuringAnOpenOutage(t *t
 		if result, _ := check(); !result.Deny || !strings.Contains(result.Reason, hookexec.ManagedGatewayNotRunningReason) {
 			t.Fatalf("%s: no record must deny with the not-running reason: %+v", connector, result)
 		}
-		records.write(t, connector, "p", "agent-process", false, "")
+		records.allow(t, connector, "agent-process", "s-1")
 		if result, raw := check(); result.Deny || raw != `{"deny":false}` {
 			t.Fatalf("%s: a proven process must get exactly the allow: %q", connector, raw)
 		}

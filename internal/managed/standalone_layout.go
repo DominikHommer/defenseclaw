@@ -192,8 +192,8 @@ func StandaloneWindowsLayoutForRoots(programFiles, programData string) (Standalo
 		LogDir:          state + `\logs`,
 		HookSocketDir:   install + `\ipc`,
 		HookSocketPath:  "",
-		HookRuntimeDir:  programData + `\Cisco\DefenseClaw-HookRuntime`,
-		HookSessionDir:  programData + `\Cisco\DefenseClaw-HookSessions`,
+		HookRuntimeDir:  programData + `\Cisco\` + StandaloneWindowsHookRuntimeDirName,
+		HookSessionDir:  programData + `\Cisco\` + StandaloneWindowsHookSessionDirName,
 		SensorSocketDir: install + `\ipc`,
 		ServiceUser:     `NT SERVICE\` + StandaloneWindowsGatewaySvc,
 		ServiceGroup:    "",
@@ -209,6 +209,51 @@ func StandaloneWindowsLayoutForRoots(programFiles, programData string) (Standalo
 // write it; the gateway service reads and runs it.
 func StandaloneWindowsScannerRuntimeDirForRoot(programData string) string {
 	return strings.TrimRight(strings.TrimSpace(programData), `\`) + `\Cisco\DefenseClaw-ScannerRuntime`
+}
+
+// StandaloneWindowsHookRuntimeDirName and StandaloneWindowsHookSessionDirName
+// are the last elements of the Windows HookRuntimeDir and HookSessionDir,
+// both in %ProgramData%\Cisco.
+const (
+	StandaloneWindowsHookRuntimeDirName = "DefenseClaw-HookRuntime"
+	StandaloneWindowsHookSessionDirName = "DefenseClaw-HookSessions"
+)
+
+// StandaloneHookSessionDirForDataDir is the protected session record folder
+// (HookSessionDir) of the standalone layout for goos whose DataDir is
+// dataDir. The hook guardian falls back to it when it cannot resolve the
+// layout itself (on Windows, a failed lookup of the protected ProgramData
+// registration): the data directory it already runs with names the same
+// folder, so it can still remove the records' key (GAP-0352, 1.0.4 guard
+// loop round 1). False when dataDir is not that layout's.
+func StandaloneHookSessionDirForDataDir(goos, dataDir string) (string, bool) {
+	dataDir = strings.TrimSpace(dataDir)
+	if dataDir == "" {
+		return "", false
+	}
+	if goos != "windows" {
+		layout, err := StandaloneLayoutFor(goos)
+		if err != nil || path.Clean(dataDir) != layout.DataDir {
+			return "", false
+		}
+		return layout.HookSessionDir, true
+	}
+	const probe = `C:\ProgramData`
+	shape, err := StandaloneWindowsLayoutForRoots(probe, probe)
+	if err != nil {
+		return "", false
+	}
+	suffix := strings.TrimPrefix(shape.DataDir, probe)
+	dataDir = strings.TrimRight(dataDir, `\`)
+	if len(dataDir) <= len(suffix) || !strings.EqualFold(dataDir[len(dataDir)-len(suffix):], suffix) {
+		return "", false
+	}
+	programData := dataDir[:len(dataDir)-len(suffix)]
+	layout, err := StandaloneWindowsLayoutForRoots(programData, programData)
+	if err != nil || !strings.EqualFold(layout.DataDir, dataDir) {
+		return "", false
+	}
+	return layout.HookSessionDir, true
 }
 
 // StandaloneWindowsScannerRuntimeName is the scanner runtime executable.

@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"syscall"
 	"time"
 	"unsafe"
@@ -50,9 +51,7 @@ func publishedSessionDirSDDL(service, account *windows.SID) string {
 // publishedSessionPrepare makes dir, below the folder the SYSTEM lifecycle
 // created (root), a folder this gateway created with the protected
 // per-account DACL. A folder this process does not own is replaced. A root
-// that Administrators, SYSTEM or this gateway do not own is refused: its
-// owner could move a record folder away and put it back after a
-// revocation.
+// that Administrators, SYSTEM or this gateway do not own is refused.
 func publishedSessionPrepare(root, dir, identity string) error {
 	if err := publishedSessionRealDir(root); err != nil {
 		return fmt.Errorf("protected session record root %s: %w", root, err)
@@ -132,53 +131,132 @@ func publishedSessionOwnedByTrusted(path string, service *windows.SID) bool {
 		current.IsWellKnown(windows.WinBuiltinAdministratorsSid) || current.IsWellKnown(windows.WinLocalSystemSid))
 }
 
-// ValidatePublishedSessionPath checks a protected session record before the
-// hook reads it: the record and every folder above it are on a fixed NTFS
-// drive, no reparse point, and no account but SYSTEM, Administrators,
-// TrustedInstaller and the gateway service can write them. Every verdict is
-// fatal, the shared Cisco folder included, and the account's folder and the
-// record root get the record's own strict mask: the account must not be
-// able to move a record folder away and bring it back after a revocation.
-// A record the check refuses blocks.
+// ValidatePublishedSessionPath checks a protected session record, or the
+// record folder's key file, before the hook reads it: the file and every
+// folder above it are on a fixed NTFS drive, no reparse point, and no
+// account but SYSTEM, Administrators, TrustedInstaller and the gateway
+// service can write them. Every verdict is fatal, the shared Cisco folder
+// included, and the folders DefenseClaw creates with a protected DACL (the
+// account's folder and the record root above a record) get the file's own
+// strict mask. The key file must be one SYSTEM or Administrators own
+// (publishedSessionKeyOwnerCheck). A file the check refuses blocks.
 func ValidatePublishedSessionPath(path string, trust PublishedSessionTrust) error {
+	if IsPublishedSessionKeyName(filepath.Base(path)) {
+		if err := managed.ValidateStrictServiceRuntimeFilePath(path, "protected foreign-hook session record key", trust.ServiceAccount, 0); err != nil {
+			return err
+		}
+		owned, err := publishedSessionKeyOwnerCheck(path)
+		if err != nil {
+			return err
+		}
+		if !owned {
+			return fmt.Errorf("%s is not a key file SYSTEM or Administrators made", path)
+		}
+		return nil
+	}
 	return managed.ValidateStrictServiceRuntimeFilePath(path, "protected foreign-hook session record", trust.ServiceAccount, publishedSessionNamedDirs)
 }
 
-// validatePublishedSessionFolder checks a folder of the record tree and
-// every folder above it the way ValidatePublishedSessionPath checks a record
-// (PublishedSessionTreeProblem): the folder and the named DefenseClaw
-// folders above it (1 for an account folder, 0 for the record root) get the
-// strict rule, the rest the narrow fatal one.
-func validatePublishedSessionFolder(path string, trust PublishedSessionTrust, named int) error {
-	return managed.ValidateStrictServiceRuntimeDirPath(path, "protected foreign-hook session record folder", trust.ServiceAccount, named)
+// ValidatePublishedSessionRoot checks the record folder root and every
+// folder above it the way the hook checks the folders above a record: the
+// root strict, every folder above it with the narrow fatal rule, the shared
+// Cisco folder included. Status and verify report a root it refuses.
+func ValidatePublishedSessionRoot(root string, trust PublishedSessionTrust) error {
+	return managed.ValidateStrictServiceRuntimeDirPath(root, "protected foreign-hook session record folder", trust.ServiceAccount, 0)
 }
 
 // publishedSessionNamedDirs are the folders above a record that DefenseClaw
 // creates with a protected DACL: the account's folder and the record root.
 const publishedSessionNamedDirs = 2
 
-// expirePublishedSessionRecord sets the modification time of the record at
-// path to publishedSessionRevokedTime (revokePublishedSessionRecord). It
-// opens the record for its attributes only, which no sharing mode of a
-// reader refuses, and without following a reparse point.
-func expirePublishedSessionRecord(path string) error {
+// publishedSessionKeySDDL is the protected DACL of a key file: SYSTEM and
+// Administrators full control; the gateway service DELETE plus its
+// attributes and security descriptor (it removes the key, never writes
+// one); standard users the attributes and security descriptor only
+// (FILE_READ_ATTRIBUTES, READ_CONTROL, SYNCHRONIZE), so the hook can check
+// who made it while no standard user can open it with an access that a
+// sharing mode applies to, or rename or delete it.
+func publishedSessionKeySDDL(gateway *windows.SID) string {
+	return "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x130080;;;" + gateway.String() + ")(A;;0x120080;;;BU)"
+}
+
+// createPublishedSessionKeyFile creates the key file at path, which must
+// not exist, with publishedSessionKeySDDL for the gateway service account
+// trust names, and flushes it. This process (SYSTEM or an administrator)
+// owns it.
+func createPublishedSessionKeyFile(path string, trust PublishedSessionTrust) error {
+	gateway, err := managed.WindowsServiceAccountSID(trust.ServiceAccount)
+	if err == nil && gateway == nil {
+		err = errors.New("no gateway service account is named")
+	}
+	if err != nil {
+		return fmt.Errorf("the gateway service account %q: %w", trust.ServiceAccount, err)
+	}
+	descriptor, err := windows.SecurityDescriptorFromString(publishedSessionKeySDDL(gateway))
+	if err != nil {
+		return err
+	}
+	attributes := &windows.SecurityAttributes{
+		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
+		SecurityDescriptor: descriptor,
+	}
 	pointer, err := winpath.UTF16Ptr(path)
 	if err != nil {
 		return err
 	}
-	handle, err := windows.CreateFile(pointer, windows.FILE_WRITE_ATTRIBUTES,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
-		windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	handle, err := windows.CreateFile(pointer, windows.GENERIC_WRITE, windows.FILE_SHARE_READ|windows.FILE_SHARE_DELETE, attributes,
+		windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	if err != nil {
-		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
-			return fs.ErrNotExist
+		if errors.Is(err, windows.ERROR_FILE_EXISTS) || errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+			return fs.ErrExist
 		}
 		return err
 	}
-	defer func() { _ = windows.CloseHandle(handle) }()
-	revoked := windows.NsecToFiletime(publishedSessionRevokedTime.UnixNano())
-	return windows.SetFileTime(handle, nil, &revoked, &revoked)
+	return errors.Join(windows.FlushFileBuffers(handle), windows.CloseHandle(handle))
 }
+
+// publishedSessionKeyOwnerCheck reports a key file SYSTEM or
+// Administrators own: a file (no folder, no reparse point, one link), read
+// by handle without following a reparse point. A file this account may not
+// open for its security descriptor (every key file lets it) or that is gone
+// is not a key.
+func publishedSessionKeyOwnerCheck(path string) (bool, error) {
+	pointer, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return false, err
+	}
+	handle, err := windows.CreateFile(pointer, windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) || errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			return false, nil
+		}
+		return false, err
+	}
+	defer func() { _ = windows.CloseHandle(handle) }()
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return false, err
+	}
+	if info.FileAttributes&(windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0 || info.NumberOfLinks != 1 {
+		return false, nil
+	}
+	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return false, err
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil || owner == nil {
+		return false, fmt.Errorf("%s has no owner", path)
+	}
+	return owner.IsWellKnown(windows.WinLocalSystemSid) || owner.IsWellKnown(windows.WinBuiltinAdministratorsSid), nil
+}
+
+// publishedSessionSyncDir has nothing to do on Windows: NTFS commits a
+// file's creation and deletion in its journal, and the key file itself is
+// flushed when it is created.
+func publishedSessionSyncDir(string) error { return nil }
 
 // publishedSessionPendingTime is the creation time that is the guardian's
 // pending mark on an account's private session store
