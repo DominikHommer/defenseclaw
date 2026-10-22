@@ -309,6 +309,9 @@ type windowsBundleRun struct {
 	anchorReservation *enterprisestatus.ChangeReservation
 	anchorStaged      bool
 	unlock            func()
+	// stderr takes the warning of a reservation release that could not be
+	// flushed (release runs after the result is printed).
+	stderr io.Writer
 }
 
 // refuseStagedAnchors records one refused install, with code, of the trust
@@ -340,7 +343,7 @@ func (run *windowsBundleRun) release() {
 	// A run that returned after prepare without finish installed none of
 	// the anchors it staged.
 	_ = run.refuseStagedAnchors(string(enterprisebundle.CodeInterrupted))
-	run.anchorReservation.Release()
+	warnChangeReleaseUnflushed(run.stderr, run.anchorReservation.Release())
 	run.anchorReservation = nil
 	if run.anchorStage != "" {
 		_ = os.Remove(run.anchorStage)
@@ -803,7 +806,7 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	if err != nil {
 		return refuseAnchors("lifecycle_busy", err.Error())
 	}
-	run = &windowsBundleRun{ctx: ctx, layout: layout, driver: driver, unlock: unlock}
+	run = &windowsBundleRun{ctx: ctx, layout: layout, driver: driver, unlock: unlock, stderr: cmd.ErrOrStderr()}
 	opts.bundle = run
 	// Prepare owns the lock until it hands the run to the lifecycle caller.
 	// A refusal may print a result before returning, but cannot transfer it.

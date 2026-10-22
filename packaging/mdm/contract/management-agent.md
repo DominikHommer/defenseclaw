@@ -44,7 +44,12 @@ gateway.
   destination that refuses it or cannot be reached gets it again, under the
   same record id, at a later poll; after a gateway restart an unreported
   event goes to every destination again, so a destination can receive it
-  twice with the same id. A command that cannot record
+  twice with the same id. Every copy is the stored record: the same time,
+  run, sidecar, binary and config values, whichever gateway process sends
+  it. A gateway that cannot rebuild the stored record exactly (it was
+  upgraded to a build with another record schema, or collection now keeps
+  only the mandatory floor for it) does not send it, and the event stays in
+  the spool. A command that cannot record
   its change (the spool cannot be written, or holds 4096 events the gateway
   has not reported) refuses it with `state_invalid` before anything is
   changed. The command holds room for its event from that check until the
@@ -56,7 +61,10 @@ gateway.
   whether or not it had changed anything. A `BUNDLE=` `TRUSTANCHORS=` run whose bundle is not
   confirmed records one refused anchor install. No event carries a credential value or a hash of
   one. Byte-identical anchors, a `set` of the
-  stored value and a `remove` of an absent credential record nothing. The
+  stored value and a `remove` of an absent credential record nothing; the
+  room such a command held is removed durably before it exits, and when
+  that cannot be flushed it prints the warning `change_release_unflushed`
+  (a power loss could then report it as `interrupted`). The
   results still carry what the agent needs for its own report: `sha256`,
   `previous_sha256` and `key_ids` from anchors install, `sha256_prefix` from
   `secret status --json`.

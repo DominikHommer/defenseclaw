@@ -7,6 +7,7 @@ package audit
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +15,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
 // auditDurablePragmas are the audit pragmas with synchronous=FULL and
@@ -112,24 +115,128 @@ func syncAuditDBDir(dir string) error {
 	return d.Sync()
 }
 
-// auditEventTime returns the time of the audit_events row with id, and
-// whether there is one. A store without a database holds none.
-func (s *Store) auditEventTime(ctx context.Context, id string) (time.Time, bool, error) {
+// storedOccurrence is what the audit_events row of an occurrence keeps of
+// the process that built its record: the time, run id, sidecar id, binary
+// version and config generation and digest. A stored replay rebuilds the
+// record from the producer's durable event and these values, so a remote
+// destination gets, under the stored id, the record the row holds and not
+// one stamped by the process that replays it (after a restart: another run
+// and sidecar id, maybe another binary or config). The record schema
+// and bucket catalog versions, bucket, event name and floor form are checked: a record this build
+// cannot rebuild exactly is not sent (storedOccurrence.matches).
+type storedOccurrence struct {
+	timestamp         time.Time
+	runID             string
+	sidecarInstanceID string
+	binaryVersion     string
+	configGeneration  int64
+	configDigest      string
+	recordSchema      int
+	bucket            string
+	bucketCatalog     int
+	eventName         string
+	floorOnly         bool
+}
+
+// storedOccurrence reads the stored values of the audit_events row with
+// id, and whether there is one. A store without a database holds none. A
+// row whose time does not parse is an error: its record cannot be rebuilt.
+func (s *Store) storedOccurrence(ctx context.Context, id string) (storedOccurrence, bool, error) {
 	if s == nil || s.db == nil {
-		return time.Time{}, false, nil
+		return storedOccurrence{}, false, nil
 	}
-	var stamp string
+	var (
+		stamp, bucket, eventName                string
+		runID, sidecar, binary, digest, body    sql.NullString
+		generation, recordSchema, bucketCatalog sql.NullInt64
+	)
 	err := s.scanRow(ctx, "audit_event_exists",
-		s.db.QueryRowContext(ctx, `SELECT timestamp FROM audit_events WHERE id = ? LIMIT 1`, id), &stamp)
+		s.db.QueryRowContext(ctx, `
+			SELECT timestamp, run_id, sidecar_instance_id, binary_version, generation, content_hash,
+				record_schema_version, bucket, bucket_catalog_version, event_name, payload_json
+			FROM audit_events WHERE id = ? LIMIT 1`, id),
+		&stamp, &runID, &sidecar, &binary, &generation, &digest, &recordSchema, &bucket, &bucketCatalog,
+		&eventName, &body)
 	if errors.Is(err, sql.ErrNoRows) {
-		return time.Time{}, false, nil
+		return storedOccurrence{}, false, nil
 	}
 	if err != nil {
-		return time.Time{}, false, fmt.Errorf("audit: look up audit event %s: %w", id, err)
+		return storedOccurrence{}, false, fmt.Errorf("audit: look up audit event %s: %w", id, err)
 	}
-	at, parseErr := time.Parse(time.RFC3339Nano, stamp)
-	if parseErr != nil {
-		at = time.Now().UTC()
+	at, err := time.Parse(time.RFC3339Nano, stamp)
+	if err != nil {
+		return storedOccurrence{}, false, fmt.Errorf("audit: audit event %s has no valid time: %w", id, err)
 	}
-	return at.UTC(), true, nil
+	var payload struct {
+		FloorOnly bool `json:"floor_only"`
+	}
+	_ = json.Unmarshal([]byte(body.String), &payload)
+	return storedOccurrence{
+		timestamp: at.UTC(), runID: runID.String, sidecarInstanceID: sidecar.String,
+		binaryVersion: binary.String, configGeneration: generation.Int64, configDigest: digest.String,
+		recordSchema: int(recordSchema.Int64), bucket: bucket, bucketCatalog: int(bucketCatalog.Int64),
+		eventName: eventName, floorOnly: payload.FloorOnly,
+	}, true, nil
+}
+
+// pin gives a replayed event the stored process values.
+func (o storedOccurrence) pin(event *Event) {
+	event.Timestamp = o.timestamp
+	event.RunID = o.runID
+	event.SidecarInstanceID = o.sidecarInstanceID
+	event.BinaryVersion = o.binaryVersion
+}
+
+// buildContext is the config generation and digest the stored record was
+// built with.
+func (o storedOccurrence) buildContext() (RuntimeV8BuildContext, error) {
+	if o.configGeneration < 0 {
+		return RuntimeV8BuildContext{}, fmt.Errorf("audit: the stored record has an invalid config generation")
+	}
+	return RuntimeV8BuildContext{ConfigGeneration: uint64(o.configGeneration), ConfigDigest: o.configDigest}, nil
+}
+
+// matches checks that record, rebuilt for a replay, is the stored record:
+// the same schemas, bucket, event and form (a config that now collects only
+// the mandatory floor, or a build with another record schema or bucket
+// catalog, builds another record), with the stored time and process values.
+func (o storedOccurrence) matches(record observability.Record) error {
+	provenance, correlation := record.Provenance(), record.Correlation()
+	var differs string
+	switch {
+	case record.SchemaVersion() != o.recordSchema:
+		differs = "record schema version"
+	case record.BucketCatalogVersion() != o.bucketCatalog || string(record.Bucket()) != o.bucket:
+		differs = "bucket"
+	case string(record.EventName()) != o.eventName:
+		differs = "event name"
+	case record.IsFloorOnly() != o.floorOnly:
+		differs = "floor form"
+	case !record.Timestamp().Equal(o.timestamp):
+		differs = "time"
+	case correlation.RunID != o.runID || correlation.SidecarInstanceID != o.sidecarInstanceID:
+		differs = "run or sidecar id"
+	case provenance.BinaryVersion != o.binaryVersion || provenance.ConfigGeneration != o.configGeneration ||
+		provenance.ConfigDigest != o.configDigest:
+		differs = "provenance"
+	default:
+		return nil
+	}
+	return fmt.Errorf("audit: the stored record %s cannot be rebuilt exactly (its %s differs), so it is not sent again", record.RecordID(), differs)
+}
+
+type storedOccurrenceKey struct{}
+
+// withStoredOccurrence carries the stored row of a replayed occurrence to
+// the record builder.
+func withStoredOccurrence(ctx context.Context, row storedOccurrence) context.Context {
+	return context.WithValue(ctx, storedOccurrenceKey{}, row)
+}
+
+func storedOccurrenceFrom(ctx context.Context) (storedOccurrence, bool) {
+	if ctx == nil {
+		return storedOccurrence{}, false
+	}
+	row, ok := ctx.Value(storedOccurrenceKey{}).(storedOccurrence)
+	return row, ok
 }

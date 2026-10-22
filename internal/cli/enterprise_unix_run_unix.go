@@ -379,14 +379,21 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		return nil
 	}
 	result, existed, reservation, err := changeUnixSecret(cmd, action, opts, caller)
-	defer reservation.Release()
-	if recordErr := recordUnixSecretChange(reservation, action, opts.name, existed, result, err); recordErr != nil {
-		warning := changeUnrecordedWarning(recordErr)
+	defer func() { _ = reservation.Release() }()
+	addWarning := func(warning enterprisebundle.Warning) {
 		if err == nil && result != nil {
 			result.AddWarning(warning.Code, warning.Message)
 		} else {
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s: %s\n", warning.Code, warning.Message)
 		}
+	}
+	if recordErr := recordUnixSecretChange(reservation, action, opts.name, existed, result, err); recordErr != nil {
+		addWarning(changeUnrecordedWarning(recordErr))
+	}
+	// A set of the stored value and the removal of an absent credential
+	// record nothing: their reservation goes here, durably.
+	if releaseErr := reservation.Release(); releaseErr != nil {
+		addWarning(changeReleaseUnflushedWarning(releaseErr))
 	}
 	if err != nil {
 		return reportUnixSecretFailure(cmd, action, opts, err, opts.json)

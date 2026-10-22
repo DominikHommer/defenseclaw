@@ -156,6 +156,9 @@ func bundleAnchorsInstall(ctx context.Context, cmd *cobra.Command, opts *bundleA
 		if out.Unrecorded != nil {
 			res.Warnings = append(res.Warnings, changeUnrecordedWarning(out.Unrecorded))
 		}
+		if out.ReleaseUnflushed != nil {
+			res.Warnings = append(res.Warnings, changeReleaseUnflushedWarning(out.ReleaseUnflushed))
+		}
 	}
 	if err != nil {
 		return err

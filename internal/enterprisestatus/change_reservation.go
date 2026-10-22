@@ -24,6 +24,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -67,10 +68,12 @@ var (
 	errChangeReservationUsed = errors.New("the change event reservation was already used")
 
 	// syncChangeDir and syncChangeFile flush a folder of the spool (a new
-	// entry in it) and a file whose access Publish changed. Tests replace
-	// them.
-	syncChangeDir  = configwrite.SyncDir
-	syncChangeFile = configwrite.SyncFile
+	// or removed entry in it) and a file whose access Publish changed;
+	// syncChangeHandle flushes an emptied reservation through its open
+	// handle. Tests replace them.
+	syncChangeDir    = configwrite.SyncDir
+	syncChangeFile   = configwrite.SyncFile
+	syncChangeHandle = (*os.File).Sync
 )
 
 // ChangeReservation is the room in the spool for the event of one change in
@@ -119,9 +122,10 @@ func (s ChangeSpool) Reserve(kind, action, name string) (*ChangeReservation, err
 		return nil, err
 	}
 	fail := func(err error) (*ChangeReservation, error) {
-		unlockChangeFile(file)
-		_ = file.Close()
-		_ = os.Remove(path)
+		// The command changes nothing: the reservation is emptied and
+		// flushed before it goes, so one a power loss brings back records
+		// nothing.
+		_ = dropChangeReservation(file, path)
 		return nil, err
 	}
 	// Locked before the event is in it: a reader takes the lock first, so
@@ -191,27 +195,60 @@ func (r *ChangeReservation) Write(ev ChangeEvent) error {
 		r.abandon()
 		return err
 	}
-	r.drop()
+	// The event is durable under the reservation's id, so a reservation a
+	// power loss brings back is not recorded again (recordInterrupted,
+	// EndedChangeReservations): a release that is not flushed changes
+	// nothing here.
+	_ = r.drop()
 	return nil
 }
 
 // Release gives the room back when the change was not made and records
-// nothing. It does nothing after Write.
-func (r *ChangeReservation) Release() {
+// nothing. It does nothing after Write. The release is durable when it
+// returns nil. Its error says it could not be flushed: a power loss could
+// then bring the reservation back, and the gateway would report the
+// command as a change that was interrupted.
+func (r *ChangeReservation) Release() error {
 	if r == nil || r.file == nil {
-		return
+		return nil
 	}
-	r.drop()
+	return r.drop()
 }
 
-// drop empties the reservation before it unlocks and removes it: a reader
-// that takes the lock in between finds no event in it and records nothing.
-// A removal that fails (Windows, while the gateway has it open) leaves an
-// empty file, which the next writer removes.
-func (r *ChangeReservation) drop() {
-	_ = r.file.Truncate(0)
-	r.abandon()
-	_ = os.Remove(r.path)
+func (r *ChangeReservation) drop() error {
+	file := r.file
+	r.file = nil
+	return dropChangeReservation(file, r.path)
+}
+
+// dropChangeReservation empties the reservation file before it unlocks,
+// closes and removes it: a reader that takes the lock in between finds no
+// event in it and records nothing. The emptied file is flushed while it is
+// still in the reserved folder, and the folder after the removal (POSIX),
+// so a power loss cannot bring the event back. It is durable when either
+// flush worked: an empty reservation records nothing, and a removed one is
+// gone. A removal that fails (Windows, while the gateway has it open)
+// leaves the empty file, which the next writer removes. On Windows the
+// folder cannot be flushed (configwrite.SyncDir), so only the emptied file
+// makes it durable there. The error says neither could be flushed.
+func dropChangeReservation(file *os.File, path string) error {
+	emptied := file.Truncate(0)
+	if emptied == nil {
+		emptied = syncChangeHandle(file)
+	}
+	unlockChangeFile(file)
+	_ = file.Close()
+	removed := os.Remove(path)
+	if removed == nil || errors.Is(removed, fs.ErrNotExist) {
+		removed = syncChangeDir(filepath.Dir(path))
+	}
+	if runtime.GOOS == "windows" && removed == nil {
+		removed = errors.New("a removal is not flushed on Windows")
+	}
+	if emptied == nil || removed == nil {
+		return nil
+	}
+	return fmt.Errorf("the change event reservation %s could not be flushed: %w", filepath.Base(path), errors.Join(emptied, removed))
 }
 
 func (r *ChangeReservation) abandon() {

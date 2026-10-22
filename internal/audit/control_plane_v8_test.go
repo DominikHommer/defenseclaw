@@ -43,6 +43,8 @@ type testRuntimeV8Emitter struct {
 	exportAfterWrite []bool
 	// replays is observability.StoredReplay of each emitted record.
 	replays []bool
+	// build is the config of this process (nil: generation 23).
+	build *RuntimeV8BuildContext
 }
 
 type rejectingRuntimeV8Emitter struct {
@@ -116,10 +118,11 @@ func (emitter *testRuntimeV8Emitter) EmitRuntimeV8(
 		emitter.mu.Unlock()
 		return RuntimeV8EmitOutcome{Admission: router.AdmissionDrop}, nil
 	}
-	record, err := builder(RuntimeV8BuildContext{
-		ConfigGeneration: 23,
-		ConfigDigest:     testEventHistoryGraphDigest,
-	}, emitter.admission)
+	build := RuntimeV8BuildContext{ConfigGeneration: 23, ConfigDigest: testEventHistoryGraphDigest}
+	if emitter.build != nil {
+		build = *emitter.build
+	}
+	record, err := builder(build, emitter.admission)
 	if err != nil {
 		return RuntimeV8EmitOutcome{}, err
 	}

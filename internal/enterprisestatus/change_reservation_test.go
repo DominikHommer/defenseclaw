@@ -668,8 +668,10 @@ func TestChangeReservationIsDurableWhenReserveReturns(t *testing.T) {
 	base := t.TempDir()
 	spool := ChangeSpool{Dir: filepath.Join(base, "bundles", ChangeEventsDirName), StateDir: t.TempDir()}
 	reserved := filepath.Join(spool.Dir, ChangeReservedDirName)
+	// The releases at the end flush the folder after their removal.
+	reserving := true
 	log := recordChangeSyncs(t, func(entry string) error {
-		if entry == "dir "+reserved && len(reservationFiles(t, spool)) == 0 {
+		if reserving && entry == "dir "+reserved && len(reservationFiles(t, spool)) == 0 {
 			t.Fatalf("the reserved folder was flushed before the reservation was in it")
 		}
 		return nil
@@ -678,7 +680,7 @@ func TestChangeReservationIsDurableWhenReserveReturns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer first.Release()
+	defer func() { reserving = false; _ = first.Release() }()
 	want := []string{"dir " + base, "dir " + filepath.Join(base, "bundles"), "dir " + spool.Dir, "dir " + reserved}
 	if strings.Join(*log, "|") != strings.Join(want, "|") {
 		t.Fatalf("first reservation flushed %v, want %v", *log, want)
@@ -688,7 +690,7 @@ func TestChangeReservationIsDurableWhenReserveReturns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer second.Release()
+	defer func() { reserving = false; _ = second.Release() }()
 	if strings.Join(*log, "|") != "dir "+reserved {
 		t.Fatalf("second reservation flushed %v, want only the reserved folder", *log)
 	}
@@ -790,6 +792,103 @@ func TestChangeSpoolFlushesARepublishedEventBeforeItRemovesTheReservation(t *tes
 			}
 		})
 	}
+}
+
+// A released reservation is gone for good when Release returns: the emptied
+// file is flushed while it is still in the reserved folder, and the folder
+// once the file is removed, so a power loss cannot bring back the
+// interrupted event of a command that changed nothing (the gateway would
+// report a change that never happened). Release fails only when neither
+// flush worked; on Windows, where a folder cannot be flushed, when the
+// emptied file was not. Before, neither the truncation nor the removal was
+// flushed and Release returned nothing. A reservation Reserve gives up is
+// emptied and flushed the same way.
+func TestChangeReservationReleaseIsDurable(t *testing.T) {
+	flushErr := errors.New("flush failed")
+	watch := func(t *testing.T, spool ChangeSpool, failHandle, failDir bool) *[]string {
+		t.Helper()
+		var order []string
+		reserved := spool.reservedDir()
+		savedHandle := syncChangeHandle
+		t.Cleanup(func() { syncChangeHandle = savedHandle })
+		syncChangeHandle = func(file *os.File) error {
+			info, err := file.Stat()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Size() != 0 || len(reservationFiles(t, spool)) != 1 {
+				t.Fatalf("flushed a reservation of %d bytes, or one no longer in its folder", info.Size())
+			}
+			order = append(order, "emptied file")
+			if failHandle {
+				return flushErr
+			}
+			return savedHandle(file)
+		}
+		recordChangeSyncs(t, func(entry string) error {
+			if entry != "dir "+reserved {
+				return nil
+			}
+			order = append(order, "reserved folder")
+			if failDir {
+				return flushErr
+			}
+			return nil
+		})
+		return &order
+	}
+	for _, tc := range []struct {
+		name                string
+		failHandle, failDir bool
+		wantErr             bool
+	}{
+		{"both flushed", false, false, false},
+		{"emptied file not flushed", true, false, runtime.GOOS == "windows"},
+		{"folder not flushed", false, true, false},
+		{"neither flushed", true, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spool := newTestSpool(t)
+			r, err := spool.Reserve(ChangeKindSecret, ChangeActionSet, "splunk-hec-token")
+			if err != nil {
+				t.Fatal(err)
+			}
+			order := watch(t, spool, tc.failHandle, tc.failDir)
+			err = r.Release()
+			if (err != nil) != tc.wantErr || (err != nil && !errors.Is(err, flushErr)) {
+				t.Fatalf("Release err = %v, want an error %t", err, tc.wantErr)
+			}
+			if got := strings.Join(*order, "|"); got != "emptied file|reserved folder" {
+				t.Fatalf("Release flushed %q, want the emptied file, then the reserved folder", got)
+			}
+			if files := reservationFiles(t, spool); len(files) != 0 {
+				t.Fatalf("reservations left: %v", files)
+			}
+			if err := r.Release(); err != nil {
+				t.Fatalf("a second Release: %v", err)
+			}
+		})
+	}
+	t.Run("given up by Reserve", func(t *testing.T) {
+		spool := newTestSpool(t)
+		// The reserved folder exists, so the first flush of it is the one
+		// after the reservation is in it.
+		if r, err := spool.Reserve(ChangeKindSecret, ChangeActionSet, "a"); err != nil {
+			t.Fatal(err)
+		} else if err := r.Release(); err != nil {
+			t.Fatal(err)
+		}
+		order := watch(t, spool, false, true)
+		if _, err := spool.Reserve(ChangeKindSecret, ChangeActionSet, "splunk-hec-token"); !errors.Is(err, flushErr) {
+			t.Fatalf("Reserve err = %v, want the flush error", err)
+		}
+		if got := strings.Join(*order, "|"); got != "reserved folder|emptied file|reserved folder" {
+			t.Fatalf("Reserve flushed %q, want the emptied reservation flushed before it went", got)
+		}
+		if files := reservationFiles(t, spool); len(files) != 0 {
+			t.Fatalf("reservations left: %v", files)
+		}
+	})
 }
 
 // reservationFiles lists the files in the reserved folder (none when it is

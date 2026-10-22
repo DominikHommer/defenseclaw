@@ -49,30 +49,34 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 	timestamp := time.Now().UTC()
 	ctx := context.Background()
 	stored := false
+	var row storedOccurrence
 	delivery := in.RemoteDelivery
 	if in.OccurrenceID != "" {
 		// The producer keeps this occurrence queued under its stable id and
 		// offers it until it is stored durably and every remote destination
 		// has it. The first offer stores it and exports it only after the
 		// local write (a failed write exports nothing). A later offer finds
-		// it stored and sends the stored record, with its stable ids and
-		// time, to the destinations that do not have it yet.
+		// it stored and sends the stored record, with its stable ids, time
+		// and the run, sidecar, binary and config of the process that stored
+		// it, to the destinations that do not have it yet.
 		auditID = in.OccurrenceID
 		activityID = uuid.NewSHA1(stableOccurrenceNamespace, []byte("activity\x00"+auditID)).String()
 		if delivery == nil {
 			delivery = observability.NewRemoteDelivery()
 		}
-		storedAt, found, err := l.store.auditEventTime(ctx, auditID)
+		found := false
+		var err error
+		row, found, err = l.store.storedOccurrence(ctx, auditID)
 		if err != nil {
 			return err
 		}
 		if found {
-			stored, timestamp = true, storedAt
+			stored, timestamp = true, row.timestamp
 			// A row a stopped process committed may not be on disk yet.
 			if err := l.syncOccurrence(ctx, delivery); err != nil {
 				return err
 			}
-			ctx = observability.WithStoredReplay(ctx)
+			ctx = withStoredOccurrence(observability.WithStoredReplay(ctx), row)
 		} else {
 			ctx = observability.WithExportAfterLocalWrite(ctx)
 		}
@@ -117,6 +121,12 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 		SidecarInstanceID: ProcessAgentInstanceID(),
 	}
 	stampAuditEventEnvelope(&auditEv)
+	if stored {
+		// A replay is the stored record: after a restart this process has
+		// another run id, sidecar id, maybe binary, and the stamp fills an
+		// empty value from this process.
+		row.pin(&auditEv)
+	}
 	metricActor := actor
 	if in.ConfigChange != nil {
 		// The audit record keeps the OS account of a change; its counters

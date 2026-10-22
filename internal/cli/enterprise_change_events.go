@@ -21,6 +21,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"io"
+	"os"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
@@ -42,6 +45,29 @@ const codeChangeUnrecorded = "change_unrecorded"
 func changeUnrecordedWarning(err error) enterprisebundle.Warning {
 	return enterprisebundle.Warning{Code: codeChangeUnrecorded,
 		Message: "the audit change event of this run could not be written, so the gateway will not report it: " + err.Error()}
+}
+
+// codeChangeReleaseUnflushed warns that a run that changed nothing could
+// not remove the room it reserved for its change event durably: after a
+// power loss the gateway may report the run as an interrupted change.
+const codeChangeReleaseUnflushed = "change_release_unflushed"
+
+func changeReleaseUnflushedWarning(err error) enterprisebundle.Warning {
+	return enterprisebundle.Warning{Code: codeChangeReleaseUnflushed,
+		Message: "this run changed nothing, but the room it reserved for its audit change event could not be removed durably, so after a power loss the gateway may report it as an interrupted change: " + err.Error()}
+}
+
+// warnChangeReleaseUnflushed prints change_release_unflushed on w (stderr
+// when nil) for a run whose result document has no warnings to carry it.
+func warnChangeReleaseUnflushed(w io.Writer, err error) {
+	if err == nil {
+		return
+	}
+	if w == nil {
+		w = os.Stderr
+	}
+	warning := changeReleaseUnflushedWarning(err)
+	fmt.Fprintf(w, "warning: %s: %s\n", warning.Code, warning.Message)
 }
 
 // secretFailureCode is the errors[].code a failed secret command reports:
