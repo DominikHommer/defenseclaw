@@ -62,20 +62,26 @@ func secretFailureCode(err error, invalidExit int) string {
 	}
 }
 
-// secretChangeEvent is the change event of one secret set or remove. err
-// is a failure (failureCode its code): a failure once the change was
-// attempted (attempted, or the codes change_failed and restart_failed) is
-// failed, any other a refusal. changed reports whether a successful run
-// changed anything: a set of the stored value and a removal of an absent
-// credential record nothing (ok false). A refused name is left out.
+// secretChangeEvent is the change event of one secret set or remove.
+// changed reports that the credential was written or removed: that is
+// applied, whatever err says of a later step. Otherwise err is a failure
+// (failureCode its code): a failure once the change was attempted
+// (attempted, or the codes change_failed and restart_failed) is failed, any
+// other a refusal; no error records nothing (ok false), as for a set of the
+// stored value or a removal of an absent credential. A refused name is left
+// out.
 func secretChangeEvent(action, name string, changed bool, failureCode string, err error, attempted bool) (enterprisestatus.ChangeEvent, bool) {
 	outcome := enterprisestatus.ChangeApplied
 	switch {
+	case changed:
+		// Written or removed: that is the change, also when a later step
+		// (the gateway restart, the ensure that applies it) failed.
+		failureCode = ""
 	case err != nil && (attempted || failureCode == "change_failed" || failureCode == "restart_failed"):
 		outcome = enterprisestatus.ChangeFailed
 	case err != nil:
 		outcome = enterprisestatus.ChangeRefused
-	case !changed:
+	default:
 		return enterprisestatus.ChangeEvent{}, false
 	}
 	if action != enterprisestatus.ChangeActionSet && action != enterprisestatus.ChangeActionRemove {

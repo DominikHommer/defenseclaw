@@ -87,6 +87,9 @@ func TestSecretChangeEventOutcomes(t *testing.T) {
 		{"write failed", "change_failed", enterprisestatus.ChangeFailed, false, false, refused, true},
 		{"restart failed", "restart_failed", enterprisestatus.ChangeFailed, false, false, refused, true},
 		{"lifecycle failed", "apply_failed", enterprisestatus.ChangeFailed, false, true, refused, true},
+		// The credential was written; the restart or ensure after it failed.
+		{"restart failed after the write", "restart_failed", enterprisestatus.ChangeApplied, true, false, refused, true},
+		{"lifecycle failed after the write", "apply_failed", enterprisestatus.ChangeApplied, true, true, refused, true},
 	} {
 		ev, ok := secretChangeEvent("set", "splunk-hec-token", tc.changed, tc.code, tc.err, tc.attempted)
 		if ok != tc.ok || (ok && (ev.Outcome != tc.outcome || ev.Validate() != nil || ev.SecretName != "splunk-hec-token")) {

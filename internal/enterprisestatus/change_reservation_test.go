@@ -230,6 +230,106 @@ func TestChangeSpoolRecordsTheReservationOfACommandThatEnded(t *testing.T) {
 	}
 }
 
+// A credential change marks its target before it writes or removes it. A
+// command that ended after the write or removal is recorded applied, never
+// failed (interrupted); one that ended after the mark but before the change
+// stays failed (interrupted). Every reservation and mark is gone afterwards.
+func TestChangeSpoolSettlesAnInterruptedChangeByItsTarget(t *testing.T) {
+	spool := newTestSpool(t)
+	secrets := t.TempDir()
+	write := func(name, value string) string {
+		t.Helper()
+		path := filepath.Join(secrets, name)
+		tmp := path + ".tmp"
+		if err := os.WriteFile(tmp, []byte(value), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(tmp, path); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	replaced := write("replaced-token", "old")
+	removed := write("removed-token", "old")
+	untouched := write("untouched-token", "old")
+	created := filepath.Join(secrets, "created-token")
+	notCreated := filepath.Join(secrets, "not-created-token")
+	cases := []struct {
+		name, action, target string
+		change               func()
+		outcome, code        string
+	}{
+		{"replaced-token", ChangeActionSet, replaced, func() { write("replaced-token", "new") }, ChangeApplied, ""},
+		{"created-token", ChangeActionSet, created, func() { write("created-token", "new") }, ChangeApplied, ""},
+		{"removed-token", ChangeActionRemove, removed, func() {
+			if err := os.Remove(removed); err != nil {
+				t.Fatal(err)
+			}
+		}, ChangeApplied, ""},
+		{"untouched-token", ChangeActionSet, untouched, func() {}, ChangeFailed, ChangeInterrupted},
+		{"not-created-token", ChangeActionSet, notCreated, func() {}, ChangeFailed, ChangeInterrupted},
+	}
+	ids := map[string]int{}
+	for i, tc := range cases {
+		reservation, err := spool.Reserve(ChangeKindSecret, tc.action, tc.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := reservation.MarkTarget(tc.target); err != nil {
+			t.Fatal(err)
+		}
+		if reservation.TargetChanged() {
+			t.Fatalf("%s: changed before the change", tc.name)
+		}
+		tc.change()
+		if got := reservation.TargetChanged(); got != (tc.outcome == ChangeApplied) {
+			t.Fatalf("%s: TargetChanged = %v", tc.name, got)
+		}
+		ids[reservation.id] = i
+		reservation.abandon() // The process stopped here.
+	}
+	later, err := spool.Reserve(ChangeKindSecret, ChangeActionSet, "later-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	later.Release()
+	events := readSpool(t, spool)
+	if len(events) != len(cases) {
+		t.Fatalf("spool = %+v", events)
+	}
+	for _, ev := range events {
+		tc := cases[ids[ev.EventID]]
+		if ev.SecretName != tc.name || ev.Action != tc.action || ev.Outcome != tc.outcome || ev.ReasonCode != tc.code {
+			t.Fatalf("%s settled as %+v, want %s %q", tc.name, ev, tc.outcome, tc.code)
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(spool.StateDir, changeReservationsDirName))
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("reservations or marks remain: %v (%v)", entries, err)
+	}
+	// A command that wrote its own event leaves no mark behind either.
+	reservation, err := spool.Reserve(ChangeKindSecret, ChangeActionSet, "replaced-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reservation.MarkTarget(replaced); err != nil {
+		t.Fatal(err)
+	}
+	if err := reservation.Write(appliedSecretChange(t, "replaced-token")); err != nil {
+		t.Fatal(err)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(spool.StateDir, changeReservationsDirName)); len(entries) != 0 {
+		t.Fatalf("Write left %v", entries)
+	}
+	if err := reservation.MarkTarget(replaced); err == nil {
+		t.Fatal("a used reservation marked a target")
+	}
+	var unreserved *ChangeReservation
+	if err := unreserved.MarkTarget(replaced); err == nil || unreserved.TargetChanged() {
+		t.Fatal("no reservation marked a target")
+	}
+}
+
 // The spool needs its existing state directory: without one nothing is
 // written.
 func TestChangeSpoolNeedsItsStateDirectory(t *testing.T) {

@@ -378,9 +378,9 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		}
 		return nil
 	}
-	result, existed, reservation, err := changeUnixSecret(cmd, action, opts, caller)
+	result, change, reservation, err := changeUnixSecret(cmd, action, opts, caller)
 	defer reservation.Release()
-	if recordErr := recordUnixSecretChange(reservation, action, opts.name, existed, result, err); recordErr != nil {
+	if recordErr := recordUnixSecretChange(reservation, action, opts.name, change, result, err); recordErr != nil {
 		warning := changeUnrecordedWarning(recordErr)
 		if err == nil && result != nil {
 			result.AddWarning(warning.Code, warning.Message)
@@ -392,7 +392,7 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		return reportUnixSecretFailure(cmd, action, opts, err, opts.json)
 	}
 	if !opts.json {
-		result = describeSecretChange(result, action, opts.name, existed)
+		result = describeSecretChange(result, action, opts.name, change.existed)
 	}
 	if err := printLifecycleResult(cmd.OutOrStdout(), result, opts.json); err != nil {
 		return err
@@ -400,26 +400,50 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	return lifecycleFailure(result, opts.json, "")
 }
 
+// unixSecretChange is what a secret set or remove did to the credential.
+type unixSecretChange struct {
+	// ran is set once the lifecycle run reached the write or removal.
+	ran bool
+	// existed: set found this exact value stored, remove found the
+	// credential.
+	existed bool
+	// changed is set once the credential was written or removed, also when
+	// the write or removal reported an error after it took effect.
+	changed bool
+}
+
 // recordUnixSecretChange leaves the change event of a secret set or remove
-// for the gateway: an applied change, a failed lifecycle run, or a refusal
-// before it, through reservation once the command reserved room for it. A
-// set of the stored value and the removal of an absent credential changed
-// nothing and record nothing; a caller that is not root cannot record. The
-// error is a change event that could not be written.
-func recordUnixSecretChange(reservation *enterprisestatus.ChangeReservation, action, name string, existed bool, result *enterprisestatus.Result, err error) error {
+// for the gateway, through reservation once the command reserved room for
+// it. A credential that was written or removed is applied, whatever the
+// ensure that then applies it reported (the command result reports that
+// failure). Otherwise a failed lifecycle run is failed, a refusal before it
+// or a run that ended before the change is refused. A set of the stored
+// value and the removal of an absent credential changed nothing and record
+// nothing; a caller that is not root cannot record. The error is a change
+// event that could not be written.
+func recordUnixSecretChange(reservation *enterprisestatus.ChangeReservation, action, name string, change unixSecretChange, result *enterprisestatus.Result, err error) error {
 	code, attempted := "", false
 	switch {
+	case change.changed:
+		err = nil
 	case err != nil:
 		code = secretFailureCode(err, enterprisestatus.UnixExitInvalidArgs)
 	case result != nil && len(result.Errors) > 0:
 		// The lifecycle run that writes or removes the credential failed.
 		code, attempted = result.Errors[0].Code, true
 		err = errors.New(code)
+	case result != nil && result.Noop && !change.ran:
+		// The run ended before the change (a superseded or rolled-back
+		// apply): nothing was written, though the run itself succeeded.
+		code = result.NoopReason
+		if code == "" {
+			code = "not_applied"
+		}
+		err = errors.New(code)
 	case result == nil:
 		return nil
 	}
-	changed := (action == "set" && !existed) || (action == "remove" && existed)
-	ev, ok := secretChangeEvent(action, name, changed, code, err, attempted)
+	ev, ok := secretChangeEvent(action, name, change.changed, code, err, attempted)
 	if !ok {
 		return nil
 	}
@@ -464,22 +488,26 @@ func runUnixSecretStatus(cmd *cobra.Command, opts *enterpriseSecretOptions) erro
 	return nil
 }
 
+// unixSecretLifecycle runs the ensure that writes or removes the credential
+// (opts.Mutate) and applies it. A seam for tests.
+var unixSecretLifecycle = enterpriseunix.Run
+
 // changeUnixSecret checks the arguments, reads the value, reserves room for
 // the change event and runs the write or removal and the ensure under one
 // lifecycle lock. An error is a failure before the lifecycle ran; the
 // result can still be a failure. The caller writes the change event through
 // the reservation and releases it.
-func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretOptions, caller int) (*enterprisestatus.Result, bool, *enterprisestatus.ChangeReservation, error) {
+func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretOptions, caller int) (*enterprisestatus.Result, unixSecretChange, *enterprisestatus.ChangeReservation, error) {
 	goos := enterpriseunix.CurrentGOOS()
 	env, err := newUnixLifecycleEnv(goos)
 	if err != nil {
-		return nil, false, nil, withExitCode(err, enterprisestatus.UnixExitFailure)
+		return nil, unixSecretChange{}, nil, withExitCode(err, enterprisestatus.UnixExitFailure)
 	}
 	if env.Geteuid() != 0 {
-		return nil, false, nil, secretFailed("not_root", enterprisestatus.UnixExitFailure, errors.New("run this command as root"))
+		return nil, unixSecretChange{}, nil, secretFailed("not_root", enterprisestatus.UnixExitFailure, errors.New("run this command as root"))
 	}
 	if err := checkLockWait(cmd, opts.lockWait); err != nil {
-		return nil, false, nil, err
+		return nil, unixSecretChange{}, nil, err
 	}
 	if opts.lockWait > 0 {
 		env.LockTimeout = opts.lockWait
@@ -488,63 +516,83 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 	// and exit 2, before the value is read or the lifecycle lock is taken
 	// (GAP-2146, GAP-2147).
 	if !managed.ValidCredentialName(opts.name) {
-		return nil, false, nil, lifecycleFlagError(cmd, fmt.Errorf("--name takes 1 to 63 lowercase letters, digits and dashes, starting with a letter or digit; not %q", opts.name))
+		return nil, unixSecretChange{}, nil, lifecycleFlagError(cmd, fmt.Errorf("--name takes 1 to 63 lowercase letters, digits and dashes, starting with a letter or digit; not %q", opts.name))
 	}
 	if action == "set" && opts.fromStdin == (opts.fromFile != "") {
-		return nil, false, nil, lifecycleFlagError(cmd, errors.New("pass exactly one of --from-stdin or --from-file"))
+		return nil, unixSecretChange{}, nil, lifecycleFlagError(cmd, errors.New("pass exactly one of --from-stdin or --from-file"))
 	}
-	var mutate func(context.Context) error
-	existed := false
+	var (
+		mutate      func(context.Context) error
+		change      unixSecretChange
+		reservation *enterprisestatus.ChangeReservation
+	)
+	target := filepath.Join(env.P(env.Layout.SecretsDir), opts.name)
+	// markedChange writes or removes the credential after it marks the file
+	// in the reservation, so a command that ends after the change is
+	// recorded applied, not failed (interrupted). A change it cannot mark is
+	// not made.
+	markedChange := func(apply func() error) error {
+		if err := reservation.MarkTarget(target); err != nil {
+			return fmt.Errorf("cannot record the credential change, so the credential was not changed: %w", err)
+		}
+		err := apply()
+		change.changed = err == nil || reservation.TargetChanged()
+		return err
+	}
 	switch action {
 	case "set":
 		var value []byte
 		if opts.fromFile != "" {
 			if err := enterpriseunix.TrustedSecretSource(opts.fromFile); err != nil {
-				return nil, false, nil, withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
+				return nil, unixSecretChange{}, nil, withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
 			}
 			file, err := os.Open(opts.fromFile)
 			if err != nil {
-				return nil, false, nil, secretFailed(codeSecretChangeFailed, enterprisestatus.UnixExitFailure, err)
+				return nil, unixSecretChange{}, nil, secretFailed(codeSecretChangeFailed, enterprisestatus.UnixExitFailure, err)
 			}
 			defer file.Close()
 			if value, err = enterpriseunix.ReadSecretValue(file); err != nil {
-				return nil, false, nil, withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
+				return nil, unixSecretChange{}, nil, withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
 			}
 		} else if value, err = readUnixSecretStdin(cmd.InOrStdin(), caller); err != nil {
-			return nil, false, nil, err
+			return nil, unixSecretChange{}, nil, err
 		}
 		mutate = func(ctx context.Context) error {
+			change.ran = true
 			if err := secretCallerGone(caller, secretCallerPID()); err != nil {
 				return err
 			}
 			// An identical value is not rewritten, so the output can say
 			// the credential already holds it (GAP-2373).
-			stored, readErr := os.ReadFile(filepath.Join(env.P(env.Layout.SecretsDir), opts.name))
-			if existed = readErr == nil && subtle.ConstantTimeCompare(stored, value) == 1; existed {
+			stored, readErr := os.ReadFile(target)
+			if change.existed = readErr == nil && subtle.ConstantTimeCompare(stored, value) == 1; change.existed {
 				return nil
 			}
-			return env.WriteSecret(ctx, opts.name, value)
+			return markedChange(func() error { return env.WriteSecret(ctx, opts.name, value) })
 		}
 	case "remove":
 		mutate = func(context.Context) error {
-			_, statErr := os.Lstat(filepath.Join(env.P(env.Layout.SecretsDir), opts.name))
-			existed = statErr == nil
-			return env.RemoveSecret(opts.name)
+			change.ran = true
+			_, statErr := os.Lstat(target)
+			if change.existed = statErr == nil; !change.existed {
+				return env.RemoveSecret(opts.name)
+			}
+			return markedChange(func() error { return env.RemoveSecret(opts.name) })
 		}
 	}
 	// A change this device could not audit is not made: the spool must hold
 	// room for its change event before the credential is written or
 	// removed, until the event is written. A concurrent command cannot take
 	// that room in between.
-	reservation, err := env.ReserveChange(enterprisestatus.ChangeKindSecret, action, opts.name)
+	reservation, err = env.ReserveChange(enterprisestatus.ChangeKindSecret, action, opts.name)
 	if err != nil {
-		return nil, false, nil, secretFailed(string(enterprisebundle.CodeStateInvalid), enterprisestatus.UnixExitFailure,
+		return nil, unixSecretChange{}, nil, secretFailed(string(enterprisebundle.CodeStateInvalid), enterprisestatus.UnixExitFailure,
 			fmt.Errorf("cannot record the credential change: %w", err))
 	}
 	// Write and apply under one lifecycle lock. The apply watcher the write
 	// wakes then finds the change already applied instead of racing it.
-	result := enterpriseunix.Run(cmd.Context(), env, enterpriseunix.Options{Action: enterpriseunix.ActionEnsure, Reason: "secret", Mutate: mutate})
-	return result, existed, reservation, nil
+	result := unixSecretLifecycle(cmd.Context(), env, enterpriseunix.Options{Action: enterpriseunix.ActionEnsure, Reason: "secret", Mutate: mutate})
+	return result, change, reservation, nil
 }
 
 // codeSecretChangeFailed is the code of a write or removal that did not

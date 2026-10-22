@@ -20,6 +20,7 @@ package enterprisestatus
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"syscall"
 )
@@ -42,3 +43,20 @@ func tryLockChangeFile(f *os.File) (locked bool, err error) {
 }
 
 func unlockChangeFile(f *os.File) { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }
+
+// inspectChangeTarget is the identity of the file at path, without
+// following a final symlink: absent, or its device and inode.
+func inspectChangeTarget(path string) (changeTarget, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return changeTarget{Path: path}, nil
+	}
+	if err != nil {
+		return changeTarget{}, err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return changeTarget{}, errors.New("the file system reports no file identity")
+	}
+	return changeTarget{Path: path, Present: true, Device: uint64(st.Dev), File: uint64(st.Ino)}, nil
+}

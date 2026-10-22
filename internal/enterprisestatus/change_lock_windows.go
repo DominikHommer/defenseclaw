@@ -46,3 +46,28 @@ func tryLockChangeFile(f *os.File) (locked bool, err error) {
 func unlockChangeFile(f *os.File) {
 	_ = windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, new(windows.Overlapped))
 }
+
+// inspectChangeTarget is the identity of the file at path, without
+// following a reparse point: absent, or its volume serial and file index.
+func inspectChangeTarget(path string) (changeTarget, error) {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return changeTarget{}, err
+	}
+	handle, err := windows.CreateFile(name, windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING,
+		windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
+		return changeTarget{Path: path}, nil
+	}
+	if err != nil {
+		return changeTarget{}, err
+	}
+	defer func() { _ = windows.CloseHandle(handle) }()
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return changeTarget{}, err
+	}
+	return changeTarget{Path: path, Present: true, Device: uint64(info.VolumeSerialNumber),
+		File: uint64(info.FileIndexHigh)<<32 | uint64(info.FileIndexLow)}, nil
+}

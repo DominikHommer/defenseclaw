@@ -26,6 +26,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 )
 
 // A command that changes the trust anchors or a credential reserves room
@@ -39,10 +41,20 @@ import (
 // (failed, interrupted). Its command holds a lock on it. A reservation
 // nobody holds belongs to a command that ended; the next writer moves its
 // event into the spool, so the attempt is still reported.
+//
+// A credential change also marks its target right before it writes or
+// removes it (MarkTarget): <event_id>.target names the file and which file
+// was there (device and file number, or none). When the command ends after
+// that and before its event, the next writer compares: another file there
+// now, none where one was, or one where none was means the change was made,
+// so it is recorded applied, not failed (interrupted). A mark carries no
+// value and no hash of one.
 
 const (
 	changeSpoolLockName       = "change-events.lock"
 	changeReservationsDirName = "change-reservations"
+	changeTargetSuffix        = ".target"
+	maxChangeTargetBytes      = 8 << 10
 	// ChangeInterrupted is the reason code of a change whose command ended
 	// before it recorded the outcome.
 	ChangeInterrupted = "interrupted"
@@ -168,6 +180,69 @@ func (r *ChangeReservation) Release() {
 func (r *ChangeReservation) drop() {
 	r.abandon()
 	_ = os.Remove(r.path)
+	_ = os.Remove(changeTargetMarkPath(r.path))
+}
+
+// changeTarget is the file a change is about to write or remove, as it was
+// before the change: absent, or present with this identity.
+type changeTarget struct {
+	Path    string `json:"path"`
+	Present bool   `json:"present"`
+	Device  uint64 `json:"device,omitempty"`
+	File    uint64 `json:"file,omitempty"`
+}
+
+func changeTargetMarkPath(reservationPath string) string {
+	return strings.TrimSuffix(reservationPath, ".json") + changeTargetSuffix
+}
+
+// MarkTarget records which file is at path (an absolute path) right before
+// the change writes or removes it. The change is not made when this fails:
+// an interruption after it could not be told from one before it.
+func (r *ChangeReservation) MarkTarget(path string) error {
+	if r == nil || r.file == nil {
+		return errChangeReservationUsed
+	}
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("change target %q is not an absolute path", path)
+	}
+	mark, err := inspectChangeTarget(path)
+	if err != nil {
+		return fmt.Errorf("inspect the change target: %w", err)
+	}
+	data, err := json.Marshal(mark)
+	if err != nil {
+		return err
+	}
+	return configwrite.WriteFileDurable(changeTargetMarkPath(r.path), data, 0o600)
+}
+
+// TargetChanged reports whether the target MarkTarget recorded is no longer
+// the file it saw: the write or removal took effect. It is false without a
+// mark, and when the target cannot be inspected.
+func (r *ChangeReservation) TargetChanged() bool {
+	if r == nil {
+		return false
+	}
+	return changeTargetChanged(changeTargetMarkPath(r.path))
+}
+
+func changeTargetChanged(markPath string) bool {
+	file, err := openChangeFile(markPath, os.O_RDONLY)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	raw, err := io.ReadAll(io.LimitReader(file, maxChangeTargetBytes+1))
+	if err != nil || len(raw) > maxChangeTargetBytes {
+		return false
+	}
+	var mark changeTarget
+	if json.Unmarshal(raw, &mark) != nil || !filepath.IsAbs(mark.Path) {
+		return false
+	}
+	now, err := inspectChangeTarget(mark.Path)
+	return err == nil && now != mark
 }
 
 func (r *ChangeReservation) abandon() {
@@ -233,6 +308,13 @@ func (s ChangeSpool) settleReservations() (held int, err error) {
 		return 0, err
 	}
 	for _, entry := range entries {
+		if id, mark := strings.CutSuffix(entry.Name(), changeTargetSuffix); mark && ValidChangeEventID(id) {
+			// The mark of a reservation already settled or released.
+			if _, err := os.Lstat(filepath.Join(dir, id+".json")); errors.Is(err, fs.ErrNotExist) {
+				_ = os.Remove(filepath.Join(dir, entry.Name()))
+			}
+			continue
+		}
 		id, ok := strings.CutSuffix(entry.Name(), ".json")
 		if !ok || !ValidChangeEventID(id) || !entry.Type().IsRegular() {
 			continue
@@ -249,21 +331,23 @@ func (s ChangeSpool) settleReservations() (held int, err error) {
 			held++
 			continue
 		}
-		err = s.recordInterrupted(id, file)
+		err = s.recordInterrupted(id, file, changeTargetMarkPath(path))
 		unlockChangeFile(file)
 		_ = file.Close()
 		if err != nil {
 			return held, err
 		}
 		_ = os.Remove(path)
+		_ = os.Remove(changeTargetMarkPath(path))
 	}
 	return held, nil
 }
 
 // recordInterrupted writes the event of a reservation whose command ended,
 // unless that command wrote its own (the same id) or the gateway already
-// reported it. A damaged reservation records nothing.
-func (s ChangeSpool) recordInterrupted(id string, file *os.File) error {
+// reported it: applied when its marked target changed (markPath), else the
+// reserved failed (interrupted). A damaged reservation records nothing.
+func (s ChangeSpool) recordInterrupted(id string, file *os.File, markPath string) error {
 	if _, err := os.Lstat(filepath.Join(s.Dir, id+".json")); err == nil {
 		return nil
 	}
@@ -277,6 +361,13 @@ func (s ChangeSpool) recordInterrupted(id string, file *os.File) error {
 	var ev ChangeEvent
 	if json.Unmarshal(raw, &ev) != nil || ev.EventID != id || ev.Validate() != nil {
 		return nil
+	}
+	if changeTargetChanged(markPath) {
+		applied := ev
+		applied.Outcome, applied.ReasonCode = ChangeApplied, ""
+		if data, err := marshalChangeEvent(applied); err == nil {
+			raw = data
+		}
 	}
 	return s.writeEvent(id, raw)
 }
