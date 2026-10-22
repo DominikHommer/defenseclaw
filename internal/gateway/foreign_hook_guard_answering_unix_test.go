@@ -67,7 +67,7 @@ func TestForeignHookSessionProofIsRenewedOnlyWhileTheGatewayAnswers(t *testing.T
 			}()
 			<-blocked
 			foreignHookSessionKey = previous
-			time.Sleep(2 * foreignHookAnswerWithin)
+			time.Sleep(foreignHookAnswerWithin + 500*time.Millisecond)
 			return func() {
 				close(release)
 				<-done
@@ -80,7 +80,7 @@ func TestForeignHookSessionProofIsRenewedOnlyWhileTheGatewayAnswers(t *testing.T
 		t.Run(tc.name, func(t *testing.T) {
 			server := newForeignHookRealPublishTestServer(t)
 			previousWithin := foreignHookAnswerWithin
-			foreignHookAnswerWithin = 200 * time.Millisecond
+			foreignHookAnswerWithin = foreignHookTestAnswerWithin
 			t.Cleanup(func() { foreignHookAnswerWithin = previousWithin })
 			writes := countForeignHookAllowWrites(t)
 			key := enterprisepolicy.SessionKey{Connector: "claudecode", Session: "s-1", Process: runtime.GOOS + ":b:1:500"}
@@ -117,6 +117,11 @@ func TestForeignHookSessionProofIsRenewedOnlyWhileTheGatewayAnswers(t *testing.T
 		})
 	}
 }
+
+// foreignHookTestAnswerWithin is the answer budget of these tests: short
+// enough to wait out, long enough that an ordinary exchange and a /health
+// probe under -race on a loaded host answer within it.
+const foreignHookTestAnswerWithin = 3 * time.Second
 
 // foreignHookServeForTest answers on ln as the hook listener does.
 func foreignHookServeForTest(ln net.Listener) {
@@ -179,7 +184,7 @@ func TestForeignHookSessionProofIsNotRenewedAfterAnExchangeWentUnanswered(t *tes
 		{name: "the exchange is answered after the hook's budget", drop: func(t *testing.T, server *foreignHookPublishTestServer, budget time.Duration) {
 			previous := foreignHookSessionKey
 			foreignHookSessionKey = func(root, identity string) (enterprisepolicy.SessionRecordKey, error) {
-				time.Sleep(2 * budget)
+				time.Sleep(budget + 500*time.Millisecond)
 				return previous(root, identity)
 			}
 			defer func() { foreignHookSessionKey = previous }()
@@ -190,7 +195,7 @@ func TestForeignHookSessionProofIsNotRenewedAfterAnExchangeWentUnanswered(t *tes
 			server := newForeignHookRealPublishTestServer(t)
 			server.api.hookCallerLimits.running = 1
 			previousWithin := foreignHookAnswerWithin
-			foreignHookAnswerWithin = 200 * time.Millisecond
+			foreignHookAnswerWithin = foreignHookTestAnswerWithin
 			t.Cleanup(func() { foreignHookAnswerWithin = previousWithin })
 			writes := countForeignHookAllowWrites(t)
 			key := enterprisepolicy.SessionKey{Connector: "claudecode", Session: "s-1", Process: runtime.GOOS + ":b:1:500"}
