@@ -45,9 +45,15 @@ type answerWatchdog struct {
 	fired          bool
 	failureLogged  bool
 	failureLogDone chan struct{}
-	// closedKnown is set once the call logged a failure that is closed:
-	// the watchdog's answer is then closed too.
+	// closedKnown is set once the watchdog's answer is closed: the call
+	// logged a failure that is closed, the gateway answered 429
+	// (closeForBusyGateway) or an error status (gatewayAnsweredError).
 	closedKnown bool
+	// failureClosed is set only when the call itself logged a closed
+	// failure (claimFailureLog): the hook then blocks locally, and its
+	// delivery receipt says so. A 429 or an error status that a later
+	// answer replaced does not block the call, so it acknowledges.
+	failureClosed bool
 	// logHome is the background lookup of the invoking user's diagnostic
 	// directory of a managed call (cacheFailureLogHome).
 	logHome *failureLogHomeLookup
@@ -219,6 +225,7 @@ func (w *answerWatchdog) claimFailureLog(opts Options, sp spec, closed bool) (ch
 	}
 	if closed {
 		w.closedKnown = true
+		w.failureClosed = true
 		w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = out, errb, code, logFailure
 	}
 	if w.failureLogged {
@@ -399,7 +406,7 @@ func (w *answerWatchdog) finish(code int) int {
 	_, _ = w.stderr.Write(w.err.Bytes())
 	_, _ = w.stdout.Write(w.out.Bytes())
 	if w.deliveryReceipt != nil {
-		w.deliveryReceipt(true, w.closedKnown)
+		w.deliveryReceipt(true, w.failureClosed)
 	}
 	return code
 }

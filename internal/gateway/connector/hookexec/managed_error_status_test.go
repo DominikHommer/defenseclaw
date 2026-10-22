@@ -149,12 +149,14 @@ func TestStandaloneOpenBlocksAGatewayThatAnsweredAnErrorStatus(t *testing.T) {
 		for _, c := range errorStatusConnectors {
 			mutate := withConnector(standaloneOpen, c.event, c.payload)
 			t.Run(profile+"/"+c.connector, func(t *testing.T) {
-				// The control: an outage with no answer is the administrator's open.
+				// The control: only a proven stop (errManagedGatewayNotRunning) is
+				// the administrator's open (TestManagedOutageFailsOpenOnlyForAnOpenStandaloneOutage).
+				// A gateway that took the call and gave no answer is no proven
+				// outage and blocks (faa766f38b, GAP-0518).
 				shortAnswerBudget(t, 400*time.Millisecond)
-				outage, _ := runAgainstGateway(t, c.connector, hungGateway(t), mutate)
-				if blocked(outage) {
-					t.Fatalf("a gateway that gave no answer was blocked in fail mode open: code=%d stdout=%q stderr=%q",
-						outage.code, outage.stdout, outage.stderr)
+				if hung, _ := runAgainstGateway(t, c.connector, hungGateway(t), mutate); !blocked(hung) {
+					t.Fatalf("a gateway that took the call and gave no answer was allowed in fail mode open: code=%d stdout=%q stderr=%q",
+						hung.code, hung.stdout, hung.stderr)
 				}
 				all := cases
 				if c.connector == "codex" {
