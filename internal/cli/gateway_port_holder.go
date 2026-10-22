@@ -20,6 +20,7 @@ import (
 // Seams for tests.
 var (
 	gatewayPortHolder         = daemon.FindPortHolder
+	gatewayPortHolders        = daemon.FindPortHolders
 	gatewayPortAnswers        = gatewayPortAcceptsConnections
 	gatewayManagedState       = func() (bool, int) { return daemon.New(config.DefaultDataPath()).IsRunning() }
 	gatewayRunsReplacedBinary = func() bool { return daemon.New(config.DefaultDataPath()).RunsReplacedExecutable() }

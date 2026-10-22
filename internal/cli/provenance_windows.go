@@ -3,8 +3,17 @@
 
 package cli
 
-import "context"
+import (
+	"context"
+	"io/fs"
+)
 
-func provenanceManagedGatewayPID(context.Context) (int, error) {
-	return int(windowsStandaloneGatewayPID()), nil
+// provenanceManagedGateway is the gateway service of a standalone
+// deployment; it binds its API socket itself.
+func provenanceManagedGateway(context.Context) (provenanceGateway, error) {
+	return provenanceGateway{PID: int(windowsStandaloneGatewayPID())}, nil
 }
+
+// provenanceCommittedConfig: the Windows deployment keeps no copy of the
+// last applied config. A seam for tests.
+var provenanceCommittedConfig = func() ([]byte, error) { return nil, fs.ErrNotExist }

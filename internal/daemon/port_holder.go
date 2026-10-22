@@ -34,6 +34,19 @@ func FindPortHolder(host string, port int) (PortHolder, error) {
 	return findPortHolder(host, port)
 }
 
+// FindPortHolders is FindPortHolder for every process that holds the
+// listening socket: one for a listener its process bound, more when the
+// socket was handed on. Under systemd socket activation PID 1 and the
+// service both hold it, and FindPortHolder names only the first (PID 1).
+// A listener whose process this account cannot see is one holder with PID
+// 0. Windows names the one owning process.
+func FindPortHolders(host string, port int) ([]PortHolder, error) {
+	if port < 1 || port > 65535 {
+		return nil, fmt.Errorf("%w: invalid port %d", ErrListenerInspectionUnavailable, port)
+	}
+	return findPortHolders(host, port)
+}
+
 // listenerServesHost reports whether a listener bound to bound (nil when
 // unknown) serves connections to host.
 func listenerServesHost(host string, bound net.IP) bool {

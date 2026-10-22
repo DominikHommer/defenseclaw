@@ -20,10 +20,25 @@ func findPortHolder(host string, port int) (PortHolder, error) {
 	return findProcPortHolder("/proc", host, port)
 }
 
+func findPortHolders(host string, port int) ([]PortHolder, error) {
+	return findProcPortHolders("/proc", host, port)
+}
+
 // findProcPortHolder reads the kernel's TCP tables for a LISTEN socket on
 // port that serves host, then finds the process that owns that socket among
 // the processes whose descriptors this account may read.
 func findProcPortHolder(procRoot, host string, port int) (PortHolder, error) {
+	holders, err := findProcPortHolders(procRoot, host, port)
+	if len(holders) == 0 {
+		return PortHolder{UID: -1}, err
+	}
+	return holders[0], err
+}
+
+// findProcPortHolders is findProcPortHolder for every process holding the
+// socket, in /proc order. A socket no readable process holds is one holder
+// with PID 0.
+func findProcPortHolders(procRoot, host string, port int) ([]PortHolder, error) {
 	holder := PortHolder{UID: -1}
 	inodes := map[string]struct{}{}
 	for _, table := range []string{"tcp", "tcp6"} {
@@ -56,12 +71,13 @@ func findProcPortHolder(procRoot, host string, port int) (PortHolder, error) {
 		_ = file.Close()
 	}
 	if len(inodes) == 0 {
-		return holder, ErrNoListener
+		return nil, ErrNoListener
 	}
 	entries, err := os.ReadDir(procRoot)
 	if err != nil {
-		return holder, nil
+		return []PortHolder{holder}, nil
 	}
+	var holders []PortHolder
 	for _, entry := range entries {
 		pid, err := strconv.Atoi(entry.Name())
 		if err != nil || pid <= 0 {
@@ -78,15 +94,20 @@ func findProcPortHolder(procRoot, host string, port int) (PortHolder, error) {
 				continue
 			}
 			if _, ok := inodes[target]; ok {
-				holder.PID = pid
+				found := holder
+				found.PID = pid
 				if comm, err := os.ReadFile(filepath.Join(procRoot, entry.Name(), "comm")); err == nil {
-					holder.Command = strings.TrimSpace(string(comm))
+					found.Command = strings.TrimSpace(string(comm))
 				}
-				return holder, nil
+				holders = append(holders, found)
+				break
 			}
 		}
 	}
-	return holder, nil
+	if len(holders) == 0 {
+		return []PortHolder{holder}, nil
+	}
+	return holders, nil
 }
 
 // procAddrIP decodes a /proc/net/tcp{,6} address: 32-bit words in host byte

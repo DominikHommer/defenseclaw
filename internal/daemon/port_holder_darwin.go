@@ -18,6 +18,14 @@ import (
 // serves host. lsof sees this account's processes; another account's
 // listener is reported as unavailable.
 func findPortHolder(host string, port int) (PortHolder, error) {
+	holders, err := findPortHolders(host, port)
+	if err != nil {
+		return PortHolder{UID: -1}, err
+	}
+	return holders[0], nil
+}
+
+func findPortHolders(host string, port int) ([]PortHolder, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	output, err := exec.CommandContext(
@@ -26,18 +34,33 @@ func findPortHolder(host string, port int) (PortHolder, error) {
 	if err != nil && len(output) == 0 {
 		// lsof exits 1 when it lists nothing.
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
-			return PortHolder{UID: -1}, ErrNoListener
+			return nil, ErrNoListener
 		}
-		return PortHolder{UID: -1}, ErrListenerInspectionUnavailable
+		return nil, ErrListenerInspectionUnavailable
 	}
-	return parseLsofPortHolder(string(output), host)
+	holders := parseLsofPortHolders(string(output), host)
+	if len(holders) == 0 {
+		return nil, ErrNoListener
+	}
+	return holders, nil
 }
 
 // parseLsofPortHolder picks, from lsof -Fpcun output, the first process with
-// a listening socket that serves host. Process fields (p, c, u) precede the
-// names (n) of that process's sockets.
+// a listening socket that serves host.
 func parseLsofPortHolder(output, host string) (PortHolder, error) {
+	if holders := parseLsofPortHolders(output, host); len(holders) > 0 {
+		return holders[0], nil
+	}
+	return PortHolder{UID: -1}, ErrNoListener
+}
+
+// parseLsofPortHolders lists, from lsof -Fpcun output, every process with a
+// listening socket that serves host, once each. Process fields (p, c, u)
+// precede the names (n) of that process's sockets.
+func parseLsofPortHolders(output, host string) []PortHolder {
+	var holders []PortHolder
 	holder := PortHolder{UID: -1}
+	listed := false
 	for _, line := range strings.Split(output, "\n") {
 		if len(line) < 2 {
 			continue
@@ -47,17 +70,19 @@ func parseLsofPortHolder(output, host string) (PortHolder, error) {
 		case 'p':
 			holder = PortHolder{UID: -1}
 			holder.PID, _ = strconv.Atoi(value)
+			listed = false
 		case 'c':
 			holder.Command = value
 		case 'u':
 			holder.UID, _ = strconv.Atoi(value)
 		case 'n':
-			if holder.PID > 0 && listenerServesHost(host, lsofListenIP(value)) {
-				return holder, nil
+			if !listed && holder.PID > 0 && listenerServesHost(host, lsofListenIP(value)) {
+				holders = append(holders, holder)
+				listed = true
 			}
 		}
 	}
-	return PortHolder{UID: -1}, ErrNoListener
+	return holders
 }
 
 // lsofListenIP is the bound address of an lsof socket name such as

@@ -7,22 +7,29 @@ package cli
 
 import (
 	"context"
-	"fmt"
 	"runtime"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
 )
 
-func provenanceManagedGatewayPID(ctx context.Context) (int, error) {
+// provenanceManagedGateway is the gateway service of a standalone
+// deployment and, under systemd socket activation, the service manager
+// that holds the API socket with it.
+func provenanceManagedGateway(ctx context.Context) (provenanceGateway, error) {
 	env, err := enterpriseunix.NewEnv(runtime.GOOS, appVersion)
 	if err != nil {
-		return 0, err
+		return provenanceGateway{}, err
 	}
-	for _, unit := range env.Services.Units() {
-		if unit.Kind == "gateway" {
-			status, err := env.Services.Status(ctx, unit)
-			return status.PID, err
-		}
+	pid, manager, err := env.GatewayAPIListener(ctx)
+	return provenanceGateway{PID: pid, SocketManagerPID: manager}, err
+}
+
+// provenanceCommittedConfig reads the root-only copy of the config the
+// standalone lifecycle last applied. A seam for tests.
+var provenanceCommittedConfig = func() ([]byte, error) {
+	env, err := enterpriseunix.NewEnv(runtime.GOOS, appVersion)
+	if err != nil {
+		return nil, err
 	}
-	return 0, fmt.Errorf("gateway service identity is unavailable")
+	return env.ReadCommittedConfig()
 }

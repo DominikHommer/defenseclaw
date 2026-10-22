@@ -18,6 +18,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // The documented config flow has the MDM write config.yaml in place and the
@@ -64,6 +66,17 @@ func (e *Env) rejectedReasonPath() string {
 func (e *Env) removeRejectedConfig() {
 	_ = removeFile(e.rejectedConfigPath())
 	_ = removeFile(e.rejectedReasonPath())
+}
+
+// ReadCommittedConfig returns the config the last committed transaction
+// applied (the root-only copy), for a reader that must not depend on an
+// in-place config.yaml edit the gateway rejected.
+func (e *Env) ReadCommittedConfig() ([]byte, error) {
+	path := e.committedConfigPath()
+	if err := managed.ValidateTrustedFilePath(path, "last applied config"); err != nil {
+		return nil, err
+	}
+	return readBounded(path, maxInputBytes)
 }
 
 // saveCommittedConfig records the config a committed transaction applied.
