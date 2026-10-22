@@ -99,7 +99,7 @@ func TestProfileExplainUIDTheDirectoryCannotNameMatchesItsUsersEntry(t *testing.
 	profileExplainDirectoryFacts = func(string) (useridentity.DirectoryFacts, error) {
 		return useridentity.DirectoryFacts{}, errors.New("SSSD NSS responder: i/o timeout")
 	}
-	profileExplainCachedSubject = func(string, time.Time) (profileSubject, bool) { return profileSubject{}, false }
+	profileExplainCachedSubject = func(string, time.Time) (profileSubject, error) { return profileSubject{}, errNoCachedHolder }
 	setIdentityLookupBlocking(true)
 	subject, err := profileExplainUnresolved("94404076", unixidentity.ErrNotFound)
 	if err != nil || subject.UserID != "94404076" || !subject.LookupFailed || !strings.Contains(subject.LookupError, "i/o timeout") {

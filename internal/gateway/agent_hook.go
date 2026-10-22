@@ -263,6 +263,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// and the agent identity derived from both (never the payload).
 		// No-op without profiles.
 		r = r.WithContext(a.withGuardrailProfileDecision(r.Context(), connectorName))
+		if reason := profileRefusal(r.Context()); reason != "" {
+			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "identity_unproven", 0)
+			a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": reason})
+			return
+		}
 		// What a standalone hook read in its user's home for asset_policy
 		// (skill names, the MCP server definition): claims, never authority.
 		r = r.WithContext(withClaimedAssetFacts(r.Context(), r.Header))

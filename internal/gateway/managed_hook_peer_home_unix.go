@@ -17,6 +17,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/bits"
 	"path/filepath"
 	"sort"
@@ -569,6 +570,7 @@ func (c *managedHookPeerHomeCache) noteHolder(uid int, key string) {
 	c.mu.Unlock()
 	if changed {
 		c.directoryCache().forget(key)
+		forgetUnprovenFacts(key)
 	}
 }
 
@@ -653,27 +655,57 @@ func (c *managedHookPeerHomeCache) lookup(uid int) string {
 // cached facts confirm (cachedFactsSpell): its UPN or principal, or
 // DOMAIN\name and name@domain of its own domain, so every spelling explain
 // accepts finds the facts the hooks apply during an outage (GAP-0551).
+//
+// The account database is asked first which account holds the uid now
+// (holderNow): a uid a directory handed to another account (another name,
+// home, record or incarnation) gets its former holder's facts dropped, as
+// its next hook call would drop them, so explain never shows them. Those
+// facts were served until a hook rechecked the uid (review of r104 W2B,
+// loop round 3). A spelling only the cached facts confirm (a UPN, a
+// principal, DOMAIN\name or name@domain) is a name rel/1.0.4 did not take
+// from them, and is served only while the account database names the
+// holder and its incarnation now, the one the facts were cached for
+// (confirmCachedSpelling).
 func (c *managedHookPeerHomeCache) cachedHolder(name string) (int, string, bool) {
+	uid, holder, err := c.cachedHolderFor(name)
+	return uid, holder, err == nil
+}
+
+// errNoCachedHolder is cachedHolderFor's answer for a name no cached facts
+// were used under.
+var errNoCachedHolder = errors.New("no cached directory facts were used under this name")
+
+// cachedHolderFor is cachedHolder with why it names no holder:
+// errNoCachedHolder, or why the holder of the cached facts a qualified
+// spelling names cannot be confirmed now.
+func (c *managedHookPeerHomeCache) cachedHolderFor(name string) (int, string, error) {
 	name = strings.TrimSpace(name)
 	holders := c.liveHolders()
 	if uid, err := strconv.Atoi(name); err == nil && strconv.Itoa(uid) == name {
-		if holder, ok := holders[uid]; ok {
-			return uid, holder.name, holder.name != ""
+		holder, ok := holders[uid]
+		if !ok || holder.name == "" || c.holderChanged(uid, holder) {
+			return 0, "", errNoCachedHolder
 		}
-		return 0, "", false
+		return uid, holder.name, nil
 	}
 	var foundUID int
 	var foundName string
 	for uid, holder := range holders {
 		if holder.name != "" && useridentity.EqualFold(holder.name, name) {
 			if foundName != "" {
-				return 0, "", false
+				return 0, "", errNoCachedHolder
 			}
 			foundUID, foundName = uid, holder.name
 		}
 	}
-	if foundName != "" || !useridentity.QualifiedAccountName(name) {
-		return foundUID, foundName, foundName != ""
+	if foundName != "" {
+		if c.holderChanged(foundUID, holders[foundUID]) {
+			return 0, "", errNoCachedHolder
+		}
+		return foundUID, foundName, nil
+	}
+	if !useridentity.QualifiedAccountName(name) {
+		return 0, "", errNoCachedHolder
 	}
 	for uid, holder := range holders {
 		if holder.name == "" {
@@ -684,11 +716,110 @@ func (c *managedHookPeerHomeCache) cachedHolder(name string) (int, string, bool)
 			continue
 		}
 		if foundName != "" {
-			return 0, "", false
+			return 0, "", errNoCachedHolder
 		}
 		foundUID, foundName = uid, holder.name
 	}
-	return foundUID, foundName, foundName != ""
+	if foundName == "" {
+		return 0, "", errNoCachedHolder
+	}
+	if err := c.confirmCachedSpelling(name, foundUID, holders[foundUID]); err != nil {
+		return 0, "", err
+	}
+	return foundUID, foundName, nil
+}
+
+// holderNow asks the account database at once which account holds uid, and
+// its account incarnation (managedHookPeerAccountIncarnation). A completed
+// answer is recorded as recheckAccount records one, so the hook path
+// compares its holder with it (noteHolder). ok is false when the database
+// does not name the uid now.
+func (c *managedHookPeerHomeCache) holderNow(uid int) (account unixidentity.Account, incarnation string, ok, incarnationKnown bool) {
+	c.account(uid)
+	c.mu.Lock()
+	resolver, entry := c.resolver, c.accounts[uid]
+	c.mu.Unlock()
+	if resolver == nil {
+		return unixidentity.Account{}, "", false, false
+	}
+	if forget, can := resolver.(interface{ ForgetUID(int) }); can {
+		forget.ForgetUID(uid)
+	}
+	found, err := resolver.LookupUID(uid)
+	if err != nil || found.UID != uid {
+		return unixidentity.Account{}, "", false, false
+	}
+	incarnation, incarnationKnown = managedHookPeerAccountIncarnation(found)
+	if entry != nil {
+		select {
+		case <-entry.ready:
+			c.mu.Lock()
+			entry.account, entry.ok, entry.notFound = found, true, false
+			entry.incarnation, entry.incarnationKnown = incarnation, incarnationKnown
+			entry.checked = c.now()
+			c.mu.Unlock()
+		default:
+		}
+	}
+	return found, incarnation, true, incarnationKnown
+}
+
+// holderChanged reports whether the account database names another account
+// than holder for uid now (holderNow), and then drops holder and the facts
+// cached for it, as noteHolder does. A database that does not answer
+// changes nothing: the facts are served through an outage.
+func (c *managedHookPeerHomeCache) holderChanged(uid int, holder managedHookPeerHolder) bool {
+	account, incarnation, ok, known := c.holderNow(uid)
+	if !ok || !holderReplaced(holder, account, incarnation, known) {
+		return false
+	}
+	c.dropHolder(uid, holder)
+	return true
+}
+
+// holderReplaced reports whether account, of incarnation (known), the
+// account that holds the uid now, is another than holder.
+func holderReplaced(holder managedHookPeerHolder, account unixidentity.Account, incarnation string, known bool) bool {
+	return account.Name != holder.name || account.Home != holder.home ||
+		holder.replacedBy(managedHookPeerAccountRecord(account.Name)) || holder.reincarnated(incarnation, known)
+}
+
+// dropHolder forgets holder as uid's and the facts cached for it.
+func (c *managedHookPeerHomeCache) dropHolder(uid int, holder managedHookPeerHolder) {
+	key := strconv.Itoa(uid)
+	c.mu.Lock()
+	if current, known := c.holders[uid]; known && current == holder {
+		delete(c.holders, uid)
+	}
+	c.mu.Unlock()
+	c.directoryCache().forget(key)
+	forgetUnprovenFacts(key)
+}
+
+// confirmCachedSpelling reports, with nil, that the account that holds uid
+// now is holder, the account whose cached facts spell name: the account
+// database names it with the name and home it had, and the incarnation the
+// facts were cached for. Otherwise the facts are not shown for a spelling
+// only they confirm: a uid and its UPN given to other accounts showed the
+// former holder's groups and profile under the reused UPN (review of r104
+// W2B, loop round 3). A holder replaced now is dropped (errNoCachedHolder).
+func (c *managedHookPeerHomeCache) confirmCachedSpelling(name string, uid int, holder managedHookPeerHolder) error {
+	account, incarnation, ok, known := c.holderNow(uid)
+	switch {
+	case !ok:
+		return fmt.Errorf("the gateway has directory facts cached for uid %d that spell %q, but the account database does not name "+
+			"the account that holds uid %d now, so they are not shown for that spelling; name the account by its uid or its account "+
+			"name, or try again when the directory answers", uid, name, uid)
+	case holderReplaced(holder, account, incarnation, known):
+		c.dropHolder(uid, holder)
+		return errNoCachedHolder
+	case !known || holder.incarnation == "":
+		return fmt.Errorf("the gateway has directory facts cached for uid %d that spell %q, but cannot confirm that the account that "+
+			"holds uid %d now is the one they were cached for (the directory does not name its account incarnation), so they are "+
+			"not shown for that spelling; name the account by its uid or its account name, or try again when the directory answers",
+			uid, name, uid)
+	}
+	return nil
 }
 
 // cachedFactsSpell reports whether name, a qualified account name, is a

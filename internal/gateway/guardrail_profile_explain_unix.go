@@ -8,6 +8,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -144,8 +145,12 @@ func profileExplainUnresolved(name string, lookupErr error) (profileSubject, err
 			return local, nil
 		}
 	}
-	if cached, ok := profileExplainCachedSubject(name, time.Now()); ok {
+	cached, cachedErr := profileExplainCachedSubject(name, time.Now())
+	if cachedErr == nil {
 		return cached, nil
+	}
+	if !errors.Is(cachedErr, errNoCachedHolder) {
+		return profileSubject{UserName: name}, fmt.Errorf("%w: %w", unixidentity.AccountLookupError(name, "", lookupErr), cachedErr)
 	}
 	if subject, ok := profileExplainUID(strings.TrimSpace(name), lookupErr); ok {
 		return subject, nil
@@ -205,22 +210,23 @@ func profileExplainUID(name string, lookupErr error) (profileSubject, bool) {
 // hooks apply: the facts the gateway cached for the uid whose account had
 // that name (or that uid), within the hour they are served. Explain then
 // shows the hook's profile with the age of the facts, not a spelling error
-// (GAP-0899).
-var profileExplainCachedSubject = func(name string, now time.Time) (profileSubject, bool) {
-	uid, userName, ok := managedHookPeerHomes.cachedHolder(name)
-	if !ok {
-		return profileSubject{}, false
+// (GAP-0899). errNoCachedHolder when there are none; another error says why
+// the facts a qualified spelling names are not shown (cachedHolderFor).
+var profileExplainCachedSubject = func(name string, now time.Time) (profileSubject, error) {
+	uid, userName, err := managedHookPeerHomes.cachedHolderFor(name)
+	if err != nil {
+		return profileSubject{}, err
 	}
 	id := strconv.Itoa(uid)
 	// peek reports only facts a hook call would still get: within the hour,
 	// and from a guardian record still trusted.
 	facts, fetchedAt, ok := peerDirectoryCache().peek(id)
 	if !ok {
-		return profileSubject{}, false
+		return profileSubject{}, errNoCachedHolder
 	}
 	subject := profileSubjectFromVerified(VerifiedSubject{
 		UserID: id, IDKind: useridentity.KindForID(id), UserName: userName, Directory: facts,
 	}, identityLookupBlocking.Load())
 	subject.cachedFactsAge = max(now.Sub(fetchedAt), time.Second)
-	return subject, true
+	return subject, nil
 }
