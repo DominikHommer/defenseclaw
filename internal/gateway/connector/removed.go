@@ -402,11 +402,18 @@ func (c removedOnlyConnector) replaceScript(dataDir string) error {
 	}
 	// Every write below first saves the bytes it replaces when they may be
 	// the user's edit; a save that fails leaves the script as it is.
-	keep := func(old []byte) error { return c.keepEdited(dataDir, path, old) }
-	if err := keep(data); err != nil {
+	keep := func(old []byte, live os.FileInfo) error { return c.keepEdited(dataDir, path, live, old) }
+	if err := keep(data, nil); err != nil {
 		return fmt.Errorf("%w; nothing was changed", err)
 	}
 	inPlace := c.writeStubInPlace(path, keep)
+	if inPlace != nil && links > 1 {
+		// The save may have replaced one of the names (a hard link at the
+		// saved copy's name, keepEdited), so they are counted again.
+		if _, now, _, err := c.scriptStateAndLinks(path); err == nil && now <= 1 {
+			links = now
+		}
+	}
 	if inPlace != nil && links > 1 {
 		return fmt.Errorf("%s is the hook script an older DefenseClaw wrote and has %d names (hard links), and the stub could not be written into it: %w. To finish: %s",
 			path, links, inPlace, c.hardLinkStep(path))
@@ -417,7 +424,7 @@ func (c removedOnlyConnector) replaceScript(dataDir string) error {
 		if state, _, data, err := c.scriptStateAndLinks(path); err != nil {
 			return fmt.Errorf("read %s again: %w (writing the stub into it: %v)", path, err, inPlace)
 		} else if state == removedScriptOwned {
-			if err := keep(data); err != nil {
+			if err := keep(data, nil); err != nil {
 				return fmt.Errorf("%w (writing the stub into it: %v)", err, inPlace)
 			}
 		}
@@ -447,7 +454,15 @@ var removedKeepEditedWrite = atomicReplaceFileNoFollow
 // copy is written to a temporary file, synced, renamed into place (the
 // folder synced) and read back; an error means it is not saved, and the
 // caller must not replace the script. The same bytes are saved once.
-func (c removedOnlyConnector) keepEdited(dataDir, path string, data []byte) error {
+//
+// live is the file data was read from (nil: the file at path now). A copy
+// counts as saved only when it is a file of its own (removedSavedCopy): a
+// name of the live file (a hard link), a link to it, or a file that another
+// name or other accounts can change is no copy, since the stub written into
+// the live file, or a later change, would reach it too. Such a name is
+// replaced with a copy of its own; a link or folder there is never written
+// through, so the save fails.
+func (c removedOnlyConnector) keepEdited(dataDir, path string, live os.FileInfo, data []byte) error {
 	if c.editLogical == "" {
 		return nil
 	}
@@ -456,18 +471,72 @@ func (c removedOnlyConnector) keepEdited(dataDir, path string, data []byte) erro
 		sameManagedTargetPath(record.Path, path) && record.PostSHA256 == sha256Hex(data) {
 		return nil
 	}
-	saved := c.editedCopyPath(dataDir, data)
-	if current, err := os.ReadFile(saved); err == nil && bytes.Equal(current, data) {
-		return nil
+	if live == nil {
+		if live, err = os.Lstat(path); err != nil {
+			return fmt.Errorf("save the edited %s before replacing it: %w", path, err)
+		}
 	}
+	saved := c.editedCopyPath(dataDir, data)
 	if err := ensureManagedBackupDirRestricted(filepath.Dir(saved)); err != nil {
 		return fmt.Errorf("save the edited %s before replacing it: %w", path, err)
 	}
-	if err := removedKeepEditedWrite(saved, data, 0o600); err != nil {
-		return fmt.Errorf("save the edited %s to %s before replacing it: %w", path, saved, err)
+	if removedSavedCopy(saved, live, data) == nil {
+		return nil
 	}
-	if current, err := os.ReadFile(saved); err != nil || !bytes.Equal(current, data) {
-		return fmt.Errorf("save the edited %s: %s does not read back as it (%v)", path, saved, err)
+	if err := removedKeepEditedWrite(saved, data, 0o600); err != nil {
+		return fmt.Errorf("save the edited %s to %s before replacing it: %w; move %s out of the way, then run %s",
+			path, saved, err, saved, c.teardownCommand())
+	}
+	if err := removedSavedCopy(saved, live, data); err != nil {
+		return fmt.Errorf("save the edited %s: %s is not a copy of its own that reads back as it: %w", path, saved, err)
+	}
+	return nil
+}
+
+// removedSavedCopy returns nil when saved is a copy of data of its own: a
+// regular file (never a link) with one name, not the live file, that only
+// its owner can read and change (removedSavedCopyPrivate), holding exactly
+// data. It reads through one handle and checks that handle is the file
+// named saved.
+func removedSavedCopy(saved string, live os.FileInfo, data []byte) error {
+	named, err := os.Lstat(saved)
+	if err != nil {
+		return err
+	}
+	if !named.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", saved)
+	}
+	file, err := os.OpenFile(saved, os.O_RDONLY|otlpOpenNoFollow(), 0)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(named, opened) {
+		return fmt.Errorf("%s changed while it was read", saved)
+	}
+	if live != nil && os.SameFile(opened, live) {
+		return fmt.Errorf("%s is another name (a hard link) of the module itself", saved)
+	}
+	links, err := atomicTransformBoundLinkCountPlatform(file)
+	if err != nil {
+		return err
+	}
+	if links != 1 {
+		return fmt.Errorf("%s has %d names (hard links)", saved, links)
+	}
+	if err := removedSavedCopyPrivate(opened); err != nil {
+		return fmt.Errorf("%s: %w", saved, err)
+	}
+	got, err := io.ReadAll(io.LimitReader(file, int64(len(data))+1))
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(got, data) {
+		return fmt.Errorf("%s does not hold the same bytes", saved)
 	}
 	return nil
 }
@@ -501,9 +570,9 @@ var (
 // with part of the stub before the old script. Once the whole stub is in,
 // every name runs it to its exit 2 whatever follows, and the rest (the tail
 // of inPlaceStub, the cut, the mode) only finishes the file, which is synced
-// and read back. keep saves the old bytes it read through the handle
-// (keepEdited) before anything is written.
-func (c removedOnlyConnector) writeStubInPlace(path string, keep func([]byte) error) error {
+// and read back. keep saves the old bytes it read through the handle, with
+// the handle's file (keepEdited), before anything is written.
+func (c removedOnlyConnector) writeStubInPlace(path string, keep func([]byte, os.FileInfo) error) error {
 	file, err := os.OpenFile(path, os.O_RDWR|otlpOpenNoFollow(), 0)
 	if err != nil {
 		return err
@@ -530,7 +599,7 @@ func (c removedOnlyConnector) writeStubInPlace(path string, keep func([]byte) er
 	if c.classifyScript(old) != removedScriptOwned {
 		return fmt.Errorf("%s changed while it was read", path)
 	}
-	if err := keep(old); err != nil {
+	if err := keep(old, info); err != nil {
 		return err
 	}
 	stub := c.inPlaceStub(len(old))

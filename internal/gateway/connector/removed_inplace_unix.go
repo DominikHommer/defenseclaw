@@ -20,9 +20,19 @@ package connector
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"syscall"
 )
+
+// removedSavedCopyPrivate refuses a saved copy of an edited module that
+// the group or other accounts may read or change.
+func removedSavedCopyPrivate(info os.FileInfo) error {
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return fmt.Errorf("its mode is %o, not private (600)", perm)
+	}
+	return nil
+}
 
 // removedInPlaceRefusal says why the stub may not be written into a removed
 // connector's script file (nil when it may): only a file that the owner of

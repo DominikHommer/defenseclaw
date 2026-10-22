@@ -213,7 +213,7 @@ func TestRemovedTeardownSavesTheEditBeforeEveryWrite(t *testing.T) {
 		h.stage(t, c)
 		writeRemovedFile(t, h.script(c), removedOmnigentEditedModule, 0o600)
 		var got []byte
-		err := c.writeStubInPlace(h.script(c), func(old []byte) error {
+		err := c.writeStubInPlace(h.script(c), func(old []byte, _ os.FileInfo) error {
 			got = append([]byte(nil), old...)
 			return errors.New("the disk is full")
 		})
@@ -299,5 +299,191 @@ func TestRemovedConnectorNamesStayReserved(t *testing.T) {
 	}
 	if _, ok := loaded["codex"]; !ok || len(loaded) != 1 {
 		t.Fatalf("LoadHookAPITokens loaded scopes %v, want only codex", loaded)
+	}
+}
+
+// Review fix (G-deadcode loop round 1, after head ce3eda49e8): an edited
+// OmniGent module lost its only saved copy when a file already at the saved
+// copy's name held the same bytes but was no copy of its own: a hard link to
+// the module (the stub written into the module reached it too), a link to
+// the module, a hard link to another file, or a file other accounts can
+// change. The teardown now counts a copy as saved only when it is a private
+// regular file with one name that is not the module; it replaces any other
+// file there with a copy of its own, and never writes through a link: the
+// save fails, and the module and its tokens stay as they are.
+func TestRemovedTeardownSavesTheEditToACopyOfItsOwn(t *testing.T) {
+	c := removedOmnigent
+	edit := []byte(removedOmnigentEditedModule)
+	type prepared struct {
+		other     string // a file the teardown must leave as it is
+		otherInfo os.FileInfo
+	}
+	cases := map[string]struct {
+		unixOnly bool
+		prepare  func(t *testing.T, h *removedHost, saved string) prepared
+		// failSave: the save cannot be made (a link at its name); the
+		// module, its tokens and the link stay.
+		failSave bool
+	}{
+		"a hard link to the module": {
+			prepare: func(t *testing.T, h *removedHost, saved string) prepared {
+				removedLinkOrSkip(t, h.script(c), saved)
+				return prepared{}
+			},
+		},
+		"a hard link to the module, which has another name too": {
+			// Windows never writes into a file with more names; it keeps
+			// the module and its tokens (TestRemovedTeardownWritesTheStubUnderEveryNameOfTheScript).
+			unixOnly: true,
+			prepare: func(t *testing.T, h *removedHost, saved string) prepared {
+				removedLinkOrSkip(t, h.script(c), saved)
+				removedLinkOrSkip(t, h.script(c), filepath.Join(h.home, "elsewhere", c.script))
+				return prepared{}
+			},
+		},
+		"a hard link to another file with the same bytes": {
+			prepare: func(t *testing.T, h *removedHost, saved string) prepared {
+				other := filepath.Join(h.home, "elsewhere", "mine.py")
+				writeRemovedFile(t, other, string(edit), 0o600)
+				removedLinkOrSkip(t, other, saved)
+				info, err := os.Stat(other)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return prepared{other: other, otherInfo: info}
+			},
+		},
+		"a copy other accounts can change": {
+			unixOnly: true,
+			prepare: func(t *testing.T, h *removedHost, saved string) prepared {
+				writeRemovedFile(t, saved, string(edit), 0o666)
+				if err := os.Chmod(saved, 0o666); err != nil {
+					t.Fatal(err)
+				}
+				return prepared{}
+			},
+		},
+		"a link to the module": {
+			failSave: true,
+			prepare: func(t *testing.T, h *removedHost, saved string) prepared {
+				if err := os.Symlink(h.script(c), saved); err != nil {
+					t.Skipf("symlinks unsupported here: %v", err)
+				}
+				return prepared{}
+			},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if tc.unixOnly && runtime.GOOS == "windows" {
+				t.Skip("Windows keeps the copy private by its folder's DACL, not its mode bits")
+			}
+			h := newRemovedHost(t)
+			h.stage(t, c)
+			writeRemovedFile(t, h.script(c), string(edit), 0o600)
+			saved := c.editedCopyPath(h.dataDir, edit)
+			if err := os.MkdirAll(filepath.Dir(saved), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			got := tc.prepare(t, h, saved)
+			module, err := os.Stat(h.script(c))
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = c.Teardown(context.Background(), h.opts)
+			if tc.failSave {
+				if err == nil || !strings.Contains(err.Error(), "save the edited") || !strings.Contains(err.Error(), "its tokens were kept") {
+					t.Fatalf("Teardown = %v, want the failed save and the tokens kept", err)
+				}
+				if data, _ := os.ReadFile(h.script(c)); string(data) != string(edit) {
+					t.Fatalf("the module it could not save was changed: %q", data)
+				}
+				if info, err := os.Lstat(saved); err != nil || info.Mode()&os.ModeSymlink == 0 {
+					t.Fatalf("the link at %s was changed: %v, %v", saved, info, err)
+				}
+				h.requireTokensKept(t, c)
+				return
+			}
+			if err != nil {
+				t.Fatalf("Teardown: %v", err)
+			}
+			h.requireStub(t, c)
+			h.requireRevoked(t, c)
+			h.requireEditedSaved(t, c, string(edit))
+			requireRemovedCopyOfItsOwn(t, saved, module)
+			if got.other != "" {
+				info, err := os.Stat(got.other)
+				if err != nil || !os.SameFile(info, got.otherInfo) {
+					t.Fatalf("%s is not the same file any more: %v", got.other, err)
+				}
+				if data, _ := os.ReadFile(got.other); string(data) != string(edit) {
+					t.Fatalf("%s was changed: %q", got.other, data)
+				}
+				requireRemovedCopyOfItsOwn(t, saved, got.otherInfo)
+			}
+			// A second run keeps the copy it made.
+			before, _ := os.Stat(saved)
+			if err := c.Teardown(context.Background(), h.opts); err != nil {
+				t.Fatalf("second Teardown: %v", err)
+			}
+			if after, err := os.Stat(saved); err != nil || !os.SameFile(before, after) {
+				t.Fatalf("the second run replaced the saved copy: %v", err)
+			}
+		})
+	}
+
+	// The read back after the save checks the same: a save that leaves a
+	// name of the module at the copy's name (a write skipped because the
+	// bytes match) is no save, so the module and its tokens stay.
+	t.Run("a save that leaves a name of the module", func(t *testing.T) {
+		h := newRemovedHost(t)
+		h.stage(t, c)
+		writeRemovedFile(t, h.script(c), string(edit), 0o600)
+		saveWrite := removedKeepEditedWrite
+		t.Cleanup(func() { removedKeepEditedWrite = saveWrite })
+		removedKeepEditedWrite = func(saved string, _ []byte, _ os.FileMode) error {
+			return os.Link(h.script(c), saved)
+		}
+		err := c.Teardown(context.Background(), h.opts)
+		if err == nil || !strings.Contains(err.Error(), "not a copy of its own") || !strings.Contains(err.Error(), "its tokens were kept") {
+			t.Fatalf("Teardown = %v, want the save refused and the tokens kept", err)
+		}
+		if data, _ := os.ReadFile(h.script(c)); string(data) != string(edit) {
+			t.Fatalf("the module it could not save was changed: %q", data)
+		}
+		h.requireTokensKept(t, c)
+	})
+}
+
+// removedLinkOrSkip makes link another name of target; it skips the test
+// where hard links cannot be made.
+func removedLinkOrSkip(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(target, link); err != nil {
+		t.Skipf("hard links unsupported here: %v", err)
+	}
+}
+
+// requireRemovedCopyOfItsOwn checks saved is a regular file with one name
+// that is not the file not.
+func requireRemovedCopyOfItsOwn(t *testing.T, saved string, not os.FileInfo) {
+	t.Helper()
+	info, err := os.Lstat(saved)
+	if err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("%s = %v, %v; want a regular file", saved, info, err)
+	}
+	if os.SameFile(info, not) {
+		t.Fatalf("%s is still another name of %s", saved, not.Name())
+	}
+	file, err := os.Open(saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if links, err := atomicTransformBoundLinkCountPlatform(file); err != nil || links != 1 {
+		t.Fatalf("%s has %d names (%v), want one", saved, links, err)
 	}
 }

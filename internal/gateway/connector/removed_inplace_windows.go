@@ -23,6 +23,12 @@ import (
 	"os"
 )
 
+// removedSavedCopyPrivate: on Windows the saved copy is private by the
+// owner-only DACL of the backup folder (ensureManagedBackupDirRestricted)
+// and of the file atomicReplaceFileNoFollow creates; Go's mode bits say
+// nothing about it.
+func removedSavedCopyPrivate(os.FileInfo) error { return nil }
+
 // removedInPlaceRefusal is never nil on Windows: no release wrote an
 // OpenHands script there (its hooks.json runs the native launcher, which
 // blocks the removed connectors), and an OmniGent module there gets the
