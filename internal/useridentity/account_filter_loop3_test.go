@@ -48,6 +48,9 @@ func TestAccountFilterMatchesRowsOfTheResolvedAccountOnly(t *testing.T) {
 	if f := NewAccountFilter(`CORP\alice`, sid).WithAccountIncarnation("", true); !f.MatchesIn(sid, "alice", "", "") {
 		t.Fatal("a SID row without provenance is not selected by its SID")
 	}
+	if f := NewAccountFilter(`OTHER\alice`, uid).WithAccountIncarnation("", true); f.MatchesIn("99999", `OTHER\alice`, "", "old-holder") {
+		t.Fatal("an unproven uid holder selected a same-name row from another uid")
+	}
 	// Rows of the views that keep no provenance keep being selected by id.
 	if f := NewAccountFilter(`OTHER\alice`, uid).WithAccountIncarnation(otherToken, true); !f.Matches(uid, "alice") {
 		t.Fatal("an IDE row of the resolved uid is no longer selected")

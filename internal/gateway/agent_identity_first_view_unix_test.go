@@ -51,6 +51,7 @@ func TestQualifiedAgentInventoryWithUnprovenHolderSelectsNoUIDRows(t *testing.T)
 	for _, row := range []inventory.AgentIdentityRecord{
 		{UserID: id, UserName: "alice"},
 		{UserID: id, UserName: "alice", UserIncarnation: "old-holder"},
+		{UserID: "41709", UserName: `OTHER\alice`, UserIncarnation: "old-holder"},
 	} {
 		if agentIdentityMatches(row, filter) {
 			t.Fatalf("unproven holder selected row %+v", row)
