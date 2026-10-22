@@ -299,16 +299,7 @@ func updateEnterpriseForeignHookLedger(stderr io.Writer, add func(now time.Time,
 	if _, err := prepareEnterpriseHookAuthorizationDir(dataDir); err != nil {
 		return err
 	}
-	if err := writeEnterpriseHookProtectedFile(path, data); err != nil {
-		return err
-	}
-	if err := os.Chmod(path, 0o640); err != nil {
-		return err
-	}
-	if err := enterpriseHookAuthorizationOwnershipSetter(path); err != nil {
-		return err
-	}
-	if err := enterpriseHookAuthorizationFileTrustCheck(path); err != nil {
+	if err := writeEnterpriseHookGatewayRecord(path, data); err != nil {
 		return err
 	}
 	for _, token := range settled {

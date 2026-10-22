@@ -751,3 +751,169 @@ func TestForeignHookCleanupPassWithRealWorkers(t *testing.T) {
 		t.Fatalf("the removal must be recorded and no pending denial left: %+v\nlog:\n%s", ledger, log)
 	}
 }
+
+// useForeignTxLedgerWrites sets up a standalone guardian with Cursor
+// governed whose ledger writes report what the gateway could see: problem
+// is called when the owner is set on the published ledger, or when the
+// published ledger is in a state the gateway cannot read (mode not 0640)
+// while a write sets the owner of or checks a file. It returns the ledger.
+func useForeignTxLedgerWrites(t *testing.T, problem func(string)) string {
+	t.Helper()
+	resetForeignTxs(t)
+	dataDir := useUserCleanupStateDir(t)
+	previous := cfg
+	setter, trust := enterpriseHookAuthorizationOwnershipSetter, enterpriseHookAuthorizationFileTrustCheck
+	t.Cleanup(func() {
+		cfg = previous
+		enterpriseHookAuthorizationOwnershipSetter, enterpriseHookAuthorizationFileTrustCheck = setter, trust
+	})
+	cfg = standaloneTestConfig(dataDir)
+	cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"cursor": {}}
+	ledger := foreignTxLedger(dataDir)
+	readable := func(stage string) {
+		info, err := os.Lstat(ledger)
+		if errors.Is(err, os.ErrNotExist) {
+			return
+		}
+		if err != nil || info.Mode().Perm() != 0o640 {
+			problem(fmt.Sprintf("%s: the published ledger is %v (%v)", stage, info.Mode(), err))
+		}
+	}
+	enterpriseHookAuthorizationOwnershipSetter = func(path string) error {
+		if path == ledger {
+			problem("the owner was set on the published ledger")
+		}
+		readable("owner")
+		return setter(path)
+	}
+	enterpriseHookAuthorizationFileTrustCheck = func(path string) error {
+		readable("trust check")
+		return trust(path)
+	}
+	return ledger
+}
+
+// foreignTxLedgerLeftovers names the files a ledger write left next to the
+// ledger.
+func foreignTxLedgerLeftovers(t *testing.T, ledger string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Dir(ledger))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, entry := range entries {
+		if entry.Name() != filepath.Base(ledger) && strings.Contains(entry.Name(), enterprisepolicy.ForeignHookRemovalsFile) {
+			names = append(names, entry.Name())
+		}
+	}
+	return names
+}
+
+// The gateway reads the removal ledger on every call and denies every
+// account while it cannot read it. So every ledger write (a cleanup's
+// start, a recorded removal, a settle, an uncertain settle, a reconcile)
+// publishes a file that already has its final mode and owner and passed
+// its trust check. A ledger published 0600 and opened up only after its
+// rename denied clean accounts for that moment, and pending denials and
+// their settlement made such writes frequent.
+func TestForeignHookLedgerIsGatewayReadableAtEveryWrite(t *testing.T) {
+	var problems []string
+	ledger := useForeignTxLedgerWrites(t, func(problem string) { problems = append(problems, problem) })
+	token, err := beginEnterpriseForeignHookCleanup(io.Discard, "1000", []string{"cursor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recordEnterpriseForeignHookRemovals(io.Discard, "1000", "/home/u", "cursor", []string{"/home/u/.cursor/hooks.json"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := finishEnterpriseForeignHookCleanup(io.Discard, token, false); err != nil {
+		t.Fatal(err)
+	}
+	if token, err = beginEnterpriseForeignHookCleanup(io.Discard, "1001", []string{"cursor"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := finishEnterpriseForeignHookCleanup(io.Discard, token, true); err != nil {
+		t.Fatal(err)
+	}
+	reconcileEnterpriseForeignHookCleanups(io.Discard)
+	if len(problems) != 0 {
+		t.Fatalf("the gateway could meet a ledger it cannot read:\n%s", strings.Join(problems, "\n"))
+	}
+	info, err := os.Lstat(ledger)
+	if err != nil || info.Mode().Perm() != 0o640 {
+		t.Fatalf("the published ledger is %v (%v), want 0640", info.Mode(), err)
+	}
+	if leftovers := foreignTxLedgerLeftovers(t, ledger); len(leftovers) != 0 {
+		t.Fatalf("ledger writes left %v", leftovers)
+	}
+	if _, err := loadEnterpriseForeignHookRemovals(ledger); err != nil {
+		t.Fatalf("the published ledger does not read: %v", err)
+	}
+}
+
+// A ledger write whose new file cannot be given its owner, has the wrong
+// mode or fails its trust check publishes nothing: the ledger the gateway
+// reads stays as it was, readable, and the cleanup does not start.
+func TestForeignHookLedgerWriteThatCannotBeProtectedPublishesNothing(t *testing.T) {
+	for _, failure := range []string{"owner", "mode", "trust check"} {
+		t.Run(failure, func(t *testing.T) {
+			ledger := useForeignTxLedgerWrites(t, func(problem string) { t.Error(problem) })
+			if _, err := beginEnterpriseForeignHookCleanup(io.Discard, "1000", []string{"cursor"}); err != nil {
+				t.Fatal(err)
+			}
+			good, err := os.ReadFile(ledger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			setter, trust := enterpriseHookAuthorizationOwnershipSetter, enterpriseHookAuthorizationFileTrustCheck
+			// newLedger is the file a ledger write publishes, before it does.
+			newLedger := func(path string) bool {
+				return path != ledger && filepath.Dir(path) == filepath.Dir(ledger) && strings.Contains(filepath.Base(path), enterprisepolicy.ForeignHookRemovalsFile)
+			}
+			switch failure {
+			case "owner":
+				enterpriseHookAuthorizationOwnershipSetter = func(path string) error {
+					if newLedger(path) {
+						return errors.New("chown: no such group")
+					}
+					return setter(path)
+				}
+			case "mode":
+				enterpriseHookAuthorizationOwnershipSetter = func(path string) error {
+					if err := setter(path); err != nil {
+						return err
+					}
+					if !newLedger(path) {
+						return nil
+					}
+					return os.Chmod(path, 0o600)
+				}
+			case "trust check":
+				enterpriseHookAuthorizationFileTrustCheck = func(path string) error {
+					if newLedger(path) {
+						return errors.New("group-writable")
+					}
+					return trust(path)
+				}
+			}
+			_, err = beginEnterpriseForeignHookCleanup(io.Discard, "1001", []string{"cursor"})
+			enterpriseHookAuthorizationOwnershipSetter, enterpriseHookAuthorizationFileTrustCheck = setter, trust
+			if err == nil {
+				t.Fatal("a cleanup started on a ledger write that could not be protected")
+			}
+			if data, err := os.ReadFile(ledger); err != nil || string(data) != string(good) {
+				t.Fatalf("a write that could not be protected changed the ledger (%v)", err)
+			}
+			if info, err := os.Lstat(ledger); err != nil || info.Mode().Perm() != 0o640 {
+				t.Fatalf("the ledger is %v (%v) after a refused write, want 0640", info.Mode(), err)
+			}
+			if leftovers := foreignTxLedgerLeftovers(t, ledger); len(leftovers) != 0 {
+				t.Fatalf("a refused write left %v", leftovers)
+			}
+			if got := len(enterpriseForeignHookCleanupTxs); got != 1 {
+				t.Fatalf("%d transactions open, want only the first cleanup's", got)
+			}
+		})
+	}
+}
