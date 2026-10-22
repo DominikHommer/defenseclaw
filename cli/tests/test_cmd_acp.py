@@ -1843,3 +1843,88 @@ def test_only_this_accounts_own_record_proves_an_alias(tmp_path, monkeypatch):
             assert json.loads(settings.read_text())["agent_servers"] == {"My Kiro": alias, "Foreign": foreign}, label
     finally:
         cleanup_app(app, db_path, data_dir)
+
+
+def test_recordless_reserved_entry_is_defenseclaws_whatever_the_guard_filename(tmp_path, monkeypatch):
+    """The reserved entry for its own pair needs no record, whatever --guard-binary named.
+
+    Releases through 1.0.3 and the managed Go setup write the reserved entry
+    without a record, with the guard executable the operator named. Status
+    and verify call it healthy, so setup, adoption and removal must own it
+    too. The reserved name with another pair's marker, and a recordless entry
+    under any other name, are still not DefenseClaw's.
+    """
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    settings.parent.mkdir(parents=True)
+    agent = _binary(tmp_path / "kiro-cli")
+    direct = {"command": agent, "args": ["acp"]}
+    foreign = {"command": "other", "args": []}
+    record = cmd_acp_module._entry_record_path(data_dir)
+    reserved = "DefenseClaw · Kiro"
+    remove_args = ["remove", "--client", "zed", "--agent", "kiro"]
+
+    def legacy_setup(guard: str) -> dict:
+        """Set the pair up, then drop the record, as a 1.0.3 or managed Go setup leaves it."""
+        settings.write_text(json.dumps({"agent_servers": {"Foreign": foreign}}))
+        result = CliRunner().invoke(acp_cmd, _setup_args(guard, agent), obj=app)
+        assert result.exit_code == 0, (guard, result.output)
+        record.unlink()
+        return json.loads(settings.read_text())["agent_servers"][reserved]
+
+    def servers() -> dict:
+        return json.loads(settings.read_text())["agent_servers"]
+
+    try:
+        for filename in ("custom-guard", "defenseclaw-acp"):
+            guard = _binary(tmp_path / filename)
+
+            legacy_setup(guard)
+            status = json.loads(CliRunner().invoke(acp_cmd, ["status", "--json"], obj=app).output)
+            assert status["bindings"]["zed/kiro"]["healthy"] is True, (filename, status)
+            verified = CliRunner().invoke(acp_cmd, ["verify"], obj=app)
+            assert verified.exit_code == 0, (filename, verified.output)
+
+            reapplied = CliRunner().invoke(acp_cmd, _setup_args(guard, agent), obj=app)
+            assert reapplied.exit_code == 0, (filename, reapplied.output)
+            assert servers()[reserved]["command"] == guard and servers()["Foreign"] == foreign, filename
+            record.unlink()
+            removed = CliRunner().invoke(acp_cmd, remove_args, obj=app)
+            assert removed.exit_code == 0, (filename, removed.output)
+            assert servers() == {"Foreign": foreign}, filename
+
+            # Adoption replaces the recordless reserved entry with the adopted alias.
+            legacy_setup(guard)
+            detected = cmd_acp_module._detect_acp_clients(data_dir)
+            (zed,) = [row for row in detected if row["client"] == "zed"]
+            assert {"entry": reserved, "agent": "kiro"} in zed["guarded"], (filename, zed)
+            settings.write_text(json.dumps({"agent_servers": {**servers(), "My Kiro": direct}}))
+            adopted = CliRunner().invoke(
+                acp_cmd, ["adopt", "--client", "zed", "--guard-binary", guard, "--yes", "--json-output"], obj=app
+            )
+            assert adopted.exit_code == 0, (filename, adopted.output)
+            assert set(servers()) == {"My Kiro", "Foreign"} and servers()["My Kiro"]["command"] == guard, filename
+            assert CliRunner().invoke(acp_cmd, remove_args, obj=app).exit_code == 0, filename
+            assert servers() == {"Foreign": foreign}, filename
+
+            # The reserved name with another client's marker is not this pair's entry.
+            entry = legacy_setup(guard)
+            args = list(entry["args"])
+            args[args.index("--client") + 1] = "jetbrains"
+            settings.write_text(json.dumps({"agent_servers": {reserved: {**entry, "args": args}, "Foreign": foreign}}))
+            before = settings.read_bytes()
+            for command in (_setup_args(guard, agent), remove_args):
+                refused = CliRunner().invoke(acp_cmd, command, obj=app)
+                assert refused.exit_code != 0 and "cannot identify editor entry" in refused.output, (filename, refused.output)
+                assert settings.read_bytes() == before, filename
+
+            # Under any other name a recordless guard entry is left, with the manual step.
+            settings.write_text(json.dumps({"agent_servers": {"Other Kiro": entry, "Foreign": foreign}}))
+            before = settings.read_bytes()
+            removed = CliRunner().invoke(acp_cmd, remove_args, obj=app)
+            assert removed.exit_code == 0 and "Left editor entry 'Other Kiro'" in removed.output, (filename, removed.output)
+            assert settings.read_bytes() == before, filename
+            settings.write_text(json.dumps({"agent_servers": {"Foreign": foreign}}))
+    finally:
+        cleanup_app(app, db_path, data_dir)

@@ -498,15 +498,16 @@ def _guarded_pair(entry: dict[str, Any], name: str, records: EntryRecords) -> tu
     client, agent = options.get("--client", ""), options.get("--agent", "")
     if client not in _CLIENTS or agent not in _AGENTS:
         return None
-    if name == _managed_name(agent) and _entry_is_guarded(entry):
-        # The reserved name launching the guard is what every release
-        # through 1.0.3 and the managed Go setup write for the pair, without
-        # a record. Kept for the 0.8.10 and 1.0.0-1.0.3 upgrade paths and
-        # for managed enrollments.
+    if name == _managed_name(agent):
+        # The reserved name carrying the marker for its own pair is what every
+        # release through 1.0.3 and the managed Go setup write, without a
+        # record and with whatever guard executable --guard-binary named, so
+        # the guard's filename is not part of this rule. Kept for the 0.8.10
+        # and 1.0.0-1.0.3 upgrade paths and for managed enrollments.
         return client, agent
-    # Any other entry (an adopted picker entry, a copy, a guard with another
-    # filename) is DefenseClaw's only while it is exactly what this runtime
-    # recorded writing under that name in this editor file.
+    # Any other entry (an adopted picker entry, a copy) is DefenseClaw's only
+    # while it is exactly what this runtime recorded writing under that name
+    # in this editor file.
     digest = records.get((client, agent, _editor_key(client), name))
     return (client, agent) if digest is not None and digest == _entry_digest(entry) else None
 
