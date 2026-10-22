@@ -33,6 +33,24 @@ def _flat(page: str) -> str:
     return " ".join((DOCS / page).read_text(encoding="utf-8").split())
 
 
+def test_managed_hook_docs_distinguish_outages_from_refusals() -> None:
+    threat_model = (ROOT / "docs/ENTERPRISE-THREAT-MODEL.md").read_text(encoding="utf-8")
+    rate_limit = next(line for line in threat_model.splitlines() if line.startswith("| R31 |"))
+    coverage = _flat("appendix/coverage-by-layer.mdx")
+    for text in (rate_limit, coverage):
+        assert not re.search(r"always fail[ -]closed", text, re.IGNORECASE)
+        assert all(term in text for term in ("default", "closed", "administrator", "open", "outage", "Secure Client"))
+        assert all(term in text for term in ("runtime", "peer", "credential"))
+    assert "429" in rate_limit and "block" in rate_limit
+    assert "outage-only" in rate_limit and "outage-only" in coverage
+
+    fail_modes = _flat("reference/configuration/fail-modes.mdx")
+    strict = fail_modes.split("## Strict availability", 1)[1].split("## ", 1)[0]
+    assert "classified outages" in strict
+    assert "force the unavailable-home and transport failures closed" not in strict
+    assert "force the relevant unavailable-home and transport failures closed" not in strict
+
+
 # (fact, [(pages that may hold the phrase, phrase), ...])
 FACTS = [
     ('account_outage_refusal_matches_the_cli', [

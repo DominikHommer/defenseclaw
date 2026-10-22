@@ -47,11 +47,20 @@ A sandboxed agent's hooks run inside the sandbox and reach the gateway through a
 | --- | --- | --- | --- | --- |
 | **Linux, open-source (per-user)** | Yes | Yes, on the Docker driver (rootful Docker and the `docker` group) | A and B. C needs capabilities a per-user install does not have; see [What to grant](/docs/reference/scanning/ai-discovery) | Detected and explained; the per-user gateway never connects to it. For docker sandboxes, see the next row |
 | **Linux, managed (standalone enterprise)** | Yes; the native hook is a root-owned binary | Yes, Docker or an optional MicroVM driver with KVM; copy mode only, under the administrator's [sandbox policy](/docs/enterprise/runtime/sandboxes) | A, B and C, through the root sensor helper | Consume, observe or enforce, through the root sensor helper |
-| **Linux sandbox** (Docker driver) | Yes, always fail closed | Yes | None inside the sandbox; the per-user gateway has no Plane C | Read only, when an administrator runs Tetragon and installs the opt-in [sandbox kernel feed](/docs/how-to/sandboxes/set-up-on-linux): every process start and exit in your sandboxes joins their process tree. No policy and no enforcement; the sandbox is contained by OpenShell |
+| **Linux sandbox** (Docker driver) | Yes | Yes | None inside the sandbox; the per-user gateway has no Plane C | Read only, when an administrator runs Tetragon and installs the opt-in [sandbox kernel feed](/docs/how-to/sandboxes/set-up-on-linux): every process start and exit in your sandboxes joins their process tree. No policy and no enforcement; the sandbox is contained by OpenShell |
 | **macOS, open-source** | Yes | Yes, MicroVM driver on Apple silicon | A and B | Not available: Tetragon has no macOS agent |
-| **macOS sandbox** (MicroVM) | Yes, always fail closed | Yes; copy mode only | None inside the guest | Not available: the guest kernel is not visible to the host |
+| **macOS sandbox** (MicroVM) | Yes | Yes; copy mode only | None inside the guest | Not available: the guest kernel is not visible to the host |
 | **macOS, managed** | Yes | Yes, MicroVM driver on Apple silicon; copy mode only, under the administrator's [sandbox policy](/docs/enterprise/runtime/sandboxes). Intel Macs refuse | A, B and C (Endpoint Security, notify only) | Not available |
 | **Windows** | Yes; native hook runner | No: sandboxes are refused | A and B. C needs an elevated token and the Advanced Audit Policy | Not available |
+
+Hooks fail closed by default everywhere except Secure Client. On a managed
+standalone computer, the administrator may choose `hook_fail_mode: open`, an
+outage-only exception for a gateway service that is stopped, restarting or gives
+no answer in time. A missing or invalid administrator-owned runtime, an unverified
+gateway peer, missing or refused credentials, rate limits and unusable responses
+still block. Secure Client keeps its separate open default and honors an explicit
+`closed`. See [Fail modes](/docs/reference/configuration/fail-modes) for the
+connector and event limits.
 
 The Secure Client profile is outside this page. It does not use the Tetragon
 settings, and its configuration is refused if it carries them.

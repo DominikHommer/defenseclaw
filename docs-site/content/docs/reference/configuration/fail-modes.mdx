@@ -61,9 +61,13 @@ Under the Secure Client integration only, hooks fail open: an unset `guardrail.h
 
 A GitHub Copilot hook whose registered command names no event DefenseClaw reviewed is refused in fail mode `closed`, and a managed one in every fail mode. Copilot can block only `preToolUse` and `permissionRequest`, and its payload does not name the event, so the hook answers with both of Copilot's deny fields. An Antigravity hook registered without its event denies a tool call in fail mode `closed` and gives anything else its no-op answer. `verify` reports a DefenseClaw hook registered for an event DefenseClaw does not publish, and `ensure` rewrites the drop-in. On a per-user install `defenseclaw doctor` names the entry, and `defenseclaw setup <connector>` registers it again.
 
-On a managed standalone host the administrator-owned hooks of GitHub Copilot CLI and Hermes follow the effective mode on every OS: `closed` blocks a tool call DefenseClaw cannot check (service not running, unusable answer, or a call too large to inspect), and the agent shows why. Only the administrator's `hook_fail_mode: open` lets such a call through.
+On a managed standalone host the administrator-owned hooks of GitHub Copilot CLI and Hermes follow the effective mode on every OS: `closed` blocks a tool call DefenseClaw cannot check, and the agent shows why. The administrator's `hook_fail_mode: open` allows only a classified gateway outage; unusable answers and calls too large to inspect still block.
 
 ## Effective behavior
+
+The failure rows below describe per-user hooks. On a managed standalone host,
+only a classified gateway outage can open a hook: the
+[refusals above](#refusals-that-ignore-the-fail-mode) still block under `open`.
 
 | Failure | Effective `open` | Effective `closed` |
 | --- | --- | --- |
@@ -153,9 +157,9 @@ An already-completed result event cannot undo its side effect, and an observatio
 
 ## Strict availability
 
-`DEFENSECLAW_STRICT_AVAILABILITY=1` is an unconditional closed override for transport and missing-token failures, for managed or compatibility deployments that must never open during a gateway outage. It does not add a missing hook, turn native OTLP into enforcement, or make an unsupported connector block-capable. A strict outage can make the agent unavailable, so use status, gateway monitoring and a tested restart path before applying it broadly. On native Windows, set normal posture with `guardrail fail-mode` so setup, doctor and status can reconcile and report it. Administrator-managed hooks force the unavailable-home and transport failures closed rather than trusting a user-controlled environment.
+`DEFENSECLAW_STRICT_AVAILABILITY=1` is an unconditional closed override for transport and missing-token failures, for managed or compatibility deployments that must never open during a gateway outage. It does not add a missing hook, turn native OTLP into enforcement, or make an unsupported connector block-capable. A strict outage can make the agent unavailable, so use status, gateway monitoring and a tested restart path before applying it broadly. On native Windows, set normal posture with `guardrail fail-mode` so setup, doctor and status can reconcile and report it.
 
-Administrator-managed hooks force the relevant unavailable-home and transport failures closed rather than trusting a user-controlled process environment.
+On a managed standalone computer, hooks reject an invalid runtime, an unverified gateway peer or missing or refused credentials in every fail mode. The administrator's `open` covers only classified outages; `DEFENSECLAW_STRICT_AVAILABILITY=1` closes those too.
 
 ## The environment does not set the fail mode
 
