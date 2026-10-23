@@ -103,8 +103,8 @@ func RunContained(cmd *exec.Cmd) error {
 // custodian kills and reaps them all; when it cannot, RunTracked returns
 // ErrNotContained. The command cannot signal or trace the custodian, so it
 // cannot end it and hand a child in a session of its own to init
-// (GAP-0631): its runner refuses every system call that signals the
-// custodian's process or group, and the custodian is not dumpable. A user
+// (GAP-0631): its runner refuses positive signal targets and remote
+// prlimit, starts a separate session, and the custodian is not dumpable. A user
 // namespace like RunContained's would show root-owned files as owned by the
 // overflow user to the scanner. On macOS a supervisor, a short-lived copy of
 // this binary in a process group of its own, runs the command in a session of its own. It

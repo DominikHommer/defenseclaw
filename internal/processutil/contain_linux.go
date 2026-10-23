@@ -48,7 +48,9 @@ import (
 // runner. A command that kills its immediate parent kills the runner; its
 // descendants are then reparented to the custodian, which kills and reaps
 // them. The command cannot end the custodian instead: the runner's seccomp
-// filter refuses every signal to it (guardCustodian). The custodian is a
+// filter refuses positive signal targets and remote prlimit, and the runner
+// starts a separate session so a command cannot join the custodian's group
+// and signal it with kill(0) (guardCustodian). The custodian is a
 // separate process so gateway children are never included in its sweep. Scanners keep it: without privilege the PID
 // namespace needs a user namespace mapping only this process's IDs, where
 // root-owned files read as owned by the overflow user, and DefenseClaw's own
@@ -293,7 +295,9 @@ func superviseContained(argv []string, budget time.Duration) int {
 	child.Args = append([]string{containSupervisorArg0, containRunnerMode, budget.String(), "--"}, argv...)
 	child.Env = os.Environ()
 	child.Stdin, child.Stdout, child.Stderr = os.Stdin, os.Stdout, os.Stderr
-	child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+	// A separate session keeps the command from joining the custodian's
+	// process group, which would let kill(0) bypass the signal filter.
+	child.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Pdeathsig: syscall.SIGKILL}
 	if err := child.Start(); err != nil {
 		return containExitNotStarted
 	}

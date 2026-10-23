@@ -44,18 +44,18 @@ const (
 
 func seccompArg(i uint32) uint32 { return 16 + 8*i }
 
-// guardCustodian keeps what the calling thread starts from signaling the
-// custodian with pid custodian: a scanner that SIGKILLed it, its
-// grandparent, took the runner and the command down with the parent-death
-// signals, and the kernel handed the command's setsid child to init, which
-// kept running (GAP-0631). Every way to signal a given process is refused
-// for the custodian's process and group, and for every process at once
-// (kill -1): kill, tgkill, rt_sigqueueinfo, rt_tgsigqueueinfo, an I/O owner
-// set by fcntl, and tkill and pidfd_send_signal, whose target the filter
-// cannot see (pidfd_send_signal reports ENOSYS, so the Go and Python
-// runtimes use kill instead). The filter is installed with prctl, which
-// applies to this thread alone and which the gateway unit's system-call
-// filter allows, unlike seccomp(2).
+// guardCustodian keeps what the calling thread starts from ending the
+// custodian. A non-leader thread ID can signal its entire thread group, so
+// filtering only the custodian's process ID is insufficient (GAP-0631).
+// The filter refuses signals and I/O ownership aimed at any positive PID,
+// except kill(pid, 0), and refuses prlimit64 on any process other than self.
+// It also refuses signals to the custodian's group and to every process at
+// once. The runner starts a new session, so kill(0) cannot reach that group.
+// tgkill and rt_tgsigqueueinfo expose the target's thread-group ID and are
+// refused for the custodian; tkill and pidfd_send_signal hide the group and
+// are refused outright (pidfd_send_signal reports ENOSYS so runtimes can
+// fall back to kill). The filter is installed with prctl, which applies to
+// this thread alone and which the gateway unit allows, unlike seccomp(2).
 func guardCustodian(custodian int) error {
 	filter, err := custodianGuardFilter(uint32(custodian))
 	if err != nil {
@@ -88,17 +88,23 @@ func custodianGuardFilter(custodian uint32) ([]unix.SockFilter, error) {
 	}
 	a.jeq(unix.SYS_KILL, "kill", "")
 	a.jeq(unix.SYS_TGKILL, "process", "")
-	a.jeq(unix.SYS_RT_SIGQUEUEINFO, "process", "")
+	a.jeq(unix.SYS_RT_SIGQUEUEINFO, "eperm", "")
 	a.jeq(unix.SYS_RT_TGSIGQUEUEINFO, "process", "")
 	a.jeq(unix.SYS_TKILL, "eperm", "")
 	a.jeq(unix.SYS_PIDFD_SEND_SIGNAL, "enosys", "")
+	a.jeq(unix.SYS_PRLIMIT64, "prlimit", "")
 	a.jeq(unix.SYS_FCNTL, "fcntl", "")
 	a.jeq(unix.SYS_IOCTL, "ioctl", "")
 	a.ret(unix.SECCOMP_RET_ALLOW)
 
 	a.label("kill")
+	a.load(seccompArg(1))
+	a.jeq(0, "allow", "") // a liveness probe sends no signal
 	a.load(seccompArg(0))
-	a.jeq(custodian, "eperm", "")
+	a.jeq(0, "allow", "")                   // only the caller's group; a different session
+	a.jge(0x80000000, "killgroup", "eperm") // every positive PID, including a custodian TID
+
+	a.label("killgroup")
 	a.jeq(group, "eperm", "")
 	a.jeq(0xffffffff, "eperm", "allow")
 
@@ -106,12 +112,19 @@ func custodianGuardFilter(custodian uint32) ([]unix.SockFilter, error) {
 	a.load(seccompArg(0))
 	a.jeq(custodian, "eperm", "allow")
 
+	a.label("prlimit")
+	a.load(seccompArg(0))
+	a.jeq(0, "allow", "eperm")
+
 	a.label("fcntl")
 	a.load(seccompArg(1))
 	a.jeq(unix.F_SETOWN_EX, "eperm", "")
 	a.jeq(unix.F_SETOWN, "", "allow")
 	a.load(seccompArg(2))
-	a.jeq(custodian, "eperm", "")
+	a.jeq(0, "allow", "")
+	a.jge(0x80000000, "fcntlgroup", "eperm")
+
+	a.label("fcntlgroup")
 	a.jeq(group, "eperm", "allow")
 
 	a.label("ioctl")

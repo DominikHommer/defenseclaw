@@ -221,7 +221,7 @@ func TestRunTrackedFailsWhenTheSupervisorIsKilled(t *testing.T) {
 	err := RunTracked(CommandContext(context.Background(), "/bin/sh", "-c",
 		"setsid "+containChild+" &\n"+containWaitPID+"\n"+
 			// Only ever the supervisor: never the test binary.
-			`case "$(tr '\0' ' ' < /proc/$PPID/cmdline)" in `+containSupervisorArg0+`*) kill -9 $PPID ;; esac`+
+			`case "$(tr '\0' ' ' < /proc/$PPID/cmdline)" in `+containSupervisorArg0+`*) kill -9 -$PPID ;; esac`+
 			"\nexit 0", "sh", pidFile))
 	pid := readContainPID(t, pidFile)
 	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
@@ -299,19 +299,28 @@ done
 	for _, kill := range []struct {
 		name, script string
 		amd64        bool // raw amd64 system call numbers
+		trackedOnly  bool
 	}{
-		{"kill", `kill -9 $list`, false},
-		{"process groups", `for p in $list; do kill -9 -$p; done`, false},
-		{"perl", `perl -e 'kill 9, @ARGV' $list`, false},
-		{"tgkill", `perl -e 'syscall(234, $_+0, $_+0, 9) for @ARGV' $list`, true},
-		{"tkill", `for p in $list; do for t in /proc/$p/task/*; do perl -e 'syscall(200, $ARGV[0]+0, 9)' "${t##*/}"; done; done`, true},
-		{"pidfd", `perl -e 'for (@ARGV) { my $fd = syscall(434, $_+0, 0); syscall(424, $fd, 9, 0, 0) if $fd >= 0 }' $list`, false},
-		{"I/O owner", `perl -e 'for (@ARGV) { pipe(my $r, my $w) or die; fcntl($r, 8, $_+0); fcntl($r, 10, 9); fcntl($r, 4, 020000); syswrite($w, "x") }' $list`, false},
-		{"socket owner", `perl -MSocket -e 'for (@ARGV) { socketpair(my $r, my $w, AF_UNIX, SOCK_STREAM, 0) or die; ioctl($r, 0x8901, pack("i", $_)); fcntl($r, 10, 9); fcntl($r, 4, 020000); syswrite($w, "x") }' $list`, false},
-		{"sigqueue", `perl -e 'for (@ARGV) { my $i = pack("iii", 9, 0, -1) . "\0" x 116; syscall(129, $_+0, 9, $i) }' $list`, true},
+		{"kill", `kill -9 $list`, false, false},
+		{"process groups", `for p in $list; do kill -9 -$p; done`, false, false},
+		{"perl", `perl -e 'kill 9, @ARGV' $list`, false, false},
+		{"tgkill", `perl -e 'syscall(234, $_+0, $_+0, 9) for @ARGV' $list`, true, false},
+		{"tkill", `for p in $list; do for t in /proc/$p/task/*; do perl -e 'syscall(200, $ARGV[0]+0, 9)' "${t##*/}"; done; done`, true, false},
+		{"pidfd", `perl -e 'for (@ARGV) { my $fd = syscall(434, $_+0, 0); syscall(424, $fd, 9, 0, 0) if $fd >= 0 }' $list`, false, false},
+		{"I/O owner", `perl -e 'for (@ARGV) { pipe(my $r, my $w) or die; fcntl($r, 8, $_+0); fcntl($r, 10, 9); fcntl($r, 4, 020000); syswrite($w, "x") }' $list`, false, false},
+		{"socket owner", `perl -MSocket -e 'for (@ARGV) { socketpair(my $r, my $w, AF_UNIX, SOCK_STREAM, 0) or die; ioctl($r, 0x8901, pack("i", $_)); fcntl($r, 10, 9); fcntl($r, 4, 020000); syswrite($w, "x") }' $list`, false, false},
+		{"sigqueue", `perl -e 'for (@ARGV) { my $i = pack("iii", 9, 0, -1) . "\0" x 116; syscall(129, $_+0, 9, $i) }' $list`, true, false},
+		{"kill by thread ID", `set -- $list; p=$1; t=$p; for path in /proc/$p/task/*; do [ "${path##*/}" != "$p" ] && { t=${path##*/}; break; }; done; [ "$t" != "$p" ] || exit 7; kill -9 "$t"`, false, true},
+		{"sigqueue by thread ID", `set -- $list; p=$1; t=$p; for path in /proc/$p/task/*; do [ "${path##*/}" != "$p" ] && { t=${path##*/}; break; }; done; [ "$t" != "$p" ] || exit 7; perl -e 'my $i = pack("iii", 9, 0, -1) . "\0" x 116; syscall(129, $ARGV[0]+0, 9, $i)' "$t"`, true, true},
+		{"I/O owner by thread ID", `set -- $list; p=$1; t=$p; for path in /proc/$p/task/*; do [ "${path##*/}" != "$p" ] && { t=${path##*/}; break; }; done; [ "$t" != "$p" ] || exit 7; perl -e 'pipe(my $r, my $w) or die; fcntl($r, 8, $ARGV[0]+0); fcntl($r, 10, 9); fcntl($r, 4, 020000); syswrite($w, "x")' "$t"`, false, true},
+		{"prlimit custodian", `set -- $list; perl -e 'my $limit = pack("QQ", 0, 0); syscall(302, $ARGV[0]+0, 7, $limit, 0)' "$1"`, true, true},
+		{"join custodian group then kill zero", `set -- $list; perl -e 'syscall(109, 0, $ARGV[0]+0) == 0 or die "setpgid: $!"; kill 9, 0' "$1"`, true, true},
 	} {
 		for name, run := range containRunners {
 			t.Run(name+"/"+kill.name, func(t *testing.T) {
+				if kill.trackedOnly && name != "RunTracked" {
+					t.Skip("the PID-namespace runner has no subreaper custodian")
+				}
 				if kill.amd64 && runtime.GOARCH != "amd64" {
 					t.Skip("raw syscall numbers are amd64's")
 				}
@@ -399,7 +408,7 @@ func TestRunContainedKeepsTheCommandResult(t *testing.T) {
 	}{
 		{"exit 0", 0},
 		{"exit 3", 3},
-		{"kill -TERM $$", 128 + int(syscall.SIGTERM)},
+		{"kill -TERM 0", 128 + int(syscall.SIGTERM)},
 		{`[ -z "${` + containSupervisorEnv + `+x}" ] || exit 9`, 0},
 	} {
 		for name, run := range containRunners {
