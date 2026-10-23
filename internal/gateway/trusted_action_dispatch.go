@@ -453,6 +453,10 @@ func dispatchTrustedAction(
 	}
 	// A statement alone, like a subset view, adds matches only, and only of
 	// an expression that more commands cannot turn off.
+	var statementFactsByRule map[string]actionfacts.Facts
+	if len(statementsAlone) != 0 {
+		statementFactsByRule = make(map[string]actionfacts.Facts)
+	}
 	for _, statement := range statementsAlone {
 		candidateOK := statementAloneCandidate
 		if statement.Subset {
@@ -462,7 +466,11 @@ func dispatchTrustedAction(
 			}
 		}
 		if projection, code := semantic.Project(statement.View); code == semantic.ProjectionOK {
+			before := len(semanticFindings)
 			evaluateSemanticRules(statement.View, projection, candidateOK, true, nil)
+			for _, finding := range semanticFindings[before:] {
+				statementFactsByRule[finding.RuleID] = statement.View
+			}
 		}
 	}
 	restoreTrustedUnresolvedReadFallbacks(
@@ -502,6 +510,63 @@ func dispatchTrustedAction(
 		facts,
 	)
 	telemetry.merge(fallbackTelemetry)
+	// Some shipped command and path owners have only a legacy regex, with
+	// their exact prerequisite in Go. Judge each complete statement with
+	// that same legacy lane as when it runs alone. Restrict the scan to the
+	// audited local owners without a semantic expression, and count only
+	// positive results from each statement.
+	if len(statementsAlone) != 0 {
+		legacyStatementRules := make(map[string]struct{})
+		for _, category := range generation.categories {
+			for _, rule := range category.Rules {
+				if _, local := statementLocalPrerequisiteOwners[rule.ID]; local &&
+					rule.Expression == "" {
+					legacyStatementRules[rule.ID] = struct{}{}
+				}
+			}
+		}
+		if len(legacyStatementRules) != 0 {
+			statementOptions := options
+			statementOptions.excludedRuleIDs = nil
+			statementOptions.onlyRuleIDs = legacyStatementRules
+			for _, statement := range statementsAlone {
+				if statement.Source == "" || statement.Subset {
+					continue
+				}
+				statementRequest := request
+				statementRequest.Input.Command = statement.Source
+				statementRequest.Input.Args = nil
+				statementRequest.Input.Argv = nil
+				statementRequest.LegacyText = statement.Source
+				matched, _ := dispatchTrustedFallback(
+					generation, statementRequest, statement.View, statementOptions,
+				)
+				for _, finding := range matched {
+					if _, local := legacyStatementRules[finding.RuleID]; !local {
+						continue
+					}
+					index := slices.IndexFunc(legacyFindings, func(existing RuleFinding) bool {
+						return existing.RuleID == finding.RuleID
+					})
+					if index >= 0 {
+						existing := legacyFindings[index]
+						candidateBlock := finding.contributesToEnforcement() &&
+							finding.proof.authorizes(finding.RuleID)
+						existingBlock := existing.contributesToEnforcement() &&
+							existing.proof.authorizes(existing.RuleID)
+						if !candidateBlock && (existingBlock ||
+							!finding.contributesToAlertOnly() || existing.contributesToAlertOnly()) {
+							continue
+						}
+						legacyFindings[index] = finding
+					} else {
+						legacyFindings = append(legacyFindings, finding)
+					}
+					statementFactsByRule[finding.RuleID] = statement.View
+				}
+			}
+		}
+	}
 	// A list read as a sequence has every fact of the action, so the checks
 	// that decide whether a fallback, content or path finding may block judge
 	// it as that sequence too. A redirect-target view lacks the target's facts.
@@ -520,7 +585,9 @@ func dispatchTrustedAction(
 		legacyFindings = withSequenceProvenFindings(legacyFindings, viewFindings)
 	}
 	findings = append(semanticFindings, legacyFindings...)
-	finalized := finalizeTrustedActionFindings(generation, request, contextFacts, findings)
+	finalized := finalizeTrustedActionFindingsWithStatementFacts(
+		generation, request, contextFacts, statementFactsByRule, findings,
+	)
 	finalized = appendTrustedWriteTargetFindings(finalized, generation, request, facts)
 	if staticTargetTwin == nil {
 		return finalized
@@ -531,10 +598,11 @@ func dispatchTrustedAction(
 	// so such a block rests on the rest of the action, which the runtime
 	// target does not change; any other result keeps the whole-action one.
 	twinLegacy, _ := fallbackLanes(append([]RuleFinding(nil), scanned...), *staticTargetTwin)
-	twinFindings := finalizeTrustedActionFindings(
+	twinFindings := finalizeTrustedActionFindingsWithStatementFacts(
 		generation,
 		request,
 		*staticTargetTwin,
+		statementFactsByRule,
 		append(append([]RuleFinding(nil), semanticFindings...), twinLegacy...),
 	)
 	return withTwinProvenBlocks(finalized, twinFindings)
@@ -2443,10 +2511,23 @@ func finalizeTrustedActionFindings(
 	facts actionfacts.Facts,
 	findings []RuleFinding,
 ) []RuleFinding {
+	return finalizeTrustedActionFindingsWithStatementFacts(
+		generation, request, facts, nil, findings,
+	)
+}
+
+func finalizeTrustedActionFindingsWithStatementFacts(
+	generation *compiledRulePackCategories,
+	request trustedActionRequest,
+	facts actionfacts.Facts,
+	statementFactsByRule map[string]actionfacts.Facts,
+	findings []RuleFinding,
+) []RuleFinding {
 	findings = deduplicateTrustedActionFindings(findings)
-	findings = applyTrustedActionContextDisposition(
+	findings = applyTrustedActionContextDispositionWithStatementFacts(
 		generation,
 		facts,
+		statementFactsByRule,
 		findings,
 	)
 	return applyTrustedActionProofBoundary(findings, request.EnforcementCapable)

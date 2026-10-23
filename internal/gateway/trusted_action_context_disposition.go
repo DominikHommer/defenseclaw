@@ -36,6 +36,17 @@ func applyTrustedActionContextDisposition(
 	facts actionfacts.Facts,
 	findings []RuleFinding,
 ) []RuleFinding {
+	return applyTrustedActionContextDispositionWithStatementFacts(
+		generation, facts, nil, findings,
+	)
+}
+
+func applyTrustedActionContextDispositionWithStatementFacts(
+	generation *compiledRulePackCategories,
+	facts actionfacts.Facts,
+	statementFactsByRule map[string]actionfacts.Facts,
+	findings []RuleFinding,
+) []RuleFinding {
 	adjusted := append([]RuleFinding(nil), findings...)
 	// Detection sees the complete action, while authorization considers only
 	// commands and redirects statically proven to execute. A harmless preview
@@ -43,6 +54,10 @@ func applyTrustedActionContextDisposition(
 	enforcementFacts := facts.EnforcementProjection()
 	for index := range adjusted {
 		finding := adjusted[index]
+		findingFacts := enforcementFacts
+		if statementFacts, ok := statementFactsByRule[finding.RuleID]; ok {
+			findingFacts = statementFacts.EnforcementProjection()
+		}
 		if finding.RuleID == "CMD-WIN-REG-PERSIST" && finding.Severity == "HIGH" &&
 			finding.contributesToEnforcement() {
 			finding.enforcement = findingEnforcementAlertOnly
@@ -52,11 +67,11 @@ func applyTrustedActionContextDisposition(
 
 		if canonicalTrustedRuleID(finding.RuleID) ==
 			"PRIVILEGE.CONTAINER_RUNTIME_SOCKET_ACCESS" {
-			if trustedActionProvesContainerRuntimeSocketUse(enforcementFacts) {
+			if trustedActionProvesContainerRuntimeSocketUse(findingFacts) {
 				finding = finding.withTrustedActionProof(
 					trustedActionContextFindingProof(
 						finding.RuleID,
-						enforcementFacts,
+						findingFacts,
 					),
 				)
 				finding.enforcement = findingEnforcementAlertOnly
@@ -72,7 +87,7 @@ func applyTrustedActionContextDisposition(
 		}
 
 		if trustedActionSensitivePathRule(finding.RuleID) {
-			switch trustedActionClassifySensitivePathRisk(enforcementFacts, finding.RuleID) {
+			switch trustedActionClassifySensitivePathRisk(findingFacts, finding.RuleID) {
 			case trustedActionSensitivePathUncertain:
 				// Preserve the finding's original severity so parser coverage
 				// uncertainty remains visible, but never let incomplete facts
@@ -84,13 +99,13 @@ func applyTrustedActionContextDisposition(
 				// security finding. Do not promote a finding that another
 				// boundary already made detection-only.
 				finding = finding.withTrustedActionProof(
-					trustedActionContextFindingProof(finding.RuleID, enforcementFacts),
+					trustedActionContextFindingProof(finding.RuleID, findingFacts),
 				)
 			case trustedActionSensitivePathRead:
 				if (finding.RuleID == "PATH-SSH-KEY" || finding.RuleID == "PATH-WIN-SSH-KEY") &&
-					trustedActionActiveSSHPrivateKeyContentRead(enforcementFacts) {
+					trustedActionActiveSSHPrivateKeyContentRead(findingFacts) {
 					finding = finding.withTrustedActionProof(
-						trustedActionContextFindingProof(finding.RuleID, enforcementFacts),
+						trustedActionContextFindingProof(finding.RuleID, findingFacts),
 					)
 					adjusted[index] = finding
 					continue
@@ -132,7 +147,7 @@ func applyTrustedActionContextDisposition(
 		if !trustedReadOnlyArgumentDataFinding(category, finding) {
 			continue
 		}
-		if !trustedActionContentFindingHasRiskPair(enforcementFacts, rule) {
+		if !trustedActionContentFindingHasRiskPair(findingFacts, rule) {
 			// Literal secret/PII material in an action remains visible for
 			// local audit, but cannot alert or block without command-local
 			// proof of external egress or an active sensitive-path write.
@@ -140,7 +155,7 @@ func applyTrustedActionContextDisposition(
 			continue
 		}
 		adjusted[index] = finding.withTrustedActionProof(
-			trustedActionContextFindingProof(finding.RuleID, enforcementFacts),
+			trustedActionContextFindingProof(finding.RuleID, findingFacts),
 		)
 	}
 	return adjusted

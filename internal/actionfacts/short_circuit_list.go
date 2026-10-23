@@ -76,7 +76,11 @@ const maxStatementsAlone = 128
 // statement that is partial alone, its StaticCommandSubsetReduction view
 // (Subset set, and PartialArgv as that reduction reports it).
 type StatementAlone struct {
-	View        Facts
+	View Facts
+	// Source is the original statement text when View is its complete
+	// analysis. It is empty for a reduction that dropped a duplication or
+	// dynamic words, since a legacy regex must see the exact statement.
+	Source      string
 	Subset      bool
 	PartialArgv bool
 }
@@ -128,22 +132,43 @@ func StatementsAlone(input Input, facts Facts) (statements []StatementAlone) {
 	single := !reduced && len(texts) == 1
 	// As for StaticCommandSubsetReduction, a shell builtin with a
 	// runtime-expanded word (cd $DIR, export PATH=$DIR, eval "$X") or a
-	// command whose program expands may change what the others run.
+	// command whose program expands may change what the others run. A bare
+	// assignment has no program; only one that changes shell resolution or
+	// startup state needs to stop the pass.
+	bareAssignments := 0
+	for _, statement := range texts {
+		assignment, safe := bareAssignmentStatement(statement)
+		if assignment {
+			if !safe {
+				return nil
+			}
+			bareAssignments++
+		}
+	}
+	blankPrograms := 0
 	if slices.ContainsFunc(facts.Commands, func(command CommandFact) bool {
-		return strings.TrimSpace(command.Program) == "" ||
-			(shellStateBuiltins[strings.ToLower(command.Program)] &&
-				slices.ContainsFunc(command.Arguments, func(argument ArgumentFact) bool {
-					return argument.Expands || argument.StaticGlob != ""
-				}))
-	}) {
+		if strings.TrimSpace(command.Program) == "" {
+			blankPrograms++
+			return false
+		}
+		return shellStateBuiltins[strings.ToLower(command.Program)] &&
+			slices.ContainsFunc(command.Arguments, func(argument ArgumentFact) bool {
+				return argument.Expands || argument.StaticGlob != ""
+			})
+	}) || blankPrograms != bareAssignments {
 		return nil
 	}
 	directoryMayChange := slices.ContainsFunc(facts.Commands, ChangesShellDirectory)
+	home, _ := normalizeActiveHome(input.ActiveHome)
 	alone := input
 	alone.Args, alone.Argv = nil, nil
 	for _, text := range texts[:min(len(texts), maxStatementsAlone)] {
 		alone.Command = text
 		view := Analyze(alone)
+		legacySource := ""
+		if view.Authoritative() {
+			legacySource = text
+		}
 		if !view.Authoritative() || single {
 			stripped, ok := withoutDescriptorDuplications(text)
 			if !ok && single {
@@ -155,11 +180,16 @@ func StatementsAlone(input Input, facts Facts) (statements []StatementAlone) {
 			}
 		}
 		if view.Parse.Dialect != DialectPOSIX || (directoryMayChange &&
-			slices.ContainsFunc(view.Paths, func(path PathFact) bool { return !path.Absolute })) {
+			slices.ContainsFunc(view.Paths, func(path PathFact) bool {
+				return !path.Absolute && !homeAnchoredPath(path, home)
+			})) {
+			continue
+		}
+		if assignment, _ := bareAssignmentStatement(text); assignment {
 			continue
 		}
 		if view.Authoritative() {
-			statements = append(statements, StatementAlone{View: view})
+			statements = append(statements, StatementAlone{View: view, Source: legacySource})
 			continue
 		}
 		if subset, partialArgv, ok := StaticCommandSubsetReduction(alone, view); ok {
@@ -167,6 +197,55 @@ func StatementsAlone(input Input, facts Facts) (statements []StatementAlone) {
 		}
 	}
 	return statements
+}
+
+// homeAnchoredPath is independent of the shell's current directory even
+// though its original tilde spelling is recorded as a non-absolute path.
+func homeAnchoredPath(path PathFact, home string) bool {
+	if home == "" || path.Flavor != PathFlavorPOSIX ||
+		(path.Value != "~" && !strings.HasPrefix(path.Value, "~/")) {
+		return false
+	}
+	return path.Resolved == home+strings.TrimPrefix(path.Value, "~")
+}
+
+// bareAssignmentStatement reports whether a statement only assigns ordinary
+// variables, without running a command substitution or changing how later
+// commands or paths resolve.
+func bareAssignmentStatement(source string) (assignment, safe bool) {
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).
+		Parse(strings.NewReader(source), "")
+	if err != nil || len(file.Stmts) != 1 {
+		return false, false
+	}
+	stmt := file.Stmts[0]
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Args) != 0 || len(call.Assigns) == 0 {
+		return false, false
+	}
+	if len(stmt.Redirs) != 0 || stmt.Background || stmt.Negated || stmt.Coprocess {
+		return true, false
+	}
+	for _, item := range call.Assigns {
+		if item == nil || item.Name == nil || item.Index != nil || item.Array != nil ||
+			(item.Value != nil && !inertPOSIXWords(item.Value)) ||
+			shellResolutionAssignment(item.Name.Value) {
+			return true, false
+		}
+	}
+	return true, true
+}
+
+func shellResolutionAssignment(name string) bool {
+	if strings.HasPrefix(name, "LD_") {
+		return true
+	}
+	switch name {
+	case "PATH", "IFS", "HOME", "CDPATH", "ENV", "BASH_ENV", "SHELLOPTS",
+		"BASHOPTS", "GLOBIGNORE", "FPATH", "ZDOTDIR", "PWD", "OLDPWD":
+		return true
+	}
+	return false
 }
 
 // withoutDescriptorDuplications returns statement without its descriptor
@@ -355,7 +434,9 @@ func sequenceStatements(source string, compound bool) (statements []string, redu
 	flattenCompound := func(command syntax.Command) (replaced, ok bool) {
 		switch typed := command.(type) {
 		case *syntax.BinaryCmd:
-			if typed.Op != syntax.AndStmt && typed.Op != syntax.OrStmt {
+			if typed.Op != syntax.AndStmt && typed.Op != syntax.OrStmt &&
+				(!compound || (typed.Op != syntax.Pipe && typed.Op != syntax.PipeAll) ||
+					!pipelineHasCompoundCommand(typed)) {
 				return false, false
 			}
 			return true, flatten(typed.X) && flatten(typed.Y)
@@ -450,6 +531,29 @@ func sequenceStatements(source string, compound bool) (statements []string, redu
 		return nil, false, false
 	}
 	return statements, reduced, true
+}
+
+// pipelineHasCompoundCommand keeps an ordinary pipeline intact. Its data
+// flow can be part of an exact rule's proof. A compound element needs its
+// inner statements exposed to the match-only pass.
+func pipelineHasCompoundCommand(binary *syntax.BinaryCmd) bool {
+	var contains func(*syntax.Stmt) bool
+	contains = func(stmt *syntax.Stmt) bool {
+		if stmt == nil {
+			return false
+		}
+		switch cmd := stmt.Cmd.(type) {
+		case *syntax.Subshell, *syntax.Block, *syntax.IfClause,
+			*syntax.WhileClause, *syntax.ForClause, *syntax.CaseClause:
+			return true
+		case *syntax.BinaryCmd:
+			if cmd.Op == syntax.Pipe || cmd.Op == syntax.PipeAll {
+				return contains(cmd.X) || contains(cmd.Y)
+			}
+		}
+		return false
+	}
+	return contains(binary.X) || contains(binary.Y)
 }
 
 // subshellExit reports whether command is a plain exit, which in a subshell

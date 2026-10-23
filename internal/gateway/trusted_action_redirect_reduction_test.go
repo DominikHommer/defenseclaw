@@ -242,6 +242,11 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
 		},
 		{
+			name:    "redirected group in a pipeline",
+			command: "{ echo " + redirectReductionMarker + "; } 2>&1 | tee $HOME/x",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
 			name:    "expanding word in the subshell",
 			command: "(echo $USER " + redirectReductionMarker + ")",
 			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
@@ -441,6 +446,12 @@ func TestTrustedActionBlocksBuiltInRuleInEachStatementOfCompoundCommand(t *testi
 		{"(cd /tmp && rm -rf /) > /tmp/log 2>&1", true},
 		{"rm -rf / 2>&1", true},
 		{"rm -rf / > /tmp/log 2>&1", true},
+		{"cd /tmp && rm -rf ~", true},
+		{"cd /tmp && rm -rf ~; echo $HOME", true},
+		{"(rm -rf /) | cat", true},
+		{"X=1; rm -rf /", true},
+		{"X=; rm -rf /", true},
+		{"X=$HOME; rm -rf /", true},
 		{"rm -rf /tmp/dc-x; echo $HOME", false},
 		{"(rm -rf /tmp/dc-x) 2>&1", false},
 	} {
@@ -462,6 +473,47 @@ func TestTrustedActionBlocksBuiltInRuleInEachStatementOfCompoundCommand(t *testi
 		}
 		if got := buildVerdict(findings, "tool_call").Action == guardrailActionBlock; got != test.blocks {
 			t.Errorf("%q: verdict block = %t, want %t; findings=%v", test.command, got, test.blocks, FindingStrings(findings))
+		}
+	}
+}
+
+func TestTrustedActionBlocksCredentialReadInEachStatement(t *testing.T) {
+	const connector = "statements-alone-credential-test"
+	installDefaultProfileConnector(t, connector)
+	for _, test := range []struct {
+		command string
+		alone   string
+		ruleID  string
+	}{
+		{"cat ~/.ssh/id_rsa", "cat ~/.ssh/id_rsa", "PATH-SSH-KEY"},
+		{"cat ~/.ssh/id_rsa; echo done", "cat ~/.ssh/id_rsa", "PATH-SSH-KEY"},
+		{"echo start; cat ~/.ssh/id_rsa", "cat ~/.ssh/id_rsa", "PATH-SSH-KEY"},
+		{"(cat ~/.ssh/id_rsa); echo $HOME", "cat ~/.ssh/id_rsa", "PATH-SSH-KEY"},
+		{"cat ~/.aws/credentials; echo done", "cat ~/.aws/credentials", "PATH-AWS-CREDS"},
+		{"cat ~/.kube/config; echo done", "cat ~/.kube/config", "PATH-KUBE"},
+	} {
+		request := trustedActionRequest{
+			Input: actionfacts.Input{
+				Tool:        "shell",
+				Command:     test.command,
+				CWD:         "/home/alice/project",
+				ActiveHome:  "/home/alice",
+				DialectHint: actionfacts.DialectPOSIX,
+			},
+			LegacyText:         test.command,
+			Connector:          connector,
+			EnforcementCapable: true,
+		}
+		findings := dispatchTrustedAction(t.Context(), request)
+		request.Input.Command, request.LegacyText = test.alone, test.alone
+		aloneFindings := dispatchTrustedAction(t.Context(), request)
+		alone := findingWithID(aloneFindings, test.ruleID)
+		finding := findingWithID(findings, test.ruleID)
+		if alone == nil || finding == nil ||
+			finding.contributesToEnforcement() != alone.contributesToEnforcement() ||
+			finding.contributesToAlertOnly() != alone.contributesToAlertOnly() ||
+			buildVerdict(findings, "tool_call").Action != buildVerdict(aloneFindings, "tool_call").Action {
+			t.Errorf("%q: %s finding differs from alone: got %v, alone %v", test.command, test.ruleID, FindingStrings(findings), FindingStrings(aloneFindings))
 		}
 	}
 }
