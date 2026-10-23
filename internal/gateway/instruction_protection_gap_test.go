@@ -68,6 +68,33 @@ func TestInstructionProtectionRelativeClaudeAcrossGatewayRestart(t *testing.T) {
 	}
 }
 
+func TestInstructionProtectionClaudeStartupAndResume(t *testing.T) {
+	root := t.TempDir()
+	writeActiveAgentTestFile(t, root, "CLAUDE.md")
+	input := map[string]interface{}{"command": "printf changed >> CLAUDE.md"}
+	ctx := withAuthenticatedHookConnector(instructionResolvedWriteContext(t, root, "Bash", input), "claudecode")
+	for _, source := range []string{"startup", "resume"} {
+		t.Run(source, func(t *testing.T) {
+			api := instructionProtectionTestAPI(t, "claudecode", "action", "HIGH")
+			api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+				HookEventName: "SessionStart", SessionID: source, Source: source, CWD: root,
+			})
+			// Native Claude may report InstructionsLoaded without a file_path.
+			// The first tool call must still protect a proven instruction write.
+			api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+				HookEventName: "InstructionsLoaded", SessionID: source, CWD: root,
+			})
+			response := api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+				HookEventName: "PreToolUse", SessionID: source, CWD: root,
+				ToolName: "Bash", ToolInput: input,
+			})
+			if response.Action != guardrailActionBlock || !findingStringHasRuleID(response.Findings, "COG-CLAUDE-MD") {
+				t.Fatalf("%s first instruction write: action=%q findings=%v", source, response.Action, response.Findings)
+			}
+		})
+	}
+}
+
 func TestInstructionProtectionCodexNativeTools(t *testing.T) {
 	root := t.TempDir()
 	writeActiveAgentTestFile(t, root, "AGENTS.md")
