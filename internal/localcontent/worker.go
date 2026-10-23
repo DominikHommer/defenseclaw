@@ -178,6 +178,3 @@ func (w *Worker) Scan(ctx context.Context, text string) (float64, error) {
 		return 0, ctx.Err()
 	}
 }
-
-// Timeout is the configured end-to-end scan budget.
-func (w *Worker) Timeout() time.Duration { return w.budget }

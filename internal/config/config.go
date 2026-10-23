@@ -3047,7 +3047,10 @@ func loadConfigSourceCheckedWithLayout(
 		return nil, fmt.Errorf("config: guardrail: %w", err)
 	}
 	if cfg.Guardrail.Wolf.Enabled && (cfg.SecureClientIntegration() || cfg.StandaloneEnterprise() || cfg.Guardrail.ScannerMode == "remote") {
-		return nil, fmt.Errorf("guardrail.wolf requires OSS local/both scanner mode")
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "guardrail_invalid")
+		}
+		return nil, fmt.Errorf("config: guardrail: guardrail.wolf requires OSS local/both scanner mode")
 	}
 	if err := cfg.ValidateGuardrailProfiles(); err != nil {
 		if ReportConfigLoadError != nil {

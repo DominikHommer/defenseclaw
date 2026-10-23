@@ -6154,6 +6154,15 @@ def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
     )
 
 
+def _merge_wolf(raw: Any) -> WolfConfig:
+    # Use the canonical source validator before constructing a dataclass: bool
+    # strings, unknown fields and non-mappings must be configuration errors.
+    from defenseclaw.observability.v8_config import validate_v8_source
+
+    validate_v8_source({"config_version": CURRENT_CONFIG_VERSION, "guardrail": {"wolf": raw}})
+    return WolfConfig(**raw)
+
+
 def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConfig:
     if not raw:
         return GuardrailConfig()
@@ -6165,7 +6174,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         else []
     )
     return GuardrailConfig(
-        wolf=WolfConfig(**(raw.get("wolf") or {})),
+        wolf=_merge_wolf(raw["wolf"]) if "wolf" in raw else WolfConfig(),
         enabled=raw.get("enabled", False),
         mode=raw.get("mode", "observe"),
         scanner_mode=raw.get("scanner_mode", "both"),

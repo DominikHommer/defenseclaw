@@ -7,7 +7,6 @@ import (
 	"errors"
 	"math"
 	"strings"
-	"time"
 )
 
 // LocalToolResponseScanner is inactive until explicitly attached by an embedder.
@@ -15,6 +14,12 @@ import (
 type LocalToolResponseScanner interface {
 	Scan(context.Context, string) (float64, error)
 }
+
+// Bound the number of sequential scans, including replayed tool history.
+// With the maximum 5-second per-scan budget, this caps local scanning at 80s
+// (or the earlier caller deadline). The default budget caps it at 8s.
+const maxLocalToolMessages = 16
+
 type localContentBinding struct {
 	scanner   LocalToolResponseScanner
 	threshold float64
@@ -74,8 +79,19 @@ func (g *GuardrailInspector) inspectLocalToolMessages(ctx context.Context, messa
 	if b == nil || g.managedMode || secureClientGeneration() {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(ctx, b.timeout())
-	defer cancel()
+	// Preflight the entire history before scanning: a limit refusal must not
+	// spend model budget or poison an otherwise healthy worker.
+	count := 0
+	for _, m := range messages {
+		if strings.EqualFold(m.Role, "tool") {
+			count++
+		}
+		if count > maxLocalToolMessages {
+			return &ScanVerdict{Action: "block", Severity: "HIGH", Reason: "local-model:tool-message-limit", Findings: []string{"local-model:tool-message-limit"}, Scanner: "local-model"}
+		}
+	}
+	// Worker.Scan owns a fresh per-call timeout; retain the caller context so
+	// cancellation still applies, without consuming later scans' budgets.
 	for _, m := range messages {
 		if !strings.EqualFold(m.Role, "tool") {
 			continue
@@ -103,11 +119,4 @@ func (p *GuardrailProxy) requiresLocalToolInspection(messages []ChatMessage) boo
 		}
 	}
 	return false
-}
-
-func (b *localContentBinding) timeout() time.Duration {
-	if w, ok := b.scanner.(interface{ Timeout() time.Duration }); ok {
-		return w.Timeout()
-	}
-	return 500 * time.Millisecond
 }

@@ -5,12 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/defenseclaw/defenseclaw/internal/config"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 type localScoreFunc func(context.Context, string) (float64, error)
@@ -61,9 +64,18 @@ func TestLocalToolResponseSeesTailBeforeLegacyTruncation(t *testing.T) {
 		return .9, nil
 	}), .5)
 	body, _ := json.Marshal(map[string]string{"tool": "read", "output": strings.Repeat("a", maxInspectContentLen) + "TAIL"})
-	_, v := postInspectToolResponse(t, a, string(body))
-	if !seen || v.Action != "block" {
-		t.Fatal("tail missed")
+	// Isolate the boundary from the production regex wall-clock budget: a
+	// 256 KiB fixture with every shipped rule is not an SLA/performance test.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/inspect/tool-response", bytes.NewReader(body))
+	req = req.WithContext(withPinnedGeneration(req.Context(), &Generation{Config: a.scannerCfg, activeRules: &compiledRulePackCategories{}}))
+	response := httptest.NewRecorder()
+	a.handleInspectToolResponse(response, req)
+	var v ToolInspectVerdict
+	if err := json.NewDecoder(response.Body).Decode(&v); err != nil {
+		t.Fatal(err)
+	}
+	if !seen || response.Code != http.StatusOK || v.Action != "block" {
+		t.Fatalf("tail missed: seen=%v status=%d verdict=%+v", seen, response.Code, v)
 	}
 }
 
@@ -164,5 +176,103 @@ func TestLocalToolResponseProxyObserveForwards(t *testing.T) {
 	p.handleChatCompletion(response, req)
 	if prov.lastReq == nil {
 		t.Fatalf("observe mode blocked forwarding: %s", response.Body.String())
+	}
+}
+
+func TestLocalToolResponsePreservesBaselineFindingsInObserve(t *testing.T) {
+	for _, failed := range []bool{false, true} {
+		t.Run(fmt.Sprint(failed), func(t *testing.T) {
+			a := testAPIServerWithConfig(t, "observe")
+			body := `{"tool":"read","output":"my ssn is 078-05-1120"}`
+			_, baseline := postInspectToolResponse(t, a, body)
+			if len(baseline.Findings) == 0 {
+				t.Fatal("fixture did not produce baseline findings")
+			}
+			a.SetLocalToolResponseScanner(localScoreFunc(func(context.Context, string) (float64, error) {
+				if failed {
+					return 0, errors.New("runtime unavailable")
+				}
+				return .9, nil
+			}), .5)
+			_, v := postInspectToolResponse(t, a, body)
+			if v.Action != "allow" || !v.WouldBlock {
+				t.Fatalf("%+v", v)
+			}
+			for _, f := range baseline.Findings {
+				if !slices.Contains(v.Findings, f) {
+					t.Fatalf("baseline finding %q missing from %v", f, v.Findings)
+				}
+			}
+			if !strings.Contains(v.Reason, "local-model:") {
+				t.Fatalf("local verdict missing: %+v", v)
+			}
+		})
+	}
+}
+
+func TestLocalToolResponseHistoryRetainsCallerContext(t *testing.T) {
+	type key struct{}
+	parent := context.WithValue(context.Background(), key{}, "caller")
+	g := NewGuardrailInspector("local", nil, nil)
+	calls := 0
+	g.SetLocalToolResponseScanner(localScoreFunc(func(ctx context.Context, _ string) (float64, error) {
+		calls++
+		if _, ok := ctx.Deadline(); ok {
+			t.Error("unexpected shared history deadline")
+		}
+		if ctx.Value(key{}) != "caller" {
+			t.Error("caller context lost")
+		}
+		return .1, nil
+	}), .5)
+	v := g.inspectLocalToolMessages(parent, []ChatMessage{{Role: "tool", Content: "first"}, {Role: "tool", Content: "second"}})
+	if v != nil || calls != 2 {
+		t.Fatalf("verdict=%+v calls=%d", v, calls)
+	}
+}
+
+func TestLocalToolResponseHistoryLimitRefusesBeforeScanning(t *testing.T) {
+	g := NewGuardrailInspector("local", nil, nil)
+	calls := 0
+	g.SetLocalToolResponseScanner(localScoreFunc(func(context.Context, string) (float64, error) { calls++; return .1, nil }), .5)
+	messages := []ChatMessage{{Role: "system", Content: "not counted"}}
+	for i := 0; i < maxLocalToolMessages; i++ {
+		messages = append(messages, ChatMessage{Role: "tool", Content: "fixture"})
+	}
+	if v := g.inspectLocalToolMessages(context.Background(), messages); v != nil || calls != maxLocalToolMessages {
+		t.Fatalf("verdict=%+v calls=%d", v, calls)
+	}
+	calls = 0
+	messages = append(messages, ChatMessage{Role: "TOOL", Content: "over limit"})
+	v := g.inspectLocalToolMessages(context.Background(), messages)
+	if v == nil || v.Action != "block" || v.Reason != "local-model:tool-message-limit" || calls != 0 {
+		t.Fatalf("verdict=%+v calls=%d", v, calls)
+	}
+	// A preflight refusal must leave the scanner available for the next request.
+	if v := g.inspectLocalToolMessages(context.Background(), messages[:2]); v != nil || calls != 1 {
+		t.Fatalf("verdict=%+v calls=%d", v, calls)
+	}
+}
+
+func TestLocalToolResponseDoesNotSkipConfiguredJudge(t *testing.T) {
+	for _, failed := range []bool{false, true} {
+		t.Run(fmt.Sprint(failed), func(t *testing.T) {
+			mock := piiCompletionHitProvider()
+			a := newToolOutputJudgeServer(t, config.JudgeConfig{Enabled: true, PII: true, PIICompletion: true, HookConnectors: []string{"hermes"}}, "judge_first", mock)
+			a.scannerCfg.Guardrail.Mode = "observe"
+			a.SetLocalToolResponseScanner(localScoreFunc(func(context.Context, string) (float64, error) {
+				if failed {
+					return 0, errors.New("unavailable")
+				}
+				return .9, nil
+			}), .5)
+			_, v := postInspectToolResponse(t, a, `{"tool":"fetch_url","output":"reach me at test@example.com during the local-lane regression check"}`)
+			if len(mock.captured) == 0 || !judgeTaggedFinding(v.Findings) {
+				t.Fatalf("configured judge skipped: calls=%d verdict=%+v", len(mock.captured), v)
+			}
+			if v.Action != "allow" || !v.WouldBlock || !strings.Contains(v.Reason, "local-model:") {
+				t.Fatalf("unexpected merged verdict: %+v", v)
+			}
+		})
 	}
 }

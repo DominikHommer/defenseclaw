@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 package config
 
-import "testing"
+import (
+	"context"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestWolfConfigDefaultsAndValidation(t *testing.T) {
 	w := DefaultWolfConfig()
@@ -31,5 +36,27 @@ func TestWolfConfigDefaultsAndValidation(t *testing.T) {
 	w.OverlapTokens = w.WindowTokens
 	if w.Validate() == nil {
 		t.Fatal("invalid overlap accepted")
+	}
+}
+
+func TestWolfConfigModeRefusalReportsGuardrailError(t *testing.T) {
+	previous := ReportConfigLoadError
+	t.Cleanup(func() { ReportConfigLoadError = previous })
+	var reports []string
+	ReportConfigLoadError = func(_ context.Context, reason string) { reports = append(reports, reason) }
+	raw := []byte(`config_version: 9
+guardrail:
+  scanner_mode: remote
+  wolf:
+    enabled: true
+    model_dir: /models/wolf
+    python_executable: /runtime/bin/python
+`)
+	_, err := LoadRuntimeV8InspectionCandidateFromBytes(filepath.Join(t.TempDir(), "config.yaml"), raw)
+	if err == nil || !strings.HasPrefix(err.Error(), "config: guardrail:") || !strings.Contains(err.Error(), "OSS local/both") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(reports) != 1 || reports[0] != "guardrail_invalid" {
+		t.Fatalf("reports=%v", reports)
 	}
 }

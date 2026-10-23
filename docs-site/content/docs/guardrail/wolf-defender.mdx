@@ -96,6 +96,15 @@ produces a blocking local verdict. Existing `observe` policy converts this into 
 allow with `would_block`; it does **not** provide fail-closed enforcement. Use `action`
 when refusal must prevent forwarding.
 
+A proxy request may contain at most 16 `role: tool` messages (including replayed
+history). The limit is checked before inference and produces
+`local-model:tool-message-limit` when exceeded. Each accepted message receives a
+fresh `timeout_ms` budget; the caller's cancellation/deadline still applies.
+The local lane therefore takes at most 16 times the per-call budget: 8 seconds
+at the 500 ms default, or 80 seconds at the 5-second maximum, unless the caller
+ends the request sooner. The cap also applies in observe mode, where the
+refusal is recorded without enforcing a block.
+
 Each listener owns one persistent subprocess, with one in-flight scan and no queue.
 The hook API and enabled proxy therefore load separate model instances. Plan memory
 for both; the model is loaded only while opted in. A timeout or broken protocol kills

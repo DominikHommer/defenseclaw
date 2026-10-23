@@ -66,3 +66,37 @@ def test_doctor_disabled_and_missing_runtime(monkeypatch):
     assert rows[-1][0][0] == "fail"
     assert rows[-1][1]["reason_code"] == "wolf-unavailable"
     assert "provision" in rows[-1][1]["remediation"]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        None,
+        False,
+        [],
+        "enabled",
+        {"unknown": True},
+        {"enabled": "false"},
+        {"threads": "2"},
+        {"timeout_ms": 0},
+        {"variant": "invalid"},
+    ],
+)
+def test_malformed_wolf_is_a_configuration_error(raw):
+    from defenseclaw.observability.v8_config import V8ConfigError
+
+    with pytest.raises(V8ConfigError, match=r"guardrail\.wolf"):
+        _merge_guardrail({"wolf": raw}, "")
+
+
+def test_load_rejects_quoted_wolf_boolean(tmp_path):
+    from defenseclaw.config import load
+    from defenseclaw.observability.v8_config import V8ConfigError
+
+    with pytest.raises(V8ConfigError, match=r"guardrail\.wolf\.enabled"):
+        load(data_dir=tmp_path, parsed_source={"config_version": 9, "guardrail": {"wolf": {"enabled": "false"}}})
+
+
+def test_missing_and_explicit_empty_wolf_keep_defaults():
+    assert _merge_guardrail({"mode": "observe"}, "").wolf == WolfConfig()
+    assert _merge_guardrail({"wolf": {}}, "").wolf == WolfConfig()

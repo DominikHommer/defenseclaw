@@ -343,10 +343,6 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		verdict = a.inspectManagedAIDOnly(
 			deferManagedAIDFailOpenAccounting(r.Context()), "message", aidContent,
 		)
-	} else if localVerdict != nil {
-		// A decisive local block need not spend the remaining hook budget on rules.
-		// The common merge/mode/audit path below still owns the final response.
-		verdict = &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	} else {
 		ruleFindings, err := scanWithTimeout(r.Context(), outputStr, req.Tool+"-response", inspectScanTimeout)
 		if err != nil {
