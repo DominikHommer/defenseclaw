@@ -35,21 +35,25 @@ import (
 // The Kiro IDE reads the global %USERPROFILE%\.kiro\hooks file from
 // KiroIDEGlobalHooksFloor. Its version is the resources\app\product.json of
 // the per-user install (%LOCALAPPDATA%\Programs\Kiro) or the machine install
-// (%ProgramFiles%\Kiro). A user without a readable kiro-cli version is
+// (%ProgramFiles%\Kiro). A user without an admitted kiro-cli version is
 // enrolled at the IDE's version, marked with KiroIDEVersionSuffix; an IDE
 // below the floor is reported. The profile owner controls these files, so
 // each is only a version claim, bounded and validated like a package.json
 // probe.
 
 // discoverWindowsKiroAgentVersion returns the version a Kiro row is enrolled
-// at: kiro-cli's, else an IDE at or above the global-hooks floor.
+// at: an admitted kiro-cli's, else an IDE at or above the global-hooks floor.
 func discoverWindowsKiroAgentVersion(profileHome string) string {
-	if cli := discoverWindowsKiroCLIVersion(profileHome); cli != "" {
+	cli := discoverWindowsKiroCLIVersion(profileHome)
+	if cli != "" && windowsKiroCLIBelowHookFloor(cli) == "" {
 		return cli
 	}
 	ide, _ := discoverWindowsKiroIDEVersion(profileHome)
 	if ide != "" && !kiroIDEBelowGlobalHooksFloor(ide) {
 		return ide + KiroIDEVersionSuffix
+	}
+	if cli != "" {
+		return cli // report the unsupported CLI when no IDE can be enrolled
 	}
 	// A kiro-cli that has never run names no version yet. Enroll it at the
 	// standalone floor so its first chat already runs with the DefenseClaw
@@ -136,6 +140,33 @@ func kiroIDEBelowGlobalHooksFloor(version string) bool {
 	return compareStandaloneFloorVersion(connector.NormalizeAgentVersion("kiro", version), KiroIDEGlobalHooksFloor) < 0
 }
 
+func windowsKiroCLIBelowHookFloor(version string) string {
+	normalized := connector.NormalizeAgentVersion("kiro", version)
+	if normalized == "" || compareStandaloneFloorVersion(normalized, connector.KiroCLIHookFloor) >= 0 {
+		return ""
+	}
+	return connector.KiroCLIBelowHookFloorReason(normalized)
+}
+
+// reportKiroCLIBelowFloorBesideIDE records the CLI surface that cannot send
+// hooks even though the same row can protect a supported IDE.
+func (c windowsStandaloneRowContext) reportKiroCLIBelowFloorBesideIDE(row *ManifestTarget) {
+	if c.report == nil || !strings.EqualFold(strings.TrimSpace(row.Connector), "kiro") || !filepath.IsAbs(row.UserHome) {
+		return
+	}
+	home := filepath.Clean(row.UserHome)
+	cli := discoverWindowsKiroCLIVersion(home)
+	reason := windowsKiroCLIBelowHookFloor(cli)
+	if reason == "" {
+		return
+	}
+	ide, _ := discoverWindowsKiroIDEVersion(home)
+	if ide == "" || kiroIDEBelowGlobalHooksFloor(ide) {
+		return // the row's own refusal already reports the CLI
+	}
+	c.reportAgent(row, cli, reason, "Kiro IDE "+ide+" is separately eligible for global hooks, but this kiro-cli's non-interactive runs load no hooks")
+}
+
 // reportKiroIDEBelowFloor reports a Kiro IDE too old to read the global
 // hooks file: its agent sessions run without DefenseClaw hooks whether or
 // not the user's kiro-cli is enrolled.
@@ -148,8 +179,8 @@ func (c windowsStandaloneRowContext) reportKiroIDEBelowFloor(row *ManifestTarget
 		return
 	}
 	consequence := "its agent sessions run without DefenseClaw hooks"
-	if cli := discoverWindowsKiroCLIVersion(filepath.Clean(row.UserHome)); cli != "" {
-		consequence += "; kiro-cli " + cli + " stays enrolled"
+	if cli := discoverWindowsKiroCLIVersion(filepath.Clean(row.UserHome)); cli != "" && windowsKiroCLIBelowHookFloor(cli) == "" {
+		consequence += "; kiro-cli " + cli + " remains eligible for enrollment"
 	}
 	c.report(UnprotectedAgent{
 		User:      c.user,

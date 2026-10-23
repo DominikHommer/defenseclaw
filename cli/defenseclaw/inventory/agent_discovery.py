@@ -79,11 +79,9 @@ from defenseclaw.file_permissions import (
 # sides — if the wording ever changes, the consumer can't silently drift.
 UNTRUSTED_PREFIX_ERROR = "binary path is not in a trusted install prefix"
 
-# Version 4 adds passive macOS application-bundle discovery. Version 3
-# separates a connector's on-disk configuration from a verified application
-# installation; older caches therefore cannot represent every current install
-# signal faithfully.
-CACHE_SCHEMA_VERSION = 6
+# Version 7 keeps Kiro CLI and IDE versions separately; an older cache can
+# incorrectly call the whole connector supported after seeing only one binary.
+CACHE_SCHEMA_VERSION = 7
 CACHE_TTL_SECONDS = 86_400
 CACHE_FILENAME = "agent_discovery.json"
 # Node and Python CLIs take over a second for --version when idle, and
@@ -96,6 +94,7 @@ VERSION_PROBE_TIMED_OUT = "version probe timed out"
 VERSION_NOT_PROBED = "version not probed: not being set up"
 PACKAGE_MANAGER_CONFIG_TIMEOUT_SECONDS = 5.0
 _ANTIGRAVITY_BINARY_MAX_BYTES = 256 << 20
+_KIRO_IDE_PRODUCT_MAX_BYTES = 256 << 10
 _WINDOWS_LOCAL_APP_DATA_FOLDER_ID = "F1B32785-6FBA-4FCF-9D55-7B8E7F157091"
 _WINDOWS_KF_FLAG_NO_PACKAGE_REDIRECTION = 0x00010000
 
@@ -710,6 +709,7 @@ def _windows_default_trusted_bin_prefixes() -> tuple[str, ...]:
                 # admission; passive Python discovery only trusts this
                 # bounded path and the existing ACL-chain checks.
                 os.path.join(codex_local_app_data, "devin", "cli", "bin"),
+                os.path.join(codex_local_app_data, "Kiro-Cli"),
                 # Hermes' official Windows updater owns this exact venv. Bind
                 # discovery to the current token's Known Folder instead of an
                 # inherited LOCALAPPDATA value or a coexisting legacy home.
@@ -811,6 +811,8 @@ class AgentSignal:
     configured: bool = False
     active: bool = False
     mode: str = ""
+    kiro_cli_version: str = ""
+    kiro_ide_version: str = ""
 
 
 @dataclass
@@ -1299,6 +1301,9 @@ def _keep_versions_of_slow_unchanged_agents(
             continue
         signal.binary_path = previous_binary
         signal.version = version
+        if signal.name == "kiro":
+            signal.kiro_cli_version = str(previous.get("kiro_cli_version") or "")
+            signal.kiro_ide_version = str(previous.get("kiro_ide_version") or "")
         signal.error = ""
         signal.installed = True
 
@@ -1474,6 +1479,14 @@ def _scan_agent(
     include_workspace_config: bool = True,
     probe: bool = True,
 ) -> AgentSignal:
+    # connector_contracts loads its bundled manifest through inventory, so
+    # importing it at module load time would create a cycle for CLI startup.
+    from defenseclaw.connector_contracts import (
+        kiro_cli_below_hook_floor,
+        kiro_ide_below_hook_floor,
+        normalize_agent_version,
+    )
+
     spec = _SPECS.get(name, _AgentSpec((), "", ("--version",)))
     config_path = _agent_config_path(name, include_workspace_config=include_workspace_config)
     binary_candidates = _binary_candidates_for_agent(name, spec)
@@ -1496,6 +1509,7 @@ def _scan_agent(
         require_trusted_binary_paths = True
     probe_errors: list[str] = []
     timed_out = ""
+    kiro_versions: dict[str, tuple[str, str]] = {}
     missing_state = _missing_probe_state(name) if binary_candidates else ([], [])
     for candidate in binary_candidates:
         candidate_version, candidate_error = _version_for_agent_binary(
@@ -1506,6 +1520,16 @@ def _scan_agent(
             data_dir=data_dir,
         )
         if candidate_version and not candidate_error:
+            if name == "kiro":
+                surface = _kiro_binary_surface(candidate, candidate_version)
+                normalized = normalize_agent_version(candidate_version)
+                if not surface or not normalized:
+                    probe_errors.append(f"{candidate}: Kiro surface or version could not be identified")
+                    continue
+                if surface not in kiro_versions:
+                    version_for_surface = f"kiro-cli {normalized}" if surface == "cli" else normalized
+                    kiro_versions[surface] = (candidate, version_for_surface)
+                continue
             binary_path = candidate
             version = candidate_version
             error = ""
@@ -1515,7 +1539,10 @@ def _scan_agent(
             probe_errors.append(f"{candidate}: {candidate_error}")
             if candidate_error == VERSION_PROBE_TIMED_OUT and not timed_out:
                 timed_out = candidate
-    if not version_ok and timed_out:
+    kiro_supported = bool(
+        (cli := kiro_versions.get("cli")) and not kiro_cli_below_hook_floor(cli[1])
+    ) or bool((ide := kiro_versions.get("ide")) and not kiro_ide_below_hook_floor(ide[1]))
+    if not version_ok and timed_out and not kiro_supported:
         # The first start of a CLI on a cold disk (a fresh host or clone) can
         # outlast the budget and answer in seconds right after, so ask once
         # more before calling it slow (GAP-0066).
@@ -1527,7 +1554,25 @@ def _scan_agent(
             data_dir=data_dir,
         )
         if candidate_version and not candidate_error:
-            binary_path, version, version_ok = timed_out, candidate_version, True
+            if name == "kiro":
+                surface = _kiro_binary_surface(timed_out, candidate_version)
+                normalized = normalize_agent_version(candidate_version)
+                if surface and normalized:
+                    canonical = f"kiro-cli {normalized}" if surface == "cli" else normalized
+                    kiro_versions[surface] = (timed_out, canonical)
+            else:
+                binary_path, version, version_ok = timed_out, candidate_version, True
+    if name == "kiro" and kiro_versions:
+        cli = kiro_versions.get("cli")
+        ide = kiro_versions.get("ide")
+        selected = cli or ide
+        if cli and not kiro_cli_below_hook_floor(cli[1]):
+            selected = cli
+        elif ide and not kiro_ide_below_hook_floor(ide[1]):
+            selected = ide
+        if selected is not None:
+            binary_path, version = selected
+            version_ok = True
     if missing_state[0]:
         _record_probe_state(missing_state, data_dir=data_dir)
     if not version_ok and probe_errors:
@@ -1546,7 +1591,19 @@ def _scan_agent(
         version=version,
         error=error,
         configured=bool(config_path),
+        kiro_cli_version=kiro_versions.get("cli", ("", ""))[1],
+        kiro_ide_version=kiro_versions.get("ide", ("", ""))[1],
     )
+
+
+def _kiro_binary_surface(path: str, version: str) -> str:
+    name = ntpath.splitext(ntpath.basename(path))[0].lower()
+    # A `kiro` shim can invoke kiro-cli. Its banner is CLI evidence, never
+    # evidence that an IDE capable of reading global hooks is installed.
+    banner = version.split(maxsplit=1)
+    if banner and banner[0].casefold() == "kiro-cli":
+        return "cli"
+    return "cli" if name == "kiro-cli" else "ide" if name == "kiro" else ""
 
 
 def _dedup_nonempty_candidates(candidates: tuple[str, ...]) -> tuple[str, ...]:
@@ -2193,6 +2250,8 @@ def _version_for_agent_binary(
     bundle_relatives = spec.macos_bundle_binaries if spec is not None else ()
     if bundle_relatives and _macos_app_bundle_for_binary(binary_path, bundle_relatives) is not None:
         return _macos_app_version_for_binary(binary_path, bundle_relatives)
+    if name == "kiro" and _windows_kiro_ide_root_for_binary(binary_path):
+        return _windows_kiro_ide_version_for_binary(binary_path)
 
     if name == "antigravity" and _is_windows_host():
         if not _is_canonical_antigravity_windows_binary(binary_path):
@@ -2550,6 +2609,16 @@ def _binary_candidates_for_agent(name: str, spec: _AgentSpec) -> tuple[str, ...]
             if os.path.isfile(candidate):
                 candidates.append(os.path.abspath(candidate))
 
+    if name == "kiro":
+        for local_app_data in _windows_current_user_local_app_data_roots():
+            cli = os.path.join(local_app_data, "Kiro-Cli", "kiro-cli.exe")
+            if _windows_plain_kiro_executable(cli):
+                candidates.append(os.path.abspath(cli))
+        for root in _windows_kiro_ide_install_roots():
+            ide = os.path.join(root, "Kiro.exe")
+            if _windows_plain_kiro_executable(ide):
+                candidates.append(os.path.abspath(ide))
+
     if name == "codex":
         for local_app_data in _windows_current_user_local_app_data_roots():
             desktop_bin = Path(local_app_data) / "OpenAI" / "Codex" / "bin"
@@ -2561,6 +2630,66 @@ def _binary_candidates_for_agent(name: str, spec: _AgentSpec) -> tuple[str, ...]
                     candidates.append(os.path.abspath(candidate))
 
     return _deduplicate_paths(candidates)
+
+
+def _windows_plain_kiro_executable(path: str) -> bool:
+    try:
+        reject_reparse_path(path)
+    except OSError:
+        return False
+    return os.path.isfile(path)
+
+
+def _windows_kiro_ide_install_roots() -> tuple[str, ...]:
+    """Exact per-user and machine roots of the Windows Kiro IDE."""
+
+    roots = [
+        os.path.join(local, "Programs", "Kiro")
+        for local in _windows_current_user_local_app_data_roots()
+    ]
+    program_files = _windows_current_user_known_folder("6D809377-6AF0-444B-8957-A3773F02200E")
+    if program_files:
+        roots.append(os.path.join(program_files, "Kiro"))
+    return tuple(root for root in roots if os.path.isabs(root))
+
+
+def _windows_kiro_ide_root_for_binary(binary_path: str) -> str:
+    if not _is_windows_host():
+        return ""
+    for root in _windows_kiro_ide_install_roots():
+        if _path_key(binary_path) == _path_key(os.path.join(root, "Kiro.exe")):
+            return root
+    return ""
+
+
+def _windows_kiro_ide_version_for_binary(binary_path: str) -> tuple[str, str]:
+    """Read the official IDE's bounded product metadata without running its GUI."""
+
+    from defenseclaw.connector_contracts import normalize_agent_version
+
+    try:
+        reject_reparse_path(binary_path)
+        if not os.path.isfile(binary_path):
+            return "", "Kiro IDE executable is missing"
+        product_path = os.path.join(os.path.dirname(binary_path), "resources", "app", "product.json")
+        fd = open_regular_file_no_follow(product_path)
+        with os.fdopen(fd, "rb") as stream:
+            data = stream.read(_KIRO_IDE_PRODUCT_MAX_BYTES + 1)
+        if len(data) > _KIRO_IDE_PRODUCT_MAX_BYTES:
+            return "", "Kiro IDE product metadata exceeds size limit"
+        product = json.loads(data)
+    except (OSError, ValueError):
+        return "", "Kiro IDE product metadata is unavailable or invalid"
+    if (
+        not isinstance(product, dict)
+        or product.get("nameShort") != "Kiro"
+        or product.get("applicationName") != "kiro"
+    ):
+        return "", "Kiro IDE product identity is invalid"
+    version = str(product.get("version") or "").strip()
+    if not version or normalize_agent_version(version) != version:
+        return "", "Kiro IDE product version is invalid"
+    return version, ""
 
 
 def _deduplicate_paths(candidates: list[str]) -> tuple[str, ...]:
@@ -2767,6 +2896,8 @@ def _read_cache(*, data_dir: str | os.PathLike[str] | None = None) -> AgentDisco
                 version=str(raw.get("version") or ""),
                 error=str(raw.get("error") or ""),
                 configured=bool(raw.get("configured")),
+                kiro_cli_version=str(raw.get("kiro_cli_version") or ""),
+                kiro_ide_version=str(raw.get("kiro_ide_version") or ""),
             )
     except Exception:
         return None

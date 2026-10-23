@@ -95,6 +95,8 @@ from defenseclaw.connector_contracts import (
     STATUS_UNVERSIONED,
     compare_agent_versions,
     connector_lock_contract_invariant,
+    kiro_cli_below_hook_floor,
+    kiro_cli_below_hook_floor_reason,
     normalize_agent_version,
     normalize_connector,
     openclaw_needs_interception_advisory,
@@ -5686,6 +5688,10 @@ def _check_connector_version_supported_for_setup(
                 return False
 
     compatibility = resolve_connector_contract(connector, raw_version)
+    if connector == "kiro" and signal is not None and emit:
+        cli = getattr(signal, "kiro_cli_version", "") or ""
+        if cli != raw_version and (below := kiro_cli_below_hook_floor(cli)):
+            ux.warn(kiro_cli_below_hook_floor_reason(below))
     # Some CLIs end their version banner with a period ("... 1.0.90.").
     version_display = raw_version.rstrip(".") or "(not probed)"
     contract = compatibility.contract.contract_id if compatibility.contract else "none"

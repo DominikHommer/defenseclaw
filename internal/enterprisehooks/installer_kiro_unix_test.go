@@ -165,6 +165,24 @@ func TestEnumerateUnixKeepsABelowFloorKiroRowThatInstallCanRepair(t *testing.T) 
 		t.Fatalf("verify of the enumerated row: %v", err)
 	}
 
+	// A supported IDE later installed beside the older CLI can take over the
+	// row without erasing the CLI's unprotected-surface report.
+	opts.Discover = func(context.Context, unixidentity.Account, []string) (map[string]string, map[string]string, error) {
+		return map[string]string{"kiro": installed, KiroIDEDiscoveryKey: "1.0.182"}, nil, nil
+	}
+	manifest, report, err = EnumerateUnix(context.Background(), enumeratorConfig("kiro"), connector.NewDefaultRegistry(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ideVersion := "1.0.182" + KiroIDEVersionSuffix
+	if len(manifest.Targets) != 1 || manifest.Targets[0].AgentVersion != ideVersion ||
+		len(report.Unprotected) != 1 || report.Unprotected[0].Version != installed {
+		t.Fatalf("earlier CLI row did not follow supported IDE: rows=%+v unprotected=%+v", manifest.Targets, report.Unprotected)
+	}
+	if _, err := Install(context.Background(), kiroStandaloneInstallOptions(alice, ideVersion)); err != nil {
+		t.Fatalf("install after following supported IDE: %v", err)
+	}
+
 	// A known Kiro row does not follow its user to a version below the floor;
 	// the enumerator keeps it at its last enrolled version and reports the
 	// installed one. That holds for a row an earlier release enrolled below the

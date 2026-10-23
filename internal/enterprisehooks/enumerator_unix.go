@@ -1155,11 +1155,13 @@ func unixKnownRowVersionRefused(connectorName, from, to string) string {
 // status and verify then reported the agent as covered (GAP-0151). On the
 // standalone profile a version newer than every tested range resolves to the
 // newest contract (an untested newer version) and is enrolled. A connector
-// with a standalone floor instead of a contract (Kiro) is checked by the
-// guardian's install (validateHookContract). Empty when the row is enrolled.
+// with a standalone floor instead of a contract (Kiro) must pass that floor
+// here too: the guardian cannot install a newly published row below it.
+// Empty when the row is enrolled.
 func unixNewRowVersionRefused(connectorName, version string) string {
 	if standaloneNotGatedAgentFloor(connectorName) != "" {
-		return ""
+		_, reason := standaloneNotGatedVersionAdmitted(resolveHookContract(connectorName, version))
+		return reason
 	}
 	resolution := resolveHookContract(connectorName, version)
 	switch resolution.Status {

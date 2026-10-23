@@ -31,11 +31,17 @@ so its tool calls never reach DefenseClaw: on kiro-cli 2.26.1 such a run
 completed a tool call that sent DefenseClaw nothing. DefenseClaw therefore
 treats an older kiro-cli as unsupported:
 
-- `defenseclaw setup kiro` refuses it in observe and action mode, before it
-  changes any Kiro file, and says to update Kiro CLI.
-- `defenseclaw doctor` reports the active Kiro connector as unsupported.
-- The enterprise guardian does not enroll it (see
+- If it is the only supported Kiro installation, `defenseclaw setup kiro`
+  refuses it in observe and action mode before changing any Kiro file.
+- `defenseclaw doctor` reports that CLI as unsupported.
+- The enterprise guardian does not create a new row for that CLI (see
   [Enterprise](#enterprise-standalone-profile)).
+
+When Kiro IDE 1.0.182 or later is installed alongside an older CLI, setup
+installs their shared global hooks for the IDE. Discovery and doctor report
+the CLI separately as unsupported: its non-interactive runs still send no
+hooks until it is updated. The managed guardian enrolls the IDE version and
+reports the older CLI as unprotected.
 
 Kiro IDE is not gated by this floor; its own floor for the global hook file
 is below.
@@ -240,7 +246,8 @@ that an earlier release wrote.
 
 The standalone profile certifies kiro-cli 2.27.1 and later (see
 [Supported versions](#supported-versions)). In action mode the guardian
-refuses to enroll a new user whose kiro-cli is older and reports the reason. A
+refuses a new row for an older kiro-cli and reports the reason, unless a
+supported IDE is installed; then it enrolls the IDE and reports the CLI. A
 user an earlier release already enrolled below 2.27.1 keeps being repaired at
 that version, on every OS, so the interactive sessions stay enforced, but that kiro-cli's
 non-interactive `--v3` runs send no hooks until it is updated. A kiro-cli
@@ -261,15 +268,16 @@ DefenseClaw agent, and the next pass after that run reads its real version. The 
 comes from the `product.json` folders in the hook scope callout above.
 
 Managed Windows pins each enrolled user to one of two reviewed hook
-contracts: `kiro-cli-windows-managed-hooks-v1` for kiro-cli 2.27.1 and later,
+contracts: `kiro-cli-windows-managed-hooks-v1` for kiro-cli 2.24.1 and later
+(new rows require 2.27.1),
 and `kiro-ide-windows-managed-hooks-v1` for Kiro IDE 1.0.182 and later (a
 `+kiro-ide` version). Both cover the global hook file, where
 DefenseClaw blocks on `UserPromptSubmit` and `PreToolUse` (kiro-cli `--v3`
 records a prompt block without vetoing the prompt), and the CLI 2.x agent,
 where only `preToolUse` can block; `PostToolUse` and `Stop` are audit only. Every
 hook command runs the standalone `defenseclaw-hook.exe` with
-`--enterprise-managed`. No earlier release enrolled Kiro on managed
-Windows, so a version below either floor is always refused there. Kiro hooks
+`--enterprise-managed`. An older enrolled CLI row is kept for upgrade
+compatibility, while a new row below either floor is refused. Kiro hooks
 cannot rewrite tool input, so the foreign-hook guard does not apply. If an
 enrolment fails, the rollback removes DefenseClaw's hook files when their
 owner is the account, LocalSystem or Administrators, even if their

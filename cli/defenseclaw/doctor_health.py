@@ -404,6 +404,28 @@ def assess_component_health(
     return tuple(findings)
 
 
+def _kiro_floor_finding(normalized: str, ranges: tuple[str, ...]) -> ConnectorHealthFinding:
+    return ConnectorHealthFinding(
+        connector="kiro",
+        status=HealthStatus.UNSUPPORTED,
+        reason_code="connector-version-outside-contract",
+        summary=kiro_cli_below_hook_floor_reason(normalized),
+        installed_version=normalized,
+        supported_agent_ranges=ranges,
+        remediations=(
+            RemediationChoice(
+                choice_id="install-supported-connector-version",
+                summary=f"Update Kiro CLI to {KIRO_CLI_HOOK_FLOOR} or later, then rerun setup",
+                kind=RemediationKind.MANUAL,
+                changes_state=True,
+                requires_confirmation=True,
+                unattended_allowed=False,
+            ),
+            _refresh_discovery_choice(),
+        ),
+    )
+
+
 def assess_connector_health(
     active_connectors: Iterable[str],
     discovery: Any | None,
@@ -466,6 +488,11 @@ def assess_connector_health(
         raw_version = getattr(signal, "version", "")
         raw_version = raw_version if isinstance(raw_version, str) else ""
         compatibility = resolve_connector_contract(connector, raw_version)
+
+        if connector == "kiro":
+            cli = getattr(signal, "kiro_cli_version", "")
+            if isinstance(cli, str) and cli != raw_version and (below := kiro_cli_below_hook_floor(cli)):
+                findings.append(_kiro_floor_finding(below, ranges))
 
         if compatibility.status == STATUS_NOT_GATED:
             proxy = connector in PROXY_CONNECTORS
@@ -543,27 +570,7 @@ def assess_connector_health(
         if kiro_below_floor:
             # Kiro has no contract range to install: say why this kiro-cli
             # is refused and which version to update to (GAP-0227).
-            findings.append(
-                ConnectorHealthFinding(
-                    connector=public_name,
-                    status=HealthStatus.UNSUPPORTED,
-                    reason_code="connector-version-outside-contract",
-                    summary=kiro_cli_below_hook_floor_reason(kiro_below_floor),
-                    installed_version=normalized,
-                    supported_agent_ranges=ranges,
-                    remediations=(
-                        RemediationChoice(
-                            choice_id="install-supported-connector-version",
-                            summary=f"Update Kiro CLI to {KIRO_CLI_HOOK_FLOOR} or later, then rerun setup",
-                            kind=RemediationKind.MANUAL,
-                            changes_state=True,
-                            requires_confirmation=True,
-                            unattended_allowed=False,
-                        ),
-                        _refresh_discovery_choice(),
-                    ),
-                )
-            )
+            findings.append(_kiro_floor_finding(kiro_below_floor, ranges))
         elif normalized:
             findings.append(
                 ConnectorHealthFinding(

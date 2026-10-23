@@ -87,6 +87,57 @@ func TestApplyStandaloneRowStateKeepsAKiroRowAnEarlierReleaseEnrolledBelowTheFlo
 	}
 }
 
+func TestWindowsKiroOldCLIStillEnrollsSupportedIDE(t *testing.T) {
+	setStandaloneProfileForTest(t, true)
+	home := kiroCLIProfile(t, "2.26.1")
+	product := filepath.Join(home, "AppData", "Local", "Programs", "Kiro", "resources", "app", "product.json")
+	if err := os.MkdirAll(filepath.Dir(product), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(product, []byte(`{"nameShort":"Kiro","applicationName":"kiro","version":"1.0.182"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := discoverWindowsKiroAgentVersion(home); got != "1.0.182"+KiroIDEVersionSuffix {
+		t.Fatalf("selected Kiro version = %q, want supported IDE", got)
+	}
+	var reports []UnprotectedAgent
+	row := ManifestTarget{SID: testLocalUserSID, UserHome: home, Connector: "kiro"}
+	ctx := windowsStandaloneRowContext{sessionActive: true, user: "alice", report: func(a UnprotectedAgent) { reports = append(reports, a) }}
+	if !applyStandaloneRowStateFor(&row, map[string]ManifestTarget{}, nil, ctx) ||
+		row.AgentVersion != "1.0.182"+KiroIDEVersionSuffix || !row.IsEnabled() {
+		t.Fatalf("supported IDE was not enrolled: row=%+v reports=%+v", row, reports)
+	}
+	if len(reports) != 1 || reports[0].Version != "2.26.1" || !strings.Contains(reports[0].Reason, "is below 2.27.1") {
+		t.Fatalf("old CLI was not reported separately: %+v", reports)
+	}
+
+	enabled := true
+	prior := ManifestTarget{SID: testLocalUserSID, Connector: "kiro", AgentVersion: "2.24.1", Enabled: &enabled}
+	previous := map[string]ManifestTarget{previousManifestKey(prior.SID, prior.Connector): prior}
+	reports = nil
+	row = ManifestTarget{SID: testLocalUserSID, UserHome: home, Connector: "kiro"}
+	if !applyStandaloneRowStateFor(&row, previous, nil, ctx) || row.AgentVersion != "1.0.182"+KiroIDEVersionSuffix {
+		t.Fatalf("earlier CLI row did not follow supported IDE: row=%+v reports=%+v", row, reports)
+	}
+	if len(reports) != 1 || reports[0].Version != "2.26.1" {
+		t.Fatalf("earlier CLI row hid the installed unsupported CLI: %+v", reports)
+	}
+
+	if err := os.WriteFile(product, []byte(`{"nameShort":"Kiro","applicationName":"kiro","version":"1.0.181"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reports = nil
+	row = ManifestTarget{SID: testLocalUserSID, UserHome: home, Connector: "kiro"}
+	if applyStandaloneRowStateFor(&row, map[string]ManifestTarget{}, nil, ctx) || len(reports) != 2 {
+		t.Fatalf("two unsupported Kiro surfaces were not both reported: row=%+v reports=%+v", row, reports)
+	}
+	for _, report := range reports {
+		if strings.Contains(report.Reason, "stays enrolled") {
+			t.Fatalf("unprotected Kiro surface claims an enrollment: %+v", reports)
+		}
+	}
+}
+
 // The guardian install keeps repairing the hooks 1.0.3 installed at kiro-cli
 // 2.24.1, refuses a change to another version below the floor as drift,
 // follows an upgrade to the floor, and refuses a new enrollment below it.

@@ -319,3 +319,16 @@ def test_kiro_cli_below_the_hook_floor_is_unsupported_with_the_update_guidance(v
     assert not below.remediations[0].unattended_allowed
 
     assert (at_floor.status, at_floor.reason_code) == (HealthStatus.SUPPORTED, "connector-not-version-gated")
+
+
+def test_kiro_doctor_reports_old_cli_separately_from_supported_ide() -> None:
+    signal = _signal(installed=True, version="1.0.182")
+    signal.kiro_cli_version = "kiro-cli 2.26.1"
+    signal.kiro_ide_version = "1.0.182"
+    findings = assess_connector_health(("kiro",), SimpleNamespace(agents={"kiro": signal}))
+
+    assert any(f.status is HealthStatus.SUPPORTED and f.installed_version == "1.0.182" for f in findings)
+    assert any(
+        f.status is HealthStatus.UNSUPPORTED and "kiro-cli 2.26.1 is below 2.27.1" in f.summary
+        for f in findings
+    )

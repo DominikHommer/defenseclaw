@@ -144,6 +144,21 @@ def test_kiro_cli_below_hook_floor_is_refused_by_setup_and_its_lock(mode: str, t
         assert lock(supported) == "", supported
 
 
+@pytest.mark.parametrize("mode", ("observe", "action"))
+def test_kiro_setup_accepts_supported_ide_and_reports_old_cli(mode: str, tmp_path: Path, monkeypatch) -> None:
+    warnings: list[str] = []
+    monkeypatch.setattr(cmd_setup.ux, "warn", warnings.append)
+    signal = SimpleNamespace(
+        version="1.0.182", installed=True, error="", binary_path="/usr/local/bin/kiro",
+        kiro_cli_version="kiro-cli 2.26.1", kiro_ide_version="1.0.182",
+    )
+    assert cmd_setup._check_connector_version_supported_for_setup(
+        "kiro", mode=mode, emit=True, data_dir=str(tmp_path),
+        _discovery=SimpleNamespace(agents={"kiro": signal}),
+    )
+    assert any("kiro-cli 2.26.1 is below 2.27.1" in warning for warning in warnings)
+
+
 @pytest.mark.parametrize("connector", ("antigravity",))
 def test_contract_lock_accepts_go_omitted_unversioned_fields(connector: str, tmp_path: Path) -> None:
     entry = _entry(connector, tmp_path)

@@ -105,10 +105,10 @@ func readKiroIDEProductVersion(path string) string {
 
 // applyKiroIDESurface folds the Kiro IDE version discovery returned under
 // KiroIDEDiscoveryKey into the kiro result for user. An IDE at or above
-// KiroIDEGlobalHooksFloor enrolls a user without a readable kiro-cli
+// KiroIDEGlobalHooksFloor enrolls a user without an admitted kiro-cli
 // version: the row's version is the IDE's, marked with KiroIDEVersionSuffix
 // so the standalone floor applies the IDE's floor. An older IDE reads only
-// workspace hooks, so it is reported and the kiro-cli row, if any, stays.
+// workspace hooks, so it is reported independently of the kiro-cli.
 func applyKiroIDESurface(user string, uid int, versions, reasons map[string]string) []UnprotectedAgent {
 	ide := strings.TrimSpace(versions[KiroIDEDiscoveryKey])
 	if ide == "" {
@@ -118,7 +118,9 @@ func applyKiroIDESurface(user string, uid int, versions, reasons map[string]stri
 	if compareStandaloneFloorVersion(connector.NormalizeAgentVersion("kiro", ide), KiroIDEGlobalHooksFloor) < 0 {
 		consequence := "its agent sessions run without DefenseClaw hooks"
 		if cli := versions["kiro"]; cli != "" {
-			consequence += "; kiro-cli " + cli + " stays enrolled"
+			if admitted, _ := standaloneNotGatedVersionAdmitted(resolveHookContract("kiro", cli)); admitted {
+				consequence += "; kiro-cli " + cli + " remains eligible for enrollment"
+			}
 		}
 		return []UnprotectedAgent{{
 			User:      user,
@@ -129,6 +131,20 @@ func applyKiroIDESurface(user string, uid int, versions, reasons map[string]stri
 			Reason: fmt.Sprintf("Kiro IDE %s is below %s, the first build that reads the global ~/.kiro/hooks file, so %s; update Kiro IDE",
 				ide, KiroIDEGlobalHooksFloor, consequence),
 		}}
+	}
+	if cli := strings.TrimSpace(versions["kiro"]); cli != "" {
+		if admitted, reason := standaloneNotGatedVersionAdmitted(resolveHookContract("kiro", cli)); !admitted {
+			versions["kiro"] = ide + KiroIDEVersionSuffix
+			delete(reasons, "kiro")
+			return []UnprotectedAgent{{
+				User:      user,
+				UID:       intPointer(uid),
+				Connector: "kiro",
+				Version:   cli,
+				Code:      UnprotectedCodeForReason(reason),
+				Reason:    reason + "; Kiro IDE " + ide + " is separately eligible for global hooks, but this kiro-cli's non-interactive runs load no hooks",
+			}}
+		}
 	}
 	if versions["kiro"] == "" {
 		versions["kiro"] = ide + KiroIDEVersionSuffix

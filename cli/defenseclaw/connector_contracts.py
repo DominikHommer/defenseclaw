@@ -359,6 +359,7 @@ def normalize_agent_version(raw: str | None) -> str:
 # `kiro-cli chat --v3` run loads no hooks (kiro.dev/docs/cli/headless), so its
 # tool calls never reach DefenseClaw (rel-1-0-4 GAP-0227).
 KIRO_CLI_HOOK_FLOOR = str(HOOK_CONTRACT_MANIFEST["connectors"]["kiro"]["cli_hook_floor"])
+KIRO_IDE_GLOBAL_HOOKS_FLOOR = str(HOOK_CONTRACT_MANIFEST["connectors"]["kiro"]["ide_global_hooks_floor"])
 # The banner `kiro-cli --version` prints; the Kiro IDE launcher prints a bare
 # version, which is not a kiro-cli version.
 _KIRO_CLI_VERSION_RE = re.compile(r"(?i)^kiro-cli\s+v?[0-9]")
@@ -385,6 +386,18 @@ def kiro_cli_below_hook_floor_reason(normalized: str) -> str:
         f"kiro-cli {normalized} is below {floor}: before {floor} a non-interactive kiro-cli --v3 run loads no hooks, "
         f"so its tool calls never reach DefenseClaw; update Kiro CLI to {floor} or later"
     )
+
+
+def kiro_ide_below_hook_floor(raw: str | None) -> str:
+    """Return an IDE version that cannot read the global hooks file."""
+
+    value = (raw or "").strip()
+    if not value or _KIRO_CLI_VERSION_RE.match(value):
+        return ""
+    normalized = normalize_agent_version(value)
+    if normalized and _compare_version(normalized, KIRO_IDE_GLOBAL_HOOKS_FLOOR) < 0:
+        return normalized
+    return ""
 
 
 def resolve_connector_contract(

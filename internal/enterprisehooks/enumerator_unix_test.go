@@ -218,6 +218,60 @@ func TestEnumerateUnixFiltersAndAutoEnrolls(t *testing.T) {
 	}
 }
 
+func TestEnumerateUnixKiroChecksEachInstalledSurface(t *testing.T) {
+	root := trustedTestDir(t)
+	homes := filepath.Join(root, "home")
+	if err := os.MkdirAll(homes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uid, gid := os.Getuid(), os.Getgid()
+	for _, tc := range []struct {
+		name, cli, ide, wantRow string
+		wantUnprotected         string
+	}{
+		{name: "old CLI alone", cli: "2.26.1", wantUnprotected: "2.26.1"},
+		{name: "old CLI with supported IDE", cli: "2.26.1", ide: "1.0.182", wantRow: "1.0.182" + KiroIDEVersionSuffix, wantUnprotected: "2.26.1"},
+		{name: "supported CLI", cli: "2.27.1", wantRow: "2.27.1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := makeHome(t, homes, strings.ReplaceAll(tc.name, " ", "-"))
+			resolver := &fakeResolver{
+				accounts: map[string]unixidentity.Account{"alice": {Name: "alice", UID: uid, GID: gid, Home: home, Shell: "/bin/bash"}},
+				listed:   []string{"alice"},
+			}
+			opts := UnixEnumerateOptions{
+				Resolver: resolver, HomeRoots: []string{homes}, UIDMin: uid, UIDMax: uid,
+				Discover: func(context.Context, unixidentity.Account, []string) (map[string]string, map[string]string, error) {
+					versions := map[string]string{"kiro": tc.cli}
+					if tc.ide != "" {
+						versions[KiroIDEDiscoveryKey] = tc.ide
+					}
+					return versions, nil, nil
+				},
+			}
+			manifest, report, err := EnumerateUnix(context.Background(), enumeratorConfig("kiro"), connector.NewDefaultRegistry(), opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantRow == "" {
+				if len(manifest.Targets) != 0 || report.New != 0 {
+					t.Fatalf("uninstallable Kiro row published: %+v (report %+v)", manifest.Targets, report)
+				}
+			} else if len(manifest.Targets) != 1 || manifest.Targets[0].AgentVersion != tc.wantRow || !manifest.Targets[0].IsEnabled() {
+				t.Fatalf("Kiro rows = %+v, want enabled at %s", manifest.Targets, tc.wantRow)
+			}
+			if tc.wantUnprotected == "" {
+				if len(report.Unprotected) != 0 {
+					t.Fatalf("supported Kiro reported unprotected: %+v", report.Unprotected)
+				}
+			} else if len(report.Unprotected) != 1 || report.Unprotected[0].Version != tc.wantUnprotected ||
+				!strings.Contains(report.Unprotected[0].Reason, "is below 2.27.1") {
+				t.Fatalf("unprotected Kiro = %+v, want old CLI %s", report.Unprotected, tc.wantUnprotected)
+			}
+		})
+	}
+}
+
 // Under unverified_versions: refuse a user whose only Antigravity install
 // is the IDE gets a refusal row at the default contract's version, and the
 // gateway refuses their calls (refused-surfaces entry, reported enforced).

@@ -178,6 +178,7 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 	}
 	if prev, known := previous[previousManifestKey(row.SID, row.Connector)]; !known || prev.IsEnabled() {
 		rowContext.reportKiroIDEBelowFloor(row)
+		rowContext.reportKiroCLIBelowFloorBesideIDE(row)
 	}
 	if prev, known := previous[previousManifestKey(row.SID, row.Connector)]; known {
 		// A disabled row is an administrator decision the guardian never
