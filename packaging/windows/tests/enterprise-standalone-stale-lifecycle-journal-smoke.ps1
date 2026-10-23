@@ -8,11 +8,11 @@
 # release before GAP-1322 refuses the contractless Kiro bundles 1.0.1 wrote).
 # Releases through 1.0.2 also refuse an unselected open-mode generation that
 # 1.0.3 or later left when the older Setup committed a downgrade (GAP-0762).
-# The same retire text for a non-1 schema or foreign bundle must retain the
-# journal before the next Setup opens a transaction.
+# The replacement gateway's retire decides which old generations can be
+# collected, which target folders it can skip, and which bundles are invalid.
 # Every later Setup upgrade, ensure and uninstall then failed retiring it
-# with that same installed gateway. A standalone lifecycle now removes that
-# exact journal, records why, and goes on; any other retire failure, a
+# with that same installed gateway. A standalone lifecycle now asks the
+# replacement gateway to retire the exact journal before continuing; any other retire failure, a
 # pending transaction or the Secure Client profile keeps the error. The
 # teardown journal of a refused or rolled-back uninstall goes the same way
 # (GAP-1041). So does a journal whose retire stopped at a per-user folder the
@@ -72,10 +72,20 @@ try {
         $untrustedFolder = 'retire claudecode managed runtime generations for SID S-1-5-21-1-2-3-1103 (CONTOSO\stale): enterprise hooks: managed runtime generation directory is untrusted: C:\Users\stale\.defenseclaw\hooks: access denied'
         $script:TestRetireError = ''
         $script:TestRetireShape = 'report'
+        $script:TestReplacementError = ''
+        $script:TestReplacementCalled = $false
         function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
-            param([hashtable]$Layout, [string]$GatewayServiceName, [string]$Action)
+            param([hashtable]$Layout, [string]$GatewayServiceName, [string]$Action, [hashtable]$GatewaySource)
             if ($Action -cne 'retire') {
                 throw "unexpected action $Action"
+            }
+            if ($null -ne $GatewaySource) {
+                $script:TestReplacementCalled = $true
+                if ($script:TestReplacementError) {
+                    throw $script:TestReplacementError
+                }
+                [IO.File]::Delete($Layout.ManagedHooksLifecycleJournalPath)
+                return [pscustomobject]@{ ok = $true }
             }
             if ($script:TestRetireError) {
                 $text = "managed-hook lifecycle snapshot retire failed: $($script:TestRetireError)"
@@ -193,12 +203,17 @@ try {
                     'other connector bad mode' { $otherBundle.fail_mode = 'permissive' }
                     'other SID schema 2' { $otherBundle.schema_version = 2 }
                     'other SID bad mode' { $otherBundle.fail_mode = 'permissive' }
+                    'other SID prior data directory' { $otherBundle.data_dir = [IO.Path]::Combine($Root, 'prior-user', '.defenseclaw') }
+                    'other SID prior hook binary' { $otherBundle.hook_executable = [IO.Path]::Combine($Root, 'prior-hook.exe') }
                 }
                 if ($OtherTargetCase -ceq 'other SID unreadable hooks') {
                     [void][IO.Directory]::CreateDirectory($otherTargetDataDir)
                     [IO.File]::WriteAllText($otherHooksDir, 'not a directory')
                 }
-                else {
+                elseif ($OtherTargetCase -ceq 'other SID absent hooks') {
+                    [void][IO.Directory]::CreateDirectory($otherTargetDataDir)
+                }
+                elseif ($OtherTargetCase -cne 'other SID absent data root') {
                     [void][IO.Directory]::CreateDirectory(
                         [IO.Path]::Combine($otherTargetDataDir, 'hooks')
                     )
@@ -216,17 +231,29 @@ try {
                 [IO.File]::WriteAllText($layout.PendingPath, '{}')
             }
             $script:TestRetireError = $RetireError
+            $expectedReplacement = [bool](
+                $EnterpriseProfile -ceq 'Standalone' -and
+                -not $Pending -and $Shape -ceq 'report' -and
+                $RetireError -cin @($gcRefusal, $openGenerationRefusal, $untrustedFolder)
+            )
+            $script:TestReplacementError = if ($expectedReplacement -and $WantThrow) {
+                'replacement gateway rejected an incompatible managed runtime bundle'
+            } else { '' }
+            $script:TestReplacementCalled = $false
             $script:DefenseClawStaleLifecycleJournalRemoved = ''
             $threw = $false
             try {
                 Invoke-DefenseClawCommittedManagedHooksLifecycleRetire `
                     -Layout $layout `
-                    -GatewayServiceName 'DefenseClawGateway'
+                    -GatewayServiceName 'DefenseClawGateway' `
+                    -GatewaySource @{ path = 'authenticated replacement gateway' }
             }
             catch {
                 $threw = $true
                 # A refusal may name the remedy before the gateway's error.
-                if (-not ([string]$_.Exception.Message).Contains($RetireError)) {
+                if (-not ([string]$_.Exception.Message).Contains($RetireError) -and
+                    -not ($expectedReplacement -and $WantThrow -and
+                        ([string]$_.Exception.Message).Contains($script:TestReplacementError))) {
                     $failures.Add("${Name}: error changed to '$($_.Exception.Message)'")
                 }
             }
@@ -236,6 +263,9 @@ try {
             }
             if ($removed -ne $WantRemoved) {
                 $failures.Add("${Name}: journal removed=$removed, want $WantRemoved")
+            }
+            if ($script:TestReplacementCalled -ne $expectedReplacement) {
+                $failures.Add("${Name}: replacement called=$script:TestReplacementCalled, want $expectedReplacement")
             }
             $recorded = -not [string]::IsNullOrEmpty($script:DefenseClawStaleLifecycleJournalRemoved)
             $wantRecorded = $WantRemoved -and -not [string]::IsNullOrEmpty($RetireError)
@@ -256,6 +286,9 @@ try {
             if ([IO.File]::Exists($otherHooksDir)) {
                 [IO.File]::Delete($otherHooksDir)
             }
+            if ([IO.Directory]::Exists($otherDataDir)) {
+                Microsoft.PowerShell.Management\Remove-Item -LiteralPath $otherDataDir -Recurse -Force
+            }
         }
         try {
             & $run 'retired' 'Standalone' '' $false $false $true
@@ -265,18 +298,28 @@ try {
             & $run 'open with another connector closed' 'Standalone' $openGenerationRefusal $false $false $true 'report' 'open' 'other connector closed'
             & $run 'open with another SID closed' 'Standalone' $openGenerationRefusal $false $false $true 'report' 'open' 'other SID closed'
             foreach ($otherTargetCase in @(
+                    'other SID absent data root', 'other SID absent hooks',
+                    'other SID unreadable hooks', 'other SID prior data directory',
+                    'other SID prior hook binary'
+                )) {
+                & $run "selector mismatch with $otherTargetCase" 'Standalone' $openGenerationRefusal $false $false $true 'report' 'open' $otherTargetCase
+            }
+            foreach ($otherTargetCase in @(
                     'other connector schema 2', 'other connector bad mode',
-                    'other SID schema 2', 'other SID bad mode',
-                    'other SID unreadable hooks'
+                    'other SID schema 2', 'other SID bad mode'
                 )) {
                 & $run "selector mismatch with $otherTargetCase bundle" 'Standalone' $openGenerationRefusal $false $true $false 'report' 'open' $otherTargetCase
             }
             foreach ($bundleCase in @(
-                    'schema 2', 'schema string', 'closed', 'invalid fail mode',
+                    'closed', 'foreign data directory', 'foreign hook',
+                    'foreign gateway address', 'foreign gateway service', 'absent'
+                )) {
+                & $run "selector mismatch with $bundleCase bundle" 'Standalone' $openGenerationRefusal $false $false $true 'report' $bundleCase
+            }
+            foreach ($bundleCase in @(
+                    'schema 2', 'schema string', 'invalid fail mode',
                     'foreign generation', 'foreign connector', 'foreign SID',
-                    'foreign data directory', 'foreign hook',
-                    'foreign gateway address', 'foreign gateway service',
-                    'nonstring token', 'unknown field', 'malformed', 'absent',
+                    'nonstring token', 'unknown field', 'malformed',
                     'second invalid', 'duplicate key', 'noncanonical whitespace',
                     'extra newline', 'UTF-16'
                 )) {
