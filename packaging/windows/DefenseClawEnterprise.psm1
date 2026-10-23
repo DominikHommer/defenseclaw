@@ -26073,14 +26073,6 @@ function Get-DefenseClawRetiredInstallTreeAllowlist {
             (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'lib\defenseclaw')
         )
         $files += (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'lib\defenseclaw\policy_compiler.py')
-        # Hook registrations remain live until pending.json is retired. The
-        # pre-finalization shape check therefore still sees the exact managed
-        # OpenCode plugin; its post-commit removal runs immediately afterward.
-        $plugin = Get-DefenseClawStandaloneOpenCodePluginPaths -Layout @{
-            InstallRoot = $RetiredRoot
-        }
-        $directories += @([string]$plugin.ShareDirectory, [string]$plugin.PluginDirectory)
-        $files += [string]$plugin.PluginPath
     }
     return @{
         directories = @(
@@ -26276,6 +26268,15 @@ function Assert-DefenseClawInstallTreeRetirementState {
     $allowlist = Get-DefenseClawRetiredInstallTreeAllowlist `
         -Layout $Layout `
         -RetiredRoot $root
+    if ($AllowUnretiredAcls -and (Test-DefenseClawStandaloneProfile)) {
+        # The pre-finalization check runs after commit but before managed-hook
+        # teardown. Admit only the exact OpenCode plugin still installed at
+        # that boundary; the later check and retired-tree cleanup require it
+        # to be gone.
+        $plugin = Get-DefenseClawStandaloneOpenCodePluginPaths -Layout $Layout
+        $allowlist.directories += @([string]$plugin.ShareDirectory, [string]$plugin.PluginDirectory)
+        $allowlist.files += [string]$plugin.PluginPath
+    }
     Assert-DefenseClawManagedTreeNoReparse `
         -Root $root `
         -AllowAFUnixSocketAt (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name ManagedIPCSocketPath)

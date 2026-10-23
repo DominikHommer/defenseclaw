@@ -167,6 +167,14 @@ try {
             catch {
                 $failures.Add("committed install-tree check refused the managed OpenCode plugin before finalization: $($_.Exception.Message)")
             }
+            $retiredAllowlist = Get-DefenseClawRetiredInstallTreeAllowlist `
+                -Layout $layout `
+                -RetiredRoot $layout.InstallRoot
+            if ([string]$paths.PluginPath -in $retiredAllowlist.files -or
+                [string]$paths.PluginDirectory -in $retiredAllowlist.directories -or
+                [string]$paths.ShareDirectory -in $retiredAllowlist.directories) {
+                $failures.Add('the retired tree still permits the managed OpenCode plugin after finalization')
+            }
             Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $layout
             foreach ($gone in @($plugin, [string]$paths.PluginDirectory, [string]$paths.ShareDirectory)) {
                 if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $gone) {
