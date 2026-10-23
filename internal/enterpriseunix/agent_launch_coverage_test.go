@@ -19,6 +19,40 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
+func TestManagedLaunchEmptyLinuxProcIsInspectable(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"),
+		ConfigFile: machinePolicyConfig(t, h, "claudecode")}))
+	h.publishLedger([]byte("ledger\n"))
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		result := h.run(Options{Action: action})
+		if warning := messagesOf(result.Warnings, "managed_launch_scan_unknown"); warning != "" {
+			t.Fatalf("%s treated an empty Linux process table as an unknown scan: %s", action, warning)
+		}
+		requireOK(t, result)
+	}
+}
+
+func TestManagedLaunchUnavailableLinuxProcLowersHealth(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"),
+		ConfigFile: machinePolicyConfig(t, h, "claudecode")}))
+	h.publishLedger([]byte("ledger\n"))
+	if err := os.Remove(h.env.P("/proc/stat")); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		result := h.run(Options{Action: action})
+		if warning := messagesOf(result.Warnings, "managed_launch_scan_unknown"); warning == "" ||
+			result.CoverageComplete || result.SecurityComplete {
+			t.Fatalf("%s claimed complete coverage without a process scan: %+v", action, result)
+		}
+		if action == ActionVerify {
+			requireError(t, result, "managed_launch_scan_unknown")
+		}
+	}
+}
+
 func TestLinuxDirectoryAgentNormalLaunchUsesNSSHome(t *testing.T) {
 	h := newTestHost(t, "linux")
 	h.env.ReportLaunchCoverage = func(context.Context, managed.LaunchCoverageReport) error { return nil }
