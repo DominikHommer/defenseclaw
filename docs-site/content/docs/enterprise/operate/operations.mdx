@@ -283,7 +283,7 @@ A host cloned from a template that already runs the deployment shares its device
 | Guardian and enumerator log | `C:\ProgramData\Cisco\DefenseClaw\logs\guardian\hook-guardian.log`. The hook enumerator writes here too, each line prefixed `[hook-enumerator]`; its warnings about one account name the account's SID |
 | Sensor helper log | `C:\ProgramData\Cisco\DefenseClaw\logs\sensor-helper\sensor-helper.log` |
 
-Log files are readable by Administrators and Event Log Readers only. The event IDs (`100` installed through `150` refused) are in [Operate reference](/docs/enterprise/operate/reference#windows-event-ids).
+Administrators and Event Log Readers can read the files in `%WINDIR%\Logs\DefenseClaw`. The gateway, guardian and sensor helper logs under `C:\ProgramData\Cisco\DefenseClaw\logs` are for SYSTEM and Administrators only; the gateway service can also read and write `logs\gateway`. The event IDs (`100` installed through `150` refused) are in [Operate reference](/docs/enterprise/operate/reference#windows-event-ids).
 
 ### Linux
 
