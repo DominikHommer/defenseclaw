@@ -42,7 +42,7 @@ func TestMain(m *testing.M) {
 
 // testHermesProbeLauncherEnv makes a copy of the test binary answer Hermes'
 // execution probe as the active hook runtime does.
-const testHermesProbeLauncherEnv = "DEFENSECLAW_TEST_HERMES_PROBE_LAUNCHER"
+const testHermesProbeLauncherEnv = "DC_CONNECTOR_TEST_HERMES_PROBE_LAUNCHER"
 
 // Run with HERMES_HOME exported, the tests still see none.
 func TestConnectorTestsRunWithoutTheHostsHermesEnvironment(t *testing.T) {
