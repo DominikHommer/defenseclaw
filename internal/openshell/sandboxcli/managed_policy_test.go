@@ -38,6 +38,7 @@ func managedExplainFixture() *sandboxapi.ManagedExplain {
 
 func managedStatusFixture() *sandboxapi.ManagedStatus {
 	return &sandboxapi.ManagedStatus{Profile: "contractors", Description: "Contractors. Coding agents only in a sandbox.",
+		Allowed:         true,
 		EffectiveDigest: "sha256:7f3a" + strings.Repeat("0", 60), UpdatedAt: time.Date(2026, 9, 27, 11, 58, 0, 0, time.UTC),
 		RequestAccess: "it-security@example.com", InstallMode: "setup", Driver: "docker", OpenShellVersion: "0.1.3"}
 }
@@ -606,8 +607,9 @@ func TestDoctorRowsOnAManagedComputer(t *testing.T) {
 	}
 	// GAP-0175: before the first sandbox no profile is known; the row
 	// names the policy, never "profile your organization's policy".
-	if c := ta.managedPolicyCheck(&sandboxapi.ManagedStatus{}); c.Detail != "your organization's policy" {
-		t.Errorf("unnamed policy row = %q", c.Detail)
+	if c := ta.managedPolicyCheck(&sandboxapi.ManagedStatus{}); c.Status != openshell.StatusFail ||
+		!strings.HasPrefix(c.Detail, "your organization's policy: sandbox authorization could not be confirmed") {
+		t.Errorf("unnamed policy row = %+v", c)
 	}
 }
 

@@ -321,9 +321,9 @@ func (c *Client) Status(ctx context.Context) (*Status, error) {
 
 // Ready asks a managed computer's sandbox daemon to ready the account's
 // OpenShell for a run and returns the status after it (PathReady).
-func (c *Client) Ready(ctx context.Context) (*Status, error) {
+func (c *Client) Ready(ctx context.Context, req ReadyRequest) (*Status, error) {
 	var out Status
-	if err := c.do(ctx, http.MethodPost, PathReady, nil, struct{}{}, &out); err != nil {
+	if err := c.do(ctx, http.MethodPost, PathReady, nil, req, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
