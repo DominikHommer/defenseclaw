@@ -103,8 +103,9 @@ var configV8ValidateCmd = &cobra.Command{
 			PlanDigest:        loaded.compiled.Plan.Digest(),
 			NetworkValidation: "offline_syntax_and_literal_policy_only",
 			Valid:             &valid,
-			Warnings:          append(gateway.ConfigHILTWarnings(loaded.runtime), configV8InstalledAdvisories(loaded)...),
 		}
+		result.Warnings = append(gateway.ConfigHILTWarnings(loaded.runtime), configV8InstalledAdvisories(loaded)...)
+		result.Warnings = append(result.Warnings, configValidateManagedStandaloneWarnings(loaded)...)
 		encoder := json.NewEncoder(cmd.OutOrStdout())
 		encoder.SetEscapeHTML(false)
 		return encoder.Encode(result)
@@ -131,6 +132,9 @@ func checkConfigV8Candidate(path, dataDir string) (*loadedConfigV8File, error) {
 		// (GAP-0138). The installed config keeps loading for the upgrade
 		// path; configV8InstalledAdvisories reports it instead.
 		err = config.ValidateManagedStandaloneLiteralCandidate(loaded.runtime, loaded.raw)
+	}
+	if err == nil {
+		err = configValidateManagedStandaloneLayout(loaded)
 	}
 	if err != nil {
 		return nil, &configV8SourceError{version: loaded.runtime.ConfigVersion, err: err}
