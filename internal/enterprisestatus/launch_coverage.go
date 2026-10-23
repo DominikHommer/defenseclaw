@@ -4,6 +4,7 @@
 package enterprisestatus
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -31,15 +32,14 @@ func PluginLaunchCoverage(connector string, argv []string, env map[string]string
 		if !envKnown {
 			return "launch_environment_unverified"
 		}
-		if env["OPENCODE_PURE"] != "" {
+		if openCodePureEnabled(env["OPENCODE_PURE"]) {
 			return "opencode_pure"
 		}
-		if env["OPENCODE_TEST_MANAGED_CONFIG_DIR"] != "" {
+		if openCodeManagedConfigRelocated(env) {
 			return "opencode_managed_config_relocated"
 		}
-		if env["OPENCODE_CONFIG_DIR"] != "" {
-			return "opencode_user_config_relocated"
-		}
+		// OPENCODE_CONFIG_DIR adds a config layer. It does not replace the
+		// machine managed directory containing the DefenseClaw plugin.
 		if accountHome == "" {
 			return "launch_environment_unverified"
 		}
@@ -73,7 +73,7 @@ func PluginLaunchCoverage(connector string, argv []string, env map[string]string
 		if !envKnown {
 			return "launch_environment_unverified"
 		}
-		if env["HERMES_SAFE_MODE"] != "" {
+		if hermesSafeModeEnabled(env["HERMES_SAFE_MODE"]) {
 			return "hermes_safe_mode"
 		}
 		if env["HERMES_MANAGED_DIR"] != "" || env["HERMES_HOME"] != "" &&
@@ -118,6 +118,50 @@ func PluginLaunchCoverage(connector string, argv []string, env map[string]string
 		}
 	}
 	return ""
+}
+
+func openCodePureEnabled(value string) bool {
+	// The reviewed OpenCode releases use both a legacy flag reader ("1" or
+	// case-insensitive "true") and an Effect boolean config reader (also
+	// lowercase "yes", "on" and "y") for pure-mode plugin loading.
+	return value == "1" || strings.EqualFold(value, "true") ||
+		value == "yes" || value == "on" || value == "y"
+}
+
+func hermesSafeModeEnabled(value string) bool {
+	// Hermes uses its shared truthy set after trimming whitespace.
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+func openCodeManagedConfigRelocated(env map[string]string) bool {
+	managed := "/etc/opencode"
+	switch runtime.GOOS {
+	case "darwin":
+		managed = "/Library/Application Support/opencode"
+	case "windows":
+		programData := os.Getenv("ProgramData")
+		if programData == "" {
+			programData = `C:\ProgramData`
+		}
+		managed = filepath.Join(programData, "opencode")
+	}
+	// The test selector replaces the managed directory. Without it, Windows
+	// OpenCode derives that directory from its process's ProgramData value.
+	if selected := env["OPENCODE_TEST_MANAGED_CONFIG_DIR"]; selected != "" {
+		return !sameLaunchPath(selected, managed)
+	}
+	if runtime.GOOS == "windows" {
+		processProgramData := env["PROGRAMDATA"]
+		if processProgramData == "" {
+			processProgramData = `C:\ProgramData`
+		}
+		return !sameLaunchPath(filepath.Join(processProgramData, "opencode"), managed)
+	}
+	return false
 }
 
 func sameLaunchPath(a, b string) bool {

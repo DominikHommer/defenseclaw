@@ -29,7 +29,7 @@ func pluginLaunchEnvironment(raw []byte) map[string]string {
 			continue
 		}
 		switch key {
-		case "OPENCODE_PURE", "OPENCODE_TEST_MANAGED_CONFIG_DIR", "OPENCODE_CONFIG_DIR",
+		case "OPENCODE_PURE", "OPENCODE_TEST_MANAGED_CONFIG_DIR",
 			"XDG_CONFIG_HOME", "HOME", "KIRO_HOME", "KIRO_AGENT_CONFIG_DIR", "KIRO_TEST_AGENTS_DIR",
 			"HERMES_HOME", "HERMES_MANAGED_DIR", "HERMES_SAFE_MODE":
 			out[key] = value

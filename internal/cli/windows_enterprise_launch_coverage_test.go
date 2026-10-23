@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -114,9 +115,18 @@ func TestWindowsManagedLaunchCoverageNormalProfilesStayHealthy(t *testing.T) {
 	}
 	windowsEnterpriseAccountSID = func(string) string { return sid }
 	enterpriseHookSIDProfilePath = func(string) (string, error) { return profile, nil }
-	windowsManagedLaunchEnvironment = func(int) (map[string]string, error) {
-		return map[string]string{"USERPROFILE": `c:\users\ALICE`,
-			"APPDATA": profile + `\AppData\Roaming`, "LOCALAPPDATA": profile + `\AppData\Local`}, nil
+	windowsManagedLaunchEnvironment = func(pid int) (map[string]string, error) {
+		env := map[string]string{"USERPROFILE": `c:\users\ALICE`,
+			"APPDATA": profile + `\AppData\Roaming`, "LOCALAPPDATA": profile + `\AppData\Local`,
+			"PROGRAMDATA": os.Getenv("ProgramData")}
+		switch pid {
+		case 7133:
+			env["OPENCODE_PURE"] = "false"
+			env["OPENCODE_CONFIG_DIR"] = profile + `\.config\opencode`
+		case 7136:
+			env["HERMES_SAFE_MODE"] = "0"
+		}
+		return env, nil
 	}
 	var audited []string
 	windowsManagedLaunchAudit = func(_ inventory.AgentProcess, connector, reason string) error {

@@ -4,6 +4,8 @@
 package enterprisestatus
 
 import (
+	"os"
+	"path/filepath"
 	"runtime"
 	"testing"
 )
@@ -23,8 +25,19 @@ func TestPluginLaunchCoverage(t *testing.T) {
 		{"OpenCode pure flag", "opencode", []string{"opencode", "--pure"}, nil, false, "opencode_pure"},
 		{"OpenCode pure subcommand", "opencode", []string{"opencode", "run", "--pure=true", "hello"}, nil, false, "opencode_pure"},
 		{"OpenCode pure environment", "opencode", []string{"opencode"}, map[string]string{"OPENCODE_PURE": "1"}, true, "opencode_pure"},
+		{"OpenCode pure uppercase environment", "opencode", []string{"opencode"}, map[string]string{"OPENCODE_PURE": "TRUE"}, true, "opencode_pure"},
+		{"OpenCode pure zero is normal", "opencode", []string{"opencode"}, map[string]string{"OPENCODE_PURE": "0"}, true, ""},
+		{"OpenCode pure false is normal", "opencode", []string{"opencode"}, map[string]string{"OPENCODE_PURE": "false"}, true, ""},
+		{"OpenCode pure yes environment", "opencode", []string{"opencode"}, map[string]string{"OPENCODE_PURE": "yes"}, true, "opencode_pure"},
+		{"OpenCode pure on environment", "opencode", []string{"opencode"}, map[string]string{"OPENCODE_PURE": "on"}, true, "opencode_pure"},
+		{"OpenCode pure y environment", "opencode", []string{"opencode"}, map[string]string{"OPENCODE_PURE": "y"}, true, "opencode_pure"},
+		{"OpenCode pure no is normal", "opencode", []string{"opencode"}, map[string]string{"OPENCODE_PURE": "no"}, true, ""},
+		{"OpenCode pure off is normal", "opencode", []string{"opencode"}, map[string]string{"OPENCODE_PURE": "off"}, true, ""},
 		{"OpenCode moved managed config", "opencode", []string{"opencode"}, map[string]string{"OPENCODE_TEST_MANAGED_CONFIG_DIR": "/tmp/empty"}, true, "opencode_managed_config_relocated"},
-		{"OpenCode moved user config", "opencode", []string{"opencode"}, map[string]string{"OPENCODE_CONFIG_DIR": "/tmp/empty"}, true, "opencode_user_config_relocated"},
+		{"OpenCode default additive config", "opencode", []string{"opencode"}, map[string]string{"OPENCODE_CONFIG_DIR": home + "/.config/opencode"}, true, ""},
+		{"OpenCode equivalent additive config", "opencode", []string{"opencode"}, map[string]string{"OPENCODE_CONFIG_DIR": home + "/.config/extra/../opencode"}, true, ""},
+		{"OpenCode other additive config", "opencode", []string{"opencode"}, map[string]string{"OPENCODE_CONFIG_DIR": "/tmp/extra"}, true, ""},
+		{"OpenCode additive config with moved home", "opencode", []string{"opencode"}, map[string]string{"OPENCODE_CONFIG_DIR": "/tmp/extra", "HOME": "/tmp/other"}, true, "opencode_user_config_relocated"},
 		{"OpenCode moved XDG config", "opencode", []string{"opencode"}, map[string]string{"XDG_CONFIG_HOME": "/tmp/empty"}, true, "opencode_user_config_relocated"},
 		{"OpenCode environment unreadable", "opencode", []string{"opencode"}, nil, false, "launch_environment_unverified"},
 		{"OpenCode arguments unreadable", "opencode", nil, nil, false, "launch_environment_unverified"},
@@ -43,6 +56,10 @@ func TestPluginLaunchCoverage(t *testing.T) {
 		{"Hermes safe mode", "hermes", []string{"hermes", "--safe-mode"}, nil, false, "hermes_safe_mode"},
 		{"Hermes safe abbreviation", "hermes", []string{"hermes", "--sa"}, nil, false, "hermes_safe_mode"},
 		{"Hermes safe environment", "hermes", []string{"hermes"}, map[string]string{"HERMES_SAFE_MODE": "1"}, true, "hermes_safe_mode"},
+		{"Hermes safe on environment", "hermes", []string{"hermes"}, map[string]string{"HERMES_SAFE_MODE": " On "}, true, "hermes_safe_mode"},
+		{"Hermes safe zero is normal", "hermes", []string{"hermes"}, map[string]string{"HERMES_SAFE_MODE": "0", "HOME": home}, true, ""},
+		{"Hermes safe false is normal", "hermes", []string{"hermes"}, map[string]string{"HERMES_SAFE_MODE": "false", "HOME": home}, true, ""},
+		{"Hermes safe off is normal", "hermes", []string{"hermes"}, map[string]string{"HERMES_SAFE_MODE": "off", "HOME": home}, true, ""},
 		{"Hermes moved managed dir", "hermes", []string{"hermes"}, map[string]string{"HERMES_MANAGED_DIR": "/tmp/other"}, true, "hermes_config_relocated"},
 		{"Hermes ignore user config keeps hooks", "hermes", []string{"hermes", "--ignore-user-config"}, map[string]string{"HOME": home}, true, ""},
 		{"Antigravity moved home", "antigravity", []string{"agy"}, map[string]string{"HOME": "/tmp/other"}, true, "user_config_relocated"},
@@ -59,6 +76,58 @@ func TestPluginLaunchCoverage(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := PluginLaunchCoverage(tc.connector, tc.argv, tc.env, tc.envKnown, home); got != tc.want {
+				t.Fatalf("coverage = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPluginLaunchCoverageOpenCodeManagedDirectoryMatchesEnrollment(t *testing.T) {
+	managed := "/etc/opencode"
+	switch runtime.GOOS {
+	case "darwin":
+		managed = "/Library/Application Support/opencode"
+	case "windows":
+		programData := os.Getenv("ProgramData")
+		if programData == "" {
+			programData = `C:\ProgramData`
+		}
+		managed = filepath.Join(programData, "opencode")
+	}
+	for _, tc := range []struct {
+		name, selected, want string
+	}{
+		{"enrolled directory", managed, ""},
+		{"equivalent directory", filepath.Join(managed, "extra", ".."), ""},
+		{"other directory", filepath.Join(filepath.Dir(managed), "other"), "opencode_managed_config_relocated"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"OPENCODE_TEST_MANAGED_CONFIG_DIR": tc.selected}
+			if runtime.GOOS == "windows" {
+				env["PROGRAMDATA"] = os.Getenv("ProgramData")
+			}
+			if got := PluginLaunchCoverage("opencode", []string{"opencode"}, env, true, "/home/alice"); got != tc.want {
+				t.Fatalf("coverage = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPluginLaunchCoverageOpenCodeWindowsProgramData(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows managed config path")
+	}
+	t.Setenv("ProgramData", `C:\ProgramData`)
+	for _, tc := range []struct {
+		name, programData, selected, want string
+	}{
+		{"enrolled ProgramData", `c:\programdata`, "", ""},
+		{"relocated ProgramData", `C:\Elsewhere`, "", "opencode_managed_config_relocated"},
+		{"explicit enrolled directory wins", `C:\Elsewhere`, `C:\ProgramData\opencode`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"PROGRAMDATA": tc.programData, "OPENCODE_TEST_MANAGED_CONFIG_DIR": tc.selected}
+			if got := PluginLaunchCoverage("opencode", []string{"opencode"}, env, true, `C:\Users\alice`); got != tc.want {
 				t.Fatalf("coverage = %q, want %q", got, tc.want)
 			}
 		})
