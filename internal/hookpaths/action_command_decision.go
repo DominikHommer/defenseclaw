@@ -22,6 +22,21 @@ func ActionCommandDecision(command, cwd, home string) string {
 	return actionCommandDecision(command, cwd, home, 0)
 }
 
+// "[" is a literal shell test builtin in program position. StaticWord
+// rejects it as an unmatched glob opener, which is right for path operands
+// but would mistake an ordinary guarded command for a computed executable.
+func staticProgramWord(word *syntax.Word, home string) (string, bool) {
+	if program, fixed := StaticWord(word, home); fixed {
+		return program, true
+	}
+	if word != nil && len(word.Parts) == 1 {
+		if literal, ok := word.Parts[0].(*syntax.Lit); ok && literal.Value == "[" {
+			return "[", true
+		}
+	}
+	return "", false
+}
+
 func actionCommandDecision(command, cwd, home string, depth int) string {
 	if actionWindowsHome(home) {
 		return actionWindowsCommandDecision(command, cwd, home, depth)
@@ -34,6 +49,20 @@ func actionCommandDecision(command, cwd, home string, depth int) string {
 	}
 	if reason := UnprovenProtectedWrite(command, cwd, home); reason != "" {
 		return reason
+	}
+	// apply_patch receives its writes from an envelope, often through a
+	// heredoc. Check every envelope in the same action decision as shell
+	// operands, including conditional branches and computed patch paths.
+	patchTargets, patchKnown := ApplyPatchWriteTargets("Bash", nil, command, cwd, home)
+	if !patchKnown {
+		return "dynamic-argument"
+	}
+	patchProtected := newProtectedFiles(home)
+	patchSSH := filepath.Join(home, ".ssh")
+	for _, target := range patchTargets {
+		if protectedReachPath(target, patchProtected, patchSSH) {
+			return "dynamic-argument"
+		}
 	}
 	file, ok := parseShell(command)
 	if !ok {
@@ -113,7 +142,7 @@ func actionCommandDecision(command, cwd, home string, depth int) string {
 		if !ok || len(call.Args) == 0 {
 			return true
 		}
-		program, fixed := StaticWord(call.Args[0], home)
+		program, fixed := staticProgramWord(call.Args[0], home)
 		if !fixed {
 			program, fixed = boundPrograms[call]
 			if !fixed {
@@ -277,7 +306,7 @@ func actionStmtMayWrite(stmt *syntax.Stmt, home string) bool {
 	if !ok || len(call.Args) == 0 {
 		return false
 	}
-	program, known := StaticWord(call.Args[0], home)
+	program, known := staticProgramWord(call.Args[0], home)
 	if known && programBase(program) == "sort" {
 		for _, arg := range call.Args[1:] {
 			var rendered strings.Builder

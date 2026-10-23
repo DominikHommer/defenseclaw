@@ -158,7 +158,7 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int) string {
 		if !ok || len(call.Args) == 0 {
 			return true
 		}
-		program, static := StaticWord(call.Args[0], home)
+		program, static := staticProgramWord(call.Args[0], home)
 		if !static {
 			set("dynamic-command", false)
 			return true

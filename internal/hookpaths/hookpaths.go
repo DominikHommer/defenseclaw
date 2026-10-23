@@ -1234,6 +1234,9 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 			words[i], static[i] = staticShellWord(arg, env, home != "")
 		}
 		if !static[0] {
+			words[0], static[0] = staticProgramWord(args[0], home)
+		}
+		if !static[0] {
 			words[0], static[0] = boundPrograms[call]
 			static[0] = words[0] != ""
 		}

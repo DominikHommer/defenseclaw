@@ -45,7 +45,13 @@ func TestR104LeadGap0531HomePrivateKeyRead(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, ".ssh", "id_ed25519"), []byte("test-key"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, command := range []string{`cat "$HOME/.ssh/id_ed25519"`, `cat ${HOME}/.ssh/id_ed25519`} {
+	for _, command := range []string{
+		`cat "$HOME/.ssh/id_ed25519"`,
+		`cat ${HOME}/.ssh/id_ed25519`,
+		`cat ~/.ssh/id_ed25519; echo done`,
+		`head -c 0 ~/.ssh/id_ed25519; echo done`,
+		`echo hi; cat "$HOME/.ssh/id_ed25519"`,
+	} {
 		t.Run(command, func(t *testing.T) {
 			args, err := json.Marshal(map[string]string{"command": command})
 			if err != nil {
