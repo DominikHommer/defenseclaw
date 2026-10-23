@@ -273,7 +273,7 @@ func (l *lifecycle) helperModeDrift(ctx context.Context, p *plan) bool {
 func (l *lifecycle) waitHelperMode(ctx context.Context, unit Unit, wanted string, previous kernelpolicy.State) error {
 	env := l.env
 	deadline := env.Now().Add(env.ReadyTimeout)
-	last := "no new helper state"
+	var last string
 	for {
 		state, err := kernelpolicy.ReadState(env.sensorDirs())
 		if err != nil {
