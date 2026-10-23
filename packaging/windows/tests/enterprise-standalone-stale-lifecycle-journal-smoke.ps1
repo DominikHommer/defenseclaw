@@ -6,6 +6,8 @@
 # A committed lifecycle can leave its managed-hook lifecycle journal behind
 # when the installed gateway refuses to collect an old runtime generation (a
 # release before GAP-1322 refuses the contractless Kiro bundles 1.0.1 wrote).
+# Releases through 1.0.2 also refuse an unselected open-mode generation that
+# 1.0.3 or later left when the older Setup committed a downgrade (GAP-0762).
 # Every later Setup upgrade, ensure and uninstall then failed retiring it
 # with that same installed gateway. A standalone lifecycle now removes that
 # exact journal, records why, and goes on; any other retire failure, a
@@ -54,6 +56,7 @@ try {
         }
         # Each is the error the installed gateway puts in its retire report.
         $gcRefusal = 'retire kiro managed runtime generations for SID S-1-5-21-1-2-3-1017: enterprise hooks: refusing to collect an invalid managed runtime bundle'
+        $openGenerationRefusal = 'retire claudecode managed runtime generations for SID S-1-5-21-1-2-3-1017: enterprise hooks: managed runtime bundle does not match its protected selector'
         $untrustedFolder = 'retire claudecode managed runtime generations for SID S-1-5-21-1-2-3-1103 (CONTOSO\stale): enterprise hooks: managed runtime generation directory is untrusted: C:\Users\stale\.defenseclaw\hooks: access denied'
         $script:TestRetireError = ''
         $script:TestRetireShape = 'report'
@@ -118,6 +121,13 @@ try {
         try {
             & $run 'retired' 'Standalone' '' $false $false $true
             & $run 'legacy bundle refused' 'Standalone' $gcRefusal $false $false $true
+            & $run 'older gateway refuses prior open generation' 'Standalone' $openGenerationRefusal $false $false $true
+            & $run 'prior open generation, pending transaction' 'Standalone' $openGenerationRefusal $true $true $false
+            & $run 'prior open generation, Secure Client' 'SecureClient' $openGenerationRefusal $false $true $false
+            & $run 'prior open generation text outside a gateway report' 'Standalone' $openGenerationRefusal $false $true $false 'plain'
+            & $run 'prior open generation text in another phase' 'Standalone' $openGenerationRefusal $false $true $false 'phase'
+            & $run 'selector mismatch outside generation collection' 'Standalone' ('deployment binding failed: ' + $openGenerationRefusal) $false $true $false
+            & $run 'selector mismatch with another failure' 'Standalone' ($openGenerationRefusal + ': selector changed') $false $true $false
             & $run 'other retire failure' 'Standalone' 'deployment managed-hook activation binding is invalid' $false $true $false
             & $run 'pending transaction' 'Standalone' $gcRefusal $true $true $false
             & $run 'Secure Client' 'SecureClient' $gcRefusal $false $true $false

@@ -20746,7 +20746,9 @@ function Get-DefenseClawCommittedRetireRefusal {
         lifecycle journal may be removed for: 'invalid_bundle' (a release
         before GAP-1322 refuses to collect the contractless Kiro bundles 1.0.1
         wrote) or 'untrusted_folder' (a release before #1105 / GAP-0781 failed
-        the whole retire at the first per-user folder it could not trust);
+        the whole retire at the first per-user folder it could not trust), or
+        'legacy_open_bundle' (releases through 1.0.2 refuse an unselected
+        open-mode bundle left by a newer release after a committed downgrade);
         '' for anything else. It reads only the error the gateway put in its
         one validated retire report, which
         Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand attaches to the
@@ -20778,6 +20780,13 @@ function Get-DefenseClawCommittedRetireRefusal {
             [StringComparison]::Ordinal
         ) -ge 0) {
         return 'invalid_bundle'
+    }
+    if ($reportError -cmatch ($collection +
+            'enterprise hooks: managed runtime bundle does not match its protected selector$')) {
+        # The installed 1.0.0-1.0.2 gateway requires fail_mode=closed even
+        # for an unselected bundle. This release's post-commit GC validates
+        # the old bundle and collects it only if its full identity is sound.
+        return 'legacy_open_bundle'
     }
     return ''
 }
