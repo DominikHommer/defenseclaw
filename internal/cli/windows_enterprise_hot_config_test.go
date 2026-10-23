@@ -665,20 +665,50 @@ func TestWindowsBundleRollbackByTheInstalledCLIPutsTheLastGoodConfigBack(t *test
 		})
 	}
 
-	// A rollback to the last confirmed bundle records that bundle as the
-	// writer, so /health names the bundle that enforces again.
-	host, opts := newHotConfigHost(t, bundleConfig, "config_version: 9\nguardrail:\n  block_at: HIGH\n  hook_self_heal_debounce_ms: 500\n")
-	host.adopted = true
-	host.bundleID, host.bundleVersion = "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T9", 4
-	opts.gatewayBinary, opts.acpBinary, opts.hookBinary, opts.sensorHelperBinary, opts.policyCompiler = "", "", "", "", ""
-	opts.bundleRollback = true
-	opts.bundleRollbackTo = &windowsBundleRollbackTarget{store: enterprisebundle.NewStore(t.TempDir(), t.TempDir()),
-		ref: &enterprisebundle.Ref{BundleID: "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T9", Version: 4}}
-	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Verify")}}
-	runHotConfigEnsure(t, host, opts, stub)
-	if len(host.writes) != 1 || !strings.Contains(host.writes[0], "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T9 version 4") {
-		t.Fatalf("rollback to the confirmed bundle wrote %q, want that bundle's provenance", host.writes)
-	}
+	// The installed CLI can name a last good bundle only when its store
+	// proves the signed principal. The earlier dummy target had no current
+	// bundle and correctly failed the tightened principal check.
+	t.Run("signed last good bundle", func(t *testing.T) {
+		host := newWindowsBundleRestoreHost(t)
+		ctx := context.Background()
+		host.tamper(t, false)
+		if restore := restoreWindowsBundleConfig(ctx, ""); restore.failed() {
+			t.Fatalf("record the confirmed bundle: %+v", restore)
+		}
+		before, err := configwrite.ReadGenerationState(host.layout.ConfigPath)
+		if err != nil || before.BundleID != host.bundleID {
+			t.Fatalf("confirmed bundle generation = %+v (%v)", before, err)
+		}
+		failed := append(append([]byte(nil), host.bundleConfig...), []byte("# refused next bundle\n")...)
+		if err := windowsEnterpriseHotConfigWrite(ctx, host.layout.ConfigPath, failed, configwrite.Options{
+			Actor: configwrite.ActorLifecycle, Reason: "next bundle", ExpectSHA256: configwrite.SHA256Hex(host.bundleConfig),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		stub := host.installer(t, installedStatus("status"), installedStatus("Verify"))
+		windowsEnterpriseEnsureDriftDetector = func(*windowsEnterpriseLifecycleOptions, string) (string, error) { return "config", nil }
+		source, validate := windowsEnterpriseHotConfigSourceCheck, windowsEnterpriseHotConfigValidate
+		t.Cleanup(func() { windowsEnterpriseHotConfigSourceCheck, windowsEnterpriseHotConfigValidate = source, validate })
+		windowsEnterpriseHotConfigSourceCheck = func(string) error { return nil }
+		windowsEnterpriseHotConfigValidate = func(string, string, string, bool) (windowsServiceConfigValidation, error) {
+			return windowsServiceConfigValidation{}, nil
+		}
+		opts := windowsBundleRestoreOptions()
+		opts.gatewayBinary, opts.acpBinary, opts.hookBinary, opts.sensorHelperBinary, opts.policyCompiler = "", "", "", "", ""
+		opts.noStart, opts.resolvedInstaller = false, `C:\stage\install-enterprise.ps1`
+		cmd, _ := windowsBundleCommand()
+		run := &windowsBundleRun{ctx: ctx, layout: host.layout, driver: newWindowsBundleDriver(host.layout),
+			previous: host.bundleConfig, previousGeneration: before}
+		if _, ok := rollbackWindowsBundle(cmd, opts, run); !ok {
+			t.Fatal("the installed CLI did not restore the signed last good bundle")
+		}
+		installed, err := os.ReadFile(host.layout.ConfigPath)
+		state, stateErr := configwrite.ReadGenerationState(host.layout.ConfigPath)
+		if err != nil || !bytes.Equal(installed, host.bundleConfig) || stateErr != nil || state.BundleID != host.bundleID ||
+			state.BundleVersion != 5 || state.SignerKeyID != "k1" || !configwrite.IsPrincipalActor(state.Actor) || len(stub.calls) != 2 {
+			t.Fatalf("rollback config=%q read=%v generation=%+v state=%v installer calls=%q", installed, err, state, stateErr, stub.calls)
+		}
+	})
 }
 
 func TestWindowsHotConfigDoesNotApplyFleetEnablementWithoutCompilerLifecycle(t *testing.T) {

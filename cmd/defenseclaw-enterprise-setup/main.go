@@ -490,7 +490,13 @@ func parseEnterpriseSetupOptionsForFlavor(arguments []string, standalone bool) (
 	// as the defenseclaw.exe route does; Setup refusing first left no audit
 	// row (GAP-0608). Without anchors there is nothing to record.
 	if strings.TrimSpace(opts.TrustAnchors) == "" || !enterpriseSetupMutation(opts.Action, standalone) {
-		if (strings.TrimSpace(opts.Bundle) != "" || strings.TrimSpace(opts.TrustAnchors) != "" || opts.RefuseCapabilityLoss) && opts.Action != "ensure" {
+		if opts.RefuseCapabilityLoss && opts.Action != "ensure" {
+			if strings.TrimSpace(opts.Bundle) == "" {
+				return opts, false, errors.New("REFUSECAPABILITYLOSS=1 requires BUNDLE= and is valid only with /ensure; nothing was changed: deliver both with Setup /ensure")
+			}
+			return opts, false, errors.New("REFUSECAPABILITYLOSS=1 is valid only with /ensure; nothing was changed: deliver BUNDLE= and REFUSECAPABILITYLOSS=1 with Setup /ensure")
+		}
+		if (strings.TrimSpace(opts.Bundle) != "" || strings.TrimSpace(opts.TrustAnchors) != "") && opts.Action != "ensure" {
 			return opts, false, errors.New("BUNDLE= and TRUSTANCHORS= are valid only with /ensure")
 		}
 		if strings.TrimSpace(opts.Bundle) != "" && (strings.TrimSpace(opts.Config) != "" || modeSupplied) {

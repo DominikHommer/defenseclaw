@@ -681,6 +681,37 @@ func TestStandaloneSetupBundleIsAnEnsureProperty(t *testing.T) {
 	}
 }
 
+func TestStandaloneSetupRefuseCapabilityLossNamesTheCorrectNextStep(t *testing.T) {
+	for _, action := range []string{"install", "upgrade", "repair"} {
+		for _, bundle := range []string{"", `BUNDLE=C:\b\v7.dcbundle`} {
+			name := action
+			arguments := []string{"/" + action, "REFUSECAPABILITYLOSS=1"}
+			if bundle != "" {
+				name += " with bundle"
+				arguments = append(arguments, bundle)
+			}
+			t.Run(name, func(t *testing.T) {
+				_, _, err := parseStandaloneEnterpriseSetupOptions(arguments)
+				if err == nil {
+					t.Fatal("REFUSECAPABILITYLOSS=1 was accepted outside /ensure")
+				}
+				for _, want := range []string{"REFUSECAPABILITYLOSS=1", "only with /ensure", "nothing was changed", "Setup /ensure"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("refusal %q does not name %q", err, want)
+					}
+				}
+				if bundle == "" {
+					if !strings.Contains(err.Error(), "requires BUNDLE=") || !strings.Contains(err.Error(), "deliver both") {
+						t.Errorf("missing bundle refusal %q does not name both inputs", err)
+					}
+				} else if strings.Contains(err.Error(), "requires BUNDLE=") || !strings.Contains(err.Error(), "deliver BUNDLE= and REFUSECAPABILITYLOSS=1") {
+					t.Errorf("supplied bundle refusal %q names the wrong cause or next step", err)
+				}
+			})
+		}
+	}
+}
+
 // #1288 refuses anchors with an unsigned CONFIG= (or the --mode shorthand,
 // which renders one) with bundle_required, exit 1639. Setup refused it over
 // the command line, so the refused anchor install had no

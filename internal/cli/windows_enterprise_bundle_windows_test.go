@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 func TestWindowsBundleHotWriteRecordsPrincipalAndSignedMetadata(t *testing.T) {
@@ -182,6 +183,106 @@ func TestWindowsStatusSettlesOnlyEnforcedAppliedReceipt(t *testing.T) {
 				t.Fatalf("receipts=%+v", receipts)
 			}
 		})
+	}
+}
+
+// Status may confirm an applied receipt after a killed run. A full volume
+// during that write is a disk_full refusal, including for an MDM JSON poll.
+func TestWindowsStatusReceiptWriteOnAFullVolumeIsDiskFull(t *testing.T) {
+	layout := stubWindowsBundleHost(t)
+	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{
+		managed.ProfileStandalone: winpath.EnterpriseDeploymentInstalled,
+	})
+	elevated := windowsEnterpriseIsElevated
+	activation := windowsEnterpriseActivationMetadata
+	windowsEnterpriseIsElevated = func() bool { return true }
+	windowsEnterpriseActivationMetadata = func() (string, bool) { return "", true }
+	t.Cleanup(func() {
+		windowsEnterpriseIsElevated = elevated
+		windowsEnterpriseActivationMetadata = activation
+	})
+	driver := newWindowsBundleDriver(layout)
+	rc, err := driver.Store.Receive("b-01JA0000000000000000000035", 5, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	installed := []byte("config_version: 9\n")
+	if _, err := driver.Store.Stage(rc, &enterprisebundle.Bundle{Files: map[string][]byte{"config.yaml": installed}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := driver.Store.Advance(rc, enterprisebundle.StateVerified, func(r *enterprisebundle.Receipt) {
+		r.ManifestSHA256 = strings.Repeat("a", 64)
+		r.Principal, r.SignerKeyID = "operator:alice", "k1"
+		r.ExpectedDigest = windowsBundleTestDigest
+		r.SetDigestComparison(true, false, false)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := driver.Store.Promote(rc); err != nil {
+		t.Fatal(err)
+	}
+	generation := recordWindowsBundleTestCommit(t, layout, rc, installed)
+	if err := driver.Store.Advance(rc, enterprisebundle.StateApplied, func(r *enterprisebundle.Receipt) {
+		r.ConfigSHA256 = configwrite.SHA256Hex(installed)
+		r.EffectivePolicyDigest = windowsBundleTestDigest
+		r.ConfigGeneration = generation
+	}); err != nil {
+		t.Fatal(err)
+	}
+	receiptsDir := filepath.Join(layout.LifecycleDir, enterprisebundle.ReceiptsDirName)
+	windowsBundleEnsurePrivateDirectory = func(path string) error {
+		if filepath.Clean(path) == filepath.Clean(receiptsDir) {
+			return &os.PathError{Op: "write", Path: path, Err: windows.ERROR_DISK_FULL}
+		}
+		return os.MkdirAll(path, 0o700)
+	}
+	cmd, out := windowsBundleCommand()
+	opts := &windowsEnterpriseLifecycleOptions{profile: managed.ProfileStandalone, jsonOutput: true}
+	if err := runWindowsEnterpriseStandaloneAction(context.Background(), cmd, "status", opts, "", nil); err == nil {
+		t.Fatal("status accepted a receipt it could not confirm")
+	}
+	var result enterprisestatus.Result
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatalf("status result: %v\n%s", err, out)
+	}
+	if len(result.Errors) != 1 || result.Errors[0].Code != string(enterprisebundle.CodeDiskFull) ||
+		!strings.Contains(result.Errors[0].Message, "free space on that volume") {
+		t.Fatalf("status errors = %+v, want disk_full and the recovery step", result.Errors)
+	}
+}
+
+func TestWindowsStatusMarkerWriteOnAFullVolumeIsDiskFull(t *testing.T) {
+	stubWindowsBundleHost(t)
+	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{
+		managed.ProfileStandalone: winpath.EnterpriseDeploymentInstalled,
+	})
+	elevated, activation, syncMarker := windowsEnterpriseIsElevated, windowsEnterpriseActivationMetadata, windowsBundleSyncMarker
+	runner := windowsEnterpriseStandaloneRunner
+	windowsEnterpriseIsElevated = func() bool { return true }
+	windowsEnterpriseActivationMetadata = func() (string, bool) { return "", true }
+	windowsEnterpriseStandaloneRunner = func(context.Context, *cobra.Command, string, []string) (windowsEnterpriseStandaloneRun, error) {
+		t.Error("status reached the installer after the bundle marker write failed")
+		return windowsEnterpriseStandaloneRun{}, errors.New("unexpected installer invocation")
+	}
+	windowsBundleSyncMarker = func(*enterprisebundle.Store) error {
+		return &os.PathError{Op: "write", Path: "enterprise bundle marker", Err: windows.ERROR_DISK_FULL}
+	}
+	t.Cleanup(func() {
+		windowsEnterpriseIsElevated, windowsEnterpriseActivationMetadata, windowsBundleSyncMarker = elevated, activation, syncMarker
+		windowsEnterpriseStandaloneRunner = runner
+	})
+	cmd, out := windowsBundleCommand()
+	opts := &windowsEnterpriseLifecycleOptions{profile: managed.ProfileStandalone, jsonOutput: true}
+	if err := runWindowsEnterpriseStandaloneAction(context.Background(), cmd, "status", opts, "", nil); err == nil {
+		t.Fatal("status accepted an enterprise marker it could not write")
+	}
+	var result enterprisestatus.Result
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatalf("status result: %v\n%s", err, out)
+	}
+	if len(result.Errors) != 1 || result.Errors[0].Code != string(enterprisebundle.CodeDiskFull) ||
+		!strings.Contains(result.Errors[0].Message, "free space on that volume") {
+		t.Fatalf("status errors = %+v, want disk_full and recovery step", result.Errors)
 	}
 }
 

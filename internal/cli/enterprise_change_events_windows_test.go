@@ -314,6 +314,7 @@ func TestWindowsLifecycleRefusesBundleFlagsOnOtherChangeActions(t *testing.T) {
 			{"TRUSTANCHORS=", []string{"--trust-anchors", e.anchors}, true},
 			{"BUNDLE=", []string{"--bundle", filepath.Join(e.dir, "policy.dcbundle")}, false},
 			{"REFUSECAPABILITYLOSS=1", []string{"--refuse-capability-loss"}, false},
+			{"REFUSECAPABILITYLOSS=1 with BUNDLE=", []string{"--refuse-capability-loss", "--bundle", filepath.Join(e.dir, "policy.dcbundle")}, false},
 		} {
 			t.Run(action+" "+tc.name, func(t *testing.T) {
 				layout := stubWindowsBundleHost(t)
@@ -334,11 +335,18 @@ func TestWindowsLifecycleRefusesBundleFlagsOnOtherChangeActions(t *testing.T) {
 				if len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" {
 					t.Fatalf("errors = %+v, want one invalid_arguments", result.Errors)
 				}
-				if tc.name == "REFUSECAPABILITYLOSS=1" {
-					for _, want := range []string{"REFUSECAPABILITYLOSS=1", "requires BUNDLE=", "deliver both with Setup /ensure"} {
+				if strings.HasPrefix(tc.name, "REFUSECAPABILITYLOSS=1") {
+					for _, want := range []string{"REFUSECAPABILITYLOSS=1", "Setup /ensure"} {
 						if !strings.Contains(result.Errors[0].Message, want) {
 							t.Fatalf("refusal %q does not name %q", result.Errors[0].Message, want)
 						}
+					}
+					if tc.name == "REFUSECAPABILITYLOSS=1" {
+						if !strings.Contains(result.Errors[0].Message, "requires BUNDLE=") || !strings.Contains(result.Errors[0].Message, "deliver both") {
+							t.Fatalf("refusal %q does not name the missing bundle and next step", result.Errors[0].Message)
+						}
+					} else if strings.Contains(result.Errors[0].Message, "requires BUNDLE=") || !strings.Contains(result.Errors[0].Message, "deliver BUNDLE= and REFUSECAPABILITYLOSS=1") {
+						t.Fatalf("refusal %q names the wrong cause or next step", result.Errors[0].Message)
 					}
 				}
 				assertWindowsBundleInstalledAnchors(t, layout, nil, "after the refusal")
@@ -415,6 +423,186 @@ func TestWindowsBundleSettleReceiptWriteOnAFullVolumeIsDiskFull(t *testing.T) {
 	}
 }
 
+// A plain changing run also settles receipts left by a killed bundle run.
+// Its warning must name the full volume when that receipt write fails.
+func TestWindowsInterruptedBundleSettleReceiptWriteOnAFullVolumeIsDiskFull(t *testing.T) {
+	layout := stubWindowsBundleHost(t)
+	store := newWindowsBundleDriver(layout).Store
+	if _, err := store.Receive("b-01JA0000000000000000000034", 4, ""); err != nil {
+		t.Fatal(err)
+	}
+	receiptsDir := filepath.Join(layout.LifecycleDir, enterprisebundle.ReceiptsDirName)
+	windowsBundleEnsurePrivateDirectory = func(path string) error {
+		if filepath.Clean(path) == filepath.Clean(receiptsDir) {
+			return &os.PathError{Op: "write", Path: path, Err: windows.ERROR_DISK_FULL}
+		}
+		return os.MkdirAll(path, 0o700)
+	}
+	settle := &windowsBundleSettle{ctx: context.Background()}
+	settleWindowsInterruptedBundles(settle, layout, newWindowsBundleDriver(layout), 0, false)
+	if len(settle.warnings) != 1 || settle.warnings[0].Code != string(enterprisebundle.CodeDiskFull) ||
+		!strings.Contains(settle.warnings[0].Message, "free space on that volume") {
+		t.Fatalf("settle warnings = %+v; want disk_full and the recovery step", settle.warnings)
+	}
+}
+
+func TestWindowsBundleLockWriteOnAFullVolumeIsDiskFull(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	for _, site := range []string{"lock directory", "lock file"} {
+		for _, withAnchors := range []bool{false, true} {
+			name := site
+			if withAnchors {
+				name += " with anchors"
+			}
+			t.Run(name, func(t *testing.T) {
+				layout := stubWindowsBundleHost(t)
+				spool := stubWindowsChangeSpool(t)
+				faults := 0
+				if site == "lock directory" {
+					windowsBundleEnsurePrivateDirectory = func(path string) error {
+						if filepath.Clean(path) == filepath.Clean(layout.LifecycleDir) {
+							faults++
+							return &os.PathError{Op: "mkdir", Path: path, Err: windows.ERROR_DISK_FULL}
+						}
+						return os.MkdirAll(path, 0o700)
+					}
+				} else {
+					windowsBundlePublishPrivateFile = func(path string) error {
+						if filepath.Clean(path) == filepath.Join(layout.LifecycleDir, windowsBundleLockName) {
+							faults++
+							return &os.PathError{Op: "protect", Path: path, Err: windows.ERROR_DISK_FULL}
+						}
+						return nil
+					}
+				}
+				cmd, out := windowsBundleCommand()
+				opts := &windowsEnterpriseLifecycleOptions{bundlePath: filepath.Join(e.dir, "next.dcbundle"),
+					profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+				if withAnchors {
+					opts.trustAnchors = e.anchors
+				}
+				done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", opts)
+				cleanupPreparedWindowsBundle(t, opts)
+				if !done || err == nil || faults != 1 {
+					t.Fatalf("lock write: done=%v err=%v faults=%d\n%s", done, err, faults, out)
+				}
+				var result enterprisestatus.Result
+				if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+					t.Fatal(err)
+				}
+				if len(result.Errors) != 1 || result.Errors[0].Code != string(enterprisebundle.CodeDiskFull) ||
+					!strings.Contains(result.Errors[0].Message, "cannot prepare the policy bundle lock") ||
+					!strings.Contains(result.Errors[0].Message, "free space on that volume") {
+					t.Fatalf("lock write errors = %+v, want disk_full and recovery step", result.Errors)
+				}
+				if withAnchors {
+					assertOneRefusedAnchorInstall(t, spool, string(enterprisebundle.CodeDiskFull))
+				} else if events := windowsChangeEvents(t, spool); len(events) != 0 {
+					t.Fatalf("bundle-only refusal recorded anchor changes: %+v", events)
+				}
+			})
+		}
+	}
+}
+
+func TestWindowsInterruptedBundleLockWriteOnAFullVolumeIsDiskFull(t *testing.T) {
+	for _, site := range []string{"lock directory", "lock file"} {
+		t.Run(site, func(t *testing.T) {
+			layout := stubWindowsBundleHost(t)
+			store := newWindowsBundleDriver(layout).Store
+			if _, err := store.Receive("b-01JA0000000000000000000036", 6, ""); err != nil {
+				t.Fatal(err)
+			}
+			if site == "lock directory" {
+				windowsBundleEnsurePrivateDirectory = func(path string) error {
+					if filepath.Clean(path) == filepath.Clean(layout.LifecycleDir) {
+						return &os.PathError{Op: "mkdir", Path: path, Err: windows.ERROR_DISK_FULL}
+					}
+					return os.MkdirAll(path, 0o700)
+				}
+			} else {
+				windowsBundlePublishPrivateFile = func(path string) error {
+					if filepath.Clean(path) == filepath.Join(layout.LifecycleDir, windowsBundleLockName) {
+						return &os.PathError{Op: "protect", Path: path, Err: windows.ERROR_DISK_FULL}
+					}
+					return nil
+				}
+			}
+			settle := &windowsBundleSettle{ctx: context.Background()}
+			settleWindowsInterruptedBundles(settle, layout, newWindowsBundleDriver(layout), 0, false)
+			if len(settle.warnings) != 1 || settle.warnings[0].Code != string(enterprisebundle.CodeDiskFull) ||
+				!strings.Contains(settle.warnings[0].Message, "free space on that volume") {
+				t.Fatalf("lock settle warnings = %+v; want disk_full and recovery step", settle.warnings)
+			}
+		})
+	}
+}
+
+func TestWindowsInterruptedBundleMarkerWriteOnAFullVolumeIsDiskFull(t *testing.T) {
+	layout := stubWindowsBundleHost(t)
+	store := newWindowsBundleDriver(layout).Store
+	if _, err := store.Receive("b-01JA0000000000000000000037", 7, ""); err != nil {
+		t.Fatal(err)
+	}
+	syncMarker := windowsBundleSyncMarker
+	windowsBundleSyncMarker = func(*enterprisebundle.Store) error {
+		return &os.PathError{Op: "write", Path: "enterprise bundle marker", Err: windows.ERROR_DISK_FULL}
+	}
+	t.Cleanup(func() { windowsBundleSyncMarker = syncMarker })
+	settle := &windowsBundleSettle{ctx: context.Background()}
+	settleWindowsInterruptedBundles(settle, layout, newWindowsBundleDriver(layout), 0, false)
+	fullVolume := false
+	for _, warning := range settle.warnings {
+		if warning.Code == windowsBundleMarkerFailedWarning {
+			t.Fatalf("full-volume marker warning used %s: %+v", warning.Code, settle.warnings)
+		}
+		if warning.Code == string(enterprisebundle.CodeDiskFull) && strings.Contains(warning.Message, "free space on that volume") {
+			fullVolume = true
+		}
+	}
+	if !fullVolume {
+		t.Fatalf("settle warnings = %+v; want disk_full and recovery step", settle.warnings)
+	}
+}
+
+func TestWindowsRenderedBundleConfigWriteOnAFullVolumeIsDiskFull(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	signed := filepath.Join(e.dir, "signed.dcbundle")
+	if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+		t.Fatalf("sign exit %d:\n%s", code, out)
+	}
+	stubWindowsEnterpriseDeployments(t, nil)
+	layout := stubWindowsBundleHost(t)
+	spool := stubWindowsChangeSpool(t)
+	configStage := filepath.Join(layout.LifecycleDir, windowsBundleConfigName)
+	windowsBundlePublishPrivateFile = func(path string) error {
+		if filepath.Clean(path) == filepath.Clean(configStage) {
+			return &os.PathError{Op: "write", Path: path, Err: windows.ERROR_DISK_FULL}
+		}
+		return nil
+	}
+	cmd, out := windowsBundleCommand()
+	opts := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: e.anchors,
+		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+	done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", opts)
+	cleanupPreparedWindowsBundle(t, opts)
+	if !done || err == nil {
+		t.Fatalf("rendered config write did not refuse: done=%v err=%v\n%s", done, err, out)
+	}
+	var result enterprisestatus.Result
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Errors) != 1 || result.Errors[0].Code != string(enterprisebundle.CodeDiskFull) ||
+		!strings.Contains(result.Errors[0].Message, "cannot write the rendered bundle config") ||
+		!strings.Contains(result.Errors[0].Message, "free space on that volume") {
+		t.Fatalf("rendered config errors = %+v, want disk_full with cause and recovery step", result.Errors)
+	}
+	assertOneRefusedAnchorInstall(t, spool, string(enterprisebundle.CodeDiskFull))
+}
+
 // An anchor-only ensure whose new anchor file fails its check once it
 // replaced the installed one (anchor_insecure here) puts the previous file
 // back (none when there was none) and records one failed anchor install
@@ -478,6 +666,57 @@ func TestWindowsAnchorsThatFailTheirCheckAfterTheReplaceRecordAFailedChange(t *t
 			}
 			assertNoWindowsChangeReservations(t, spool)
 		})
+	}
+}
+
+// A failed post-replace check puts the previous anchors back. If that
+// restoration runs out of space, the refusal and change event name disk_full.
+func TestWindowsAnchorRestoreOnAFullVolumeIsDiskFull(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	layout := stubWindowsBundleHost(t)
+	installedPath := newWindowsBundleDriver(layout).AnchorsPath
+	if _, _, err := installWindowsBundleAnchors(e.anchors, installedPath); err != nil {
+		t.Fatal(err)
+	}
+	candidate := windowsBundleCandidateAnchors(t, e)
+	spool := stubWindowsChangeSpool(t)
+	bundleAnchorTrust = func(path string) error {
+		if filepath.Clean(path) == filepath.Clean(installedPath) {
+			return errors.New("the installed trust anchor file failed its check")
+		}
+		return nil
+	}
+	publishes := 0
+	windowsBundlePublishPrivateFile = func(path string) error {
+		if filepath.Clean(path) == filepath.Clean(installedPath) {
+			publishes++
+			if publishes == 2 {
+				return &os.PathError{Op: "protect", Path: path, Err: windows.ERROR_DISK_FULL}
+			}
+		}
+		return nil
+	}
+	cmd, out := windowsBundleCommand()
+	opts := &windowsEnterpriseLifecycleOptions{trustAnchors: candidate, profile: managed.ProfileStandalone,
+		jsonOutput: true, installedBeforeRun: true}
+	done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", opts)
+	cleanupPreparedWindowsBundle(t, opts)
+	if !done || err == nil || publishes != 2 {
+		t.Fatalf("anchor restoration: done=%v err=%v publishes=%d\n%s", done, err, publishes, out)
+	}
+	var result enterprisestatus.Result
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Errors) != 1 || result.Errors[0].Code != string(enterprisebundle.CodeDiskFull) ||
+		!strings.Contains(result.Errors[0].Message, "free space on that volume") {
+		t.Fatalf("anchor restoration errors = %+v, want disk_full and the recovery step", result.Errors)
+	}
+	events := windowsChangeEvents(t, spool)
+	if len(events) != 1 || events[0].Outcome != enterprisestatus.ChangeFailed ||
+		events[0].ReasonCode != string(enterprisebundle.CodeDiskFull) {
+		t.Fatalf("anchor restoration event = %+v, want failed disk_full", events)
 	}
 }
 
