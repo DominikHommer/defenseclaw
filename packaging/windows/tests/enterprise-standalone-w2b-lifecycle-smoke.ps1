@@ -98,7 +98,9 @@ $stream.Dispose()
                 $failures.Add('a junction in StateRoot passed the uninstall preflight')
             }
             catch {
-                if ($_.Exception.Message -notlike '*stopped before it changed anything*' -or $_.Exception.Message -notlike '*rmdir*') {
+                if ($_.Exception.Message -notlike 'state_invalid: managed state contains a reparse point:*' -or
+                    $_.Exception.Message -notlike '*stopped before it changed anything*' -or
+                    $_.Exception.Message -notlike '*rmdir*') {
                     $failures.Add("junction refusal: $($_.Exception.Message)")
                 }
             }
@@ -767,6 +769,21 @@ $stream.Dispose()
             if (-not (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor) -or
                 (Get-DefenseClawVendorUsersReadGrant -Path $vendor) -ne 0x20) {
                 $failures.Add("Setup did not complete an administrator's partial Users entry, or did not record only what it added")
+            }
+            $partialRaw = [Security.AccessControl.RawSecurityDescriptor]::new(
+                (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).GetSecurityDescriptorBinaryForm(), 0)
+            $originalUsers = @($partialRaw.DiscretionaryAcl | Microsoft.PowerShell.Core\Where-Object {
+                    $_ -is [Security.AccessControl.KnownAce] -and
+                    $_.SecurityIdentifier.Value -ceq $script:UsersSID -and
+                    $_.AccessMask -eq 0x120080
+                })
+            $addedUsers = @($partialRaw.DiscretionaryAcl | Microsoft.PowerShell.Core\Where-Object {
+                    $_ -is [Security.AccessControl.KnownAce] -and
+                    $_.SecurityIdentifier.Value -ceq $script:UsersSID -and
+                    $_.AccessMask -eq 0x20
+                })
+            if ($originalUsers.Count -ne 1 -or $addedUsers.Count -ne 1) {
+                $failures.Add("Setup widened the administrator's partial Users ACE instead of adding its own")
             }
             Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $productionScope
             if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl -cne $before -or [IO.File]::Exists($grantRecord)) {

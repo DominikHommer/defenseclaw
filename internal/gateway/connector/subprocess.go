@@ -2273,6 +2273,15 @@ func writeDisabledHookTombstone(opts SetupOpts, scriptName, vendorLabel string) 
 	// DACL; the generic private descriptor made a later rollback refuse to
 	// remove the tombstone, which left the deployment pending.
 	body := disabledHookTombstone(vendorLabel)
+	if vendorLabel == "devin" && !pluginSecureClientProfile(opts) {
+		// A cached Devin process can still execute the old absolute hook path
+		// after removal. Keep it blocked until that process exits; this path
+		// cannot become an implicit allow when its credential is revoked.
+		body = "#!/bin/sh\n" +
+			"# defenseclaw-managed-hook v0 (disabled tombstone)\n" +
+			"echo 'defenseclaw: Devin hook was removed; restart Devin before using it' >&2\n" +
+			"exit 2\n"
+	}
 	if opts.FailedSetupFailClosed && failedSetupPlaceholderBlocks[scriptName] {
 		body = failedSetupHookPlaceholder(vendorLabel)
 	}

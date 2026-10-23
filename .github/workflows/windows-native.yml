@@ -562,6 +562,8 @@ jobs:
         run: ./packaging/windows/tests/enterprise-cross-scope-install-preflight-smoke.ps1
       - name: Managed path ACL verdict regression
         run: ./packaging/windows/tests/enterprise-path-acl-verdict-smoke.ps1
+      - name: Exact ACL and shared vendor ACE regressions
+        run: ./packaging/windows/tests/enterprise-exact-acl-smoke.ps1
       - name: Standalone forced uninstall restores the administrator Codex policy
         run: ./packaging/windows/tests/enterprise-forced-uninstall-codex-policy-smoke.ps1
       - name: Standalone uninstall, reinstall and lifecycle lock regressions

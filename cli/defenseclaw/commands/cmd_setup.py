@@ -3559,12 +3559,13 @@ def _rotate_token_enabled_connectors(cfg: Any) -> list[str]:
 
 
 def _rotate_token_scoped_connectors(cfg: Any, data_dir: str) -> list[str]:
-    """Return enabled token owners plus every safely persisted sidecar."""
+    """Return configured token owners, including disabled persisted owners."""
 
-    result: set[str] = set(_rotate_token_persisted_hook_scopes(data_dir))
+    persisted = set(_rotate_token_persisted_hook_scopes(data_dir))
+    result: set[str] = set()
     enabled = set(_rotate_token_enabled_connectors(cfg))
     for connector in _rotate_token_configured_connectors(cfg):
-        sidecar_exists = os.path.lexists(_rotate_token_hook_path(data_dir, connector))
+        sidecar_exists = connector in persisted
         has_enabled_contract = connector in enabled and (connector in PROXY_CONNECTORS or connector in HOOK_CONTRACTS)
         if sidecar_exists or has_enabled_contract:
             result.add(connector)
@@ -4179,7 +4180,6 @@ def _rotate_token_connector_state(
     }
     if hook_token_fingerprints:
         configured_fingerprints: dict[str, str] = {}
-        orphan_fingerprints: dict[str, str] = {}
         for raw_name, fingerprint in hook_token_fingerprints.items():
             name = _rotate_token_hook_scope(raw_name)
             if name != raw_name:
@@ -4194,15 +4194,14 @@ def _rotate_token_connector_state(
                 raise click.ClickException(
                     "Connector hook credential fingerprint is invalid; refusing token rotation."
                 )
-            target = configured_fingerprints if name in policies else orphan_fingerprints
-            target[name] = fingerprint
+            if name not in policies:
+                raise click.ClickException(
+                    "An unconfigured connector has a hook credential in the rotation state; refusing token rotation."
+                )
+            configured_fingerprints[name] = fingerprint
         if configured_fingerprints:
             payload["hook_token_fingerprints"] = {
                 name: configured_fingerprints[name] for name in sorted(configured_fingerprints)
-            }
-        if orphan_fingerprints:
-            payload["orphan_hook_token_fingerprints"] = {
-                name: orphan_fingerprints[name] for name in sorted(orphan_fingerprints)
             }
     return _json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
@@ -4360,8 +4359,9 @@ def _rotate_token_transaction(
         if current_config != config_snapshot or current_mode != config_mode:
             raise click.ClickException("Gateway configuration changed while token rotation was taking its snapshot.")
         configured_scopes = set(_rotate_token_configured_connectors(authoritative_cfg))
-        persisted_scopes = set(_rotate_token_persisted_hook_scopes(data_dir))
-        rotatable_scopes = configured_scopes | persisted_scopes
+        # A leftover sidecar is no longer an active connector. Rotation must
+        # neither rewrite it nor present it as a protected runtime owner.
+        rotatable_scopes = configured_scopes
         if not set(requested_scopes).issubset(rotatable_scopes):
             raise click.ClickException(
                 "Connector hook credential scope changed before rotation; no credentials were modified."
@@ -4395,16 +4395,7 @@ def _rotate_token_transaction(
         hook_windows_security = {
             hook_snapshot.connector: hook_snapshot.windows_security for hook_snapshot in hook_snapshots
         }
-        # Recovery A intentionally verifies only configured scopes. A stale
-        # orphan that the prior runtime never registered must fail B closed,
-        # but must not hold exact rollback hostage. Every orphan is still
-        # restored and locally re-read for exact bytes/mode/absence below.
-        configured_old_hook_fingerprints = {
-            name: fingerprint
-            for name, fingerprint in old_hook_fingerprints.items()
-            if name in configured_scopes
-        }
-        connector_state_a = _rotate_token_connector_state(authoritative_cfg, configured_old_hook_fingerprints)
+        connector_state_a = _rotate_token_connector_state(authoritative_cfg, old_hook_fingerprints)
         old_stopped = False
         mutation_attempted = False
         new_hook_values: dict[str, str] = {}

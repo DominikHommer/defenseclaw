@@ -1612,7 +1612,40 @@ func (c *hookOnlyConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 	if c.name == "copilot" {
 		removeOrphanedCopilotVSCodeLocalRendersForPerUser(opts)
 	}
-	return c.teardown(ctx, opts, "")
+	if err := c.teardown(ctx, opts, ""); err != nil {
+		return err
+	}
+	if c.name == "devin" && !opts.ManagedEnterprise {
+		// A removed connector must not keep a scoped credential that rotate-token
+		// could later refresh. Revoke only after the agent registration is proven
+		// gone; a cached hook command finds the disabled tombstone instead.
+		if err := c.VerifyClean(opts); err != nil {
+			return err
+		}
+		if err := RemoveHookAPIToken(opts.DataDir, c.name); err != nil {
+			return fmt.Errorf("devin revoke removed hook credential: %w", err)
+		}
+		backupDir := filepath.Join(opts.DataDir, "connector_backups", c.name)
+		info, err := os.Lstat(backupDir)
+		switch {
+		case os.IsNotExist(err):
+			return nil
+		case err != nil:
+			return fmt.Errorf("devin inspect backup directory: %w", err)
+		case !info.IsDir() || info.Mode()&os.ModeSymlink != 0:
+			return fmt.Errorf("devin backup directory is not a regular directory: %s", backupDir)
+		}
+		entries, err := os.ReadDir(backupDir)
+		if err != nil {
+			return fmt.Errorf("devin list backup directory: %w", err)
+		}
+		if len(entries) == 0 {
+			if err := os.Remove(backupDir); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("devin remove empty backup directory: %w", err)
+			}
+		}
+	}
+	return nil
 }
 
 func (c *hookOnlyConnector) teardown(ctx context.Context, opts SetupOpts, hermesConfigPath string) error {

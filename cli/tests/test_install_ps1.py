@@ -41,6 +41,149 @@ def _text() -> str:
     return INSTALL_PS1.read_text(encoding="utf-8")
 
 
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_lifecycle_proof_requires_json_connector_readback(tmp_path: Path) -> None:
+    # rel-1-0-4:GAP-0745: a plain status answer cannot prove hook coverage.
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$BinDir = '{tmp_path}'
+$ManagedBinaries = @()
+function Test-BinDirProtected {{ return $true }}
+function Get-GatewayProcess {{ return [pscustomobject]@{{ Path = (Join-Path $BinDir 'defenseclaw-gateway.exe') }} }}
+function Get-GatewayHealthReport {{ return $null }}
+function Invoke-Native {{ return 0 }}
+function Get-GatewayDigestProblem {{ return '' }}
+{_ps1_function('Get-Field')}
+{_ps1_function('ConvertTo-Map')}
+{_ps1_function('Test-LifecycleProof')}
+$problems = @(Test-LifecycleProof @{{}} $true @('codex'))
+if (-not @($problems | Where-Object {{ $_ -match 'JSON health report' }}).Count) {{
+    throw "missing JSON connector proof was accepted: $($problems -join '; ')"
+}}
+$legacy = @(Test-LifecycleProof @{{}} $true @('codex') -AllowLegacyStatus)
+if ($legacy.Count) {{ throw "a byte-verified old gateway cannot be restored: $($legacy -join '; ')" }}
+'OK'
+"""
+    result = _run_powershell(script)
+    assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
+    restore = _ps1_function("Assert-LifecycleRestored")
+    assert "0\\.8\\.10|1\\.0\\.[0-3]" in restore
+    assert "-AllowLegacyStatus:$allowLegacyStatus" in restore
+
+
+def test_upgrade_requires_recorded_connectors_even_when_start_needs_attention() -> None:
+    # rel-1-0-4:GAP-0679: a gateway start exit 3 must not erase prior guards.
+    install = _ps1_function("Invoke-Install")
+    assert '$guardedBefore = @(@(Get-Field $Manifest "Connectors")' in install
+    assert '$guardedBefore = if ($startRc -eq 0)' not in install
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_lifecycle_record_preserves_configured_connectors_without_old_json(tmp_path: Path) -> None:
+    # rel-1-0-4:GAP-0745: old releases may lack JSON status, yet their
+    # configured connectors must remain in the new release's proof.
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$DataDir = '{tmp_path}'
+$BinDir = '{tmp_path}'
+function Get-GatewayProcess {{ return [pscustomobject]@{{ Id = 1 }} }}
+function Get-GatewayHealthReport {{ return $null }}
+function Get-ConfiguredConnectors {{ return @() }}
+function Get-EffectiveConfigConnectors {{ return @('codex') }}
+function Get-ExternalConfig {{ return '' }}
+function Get-BinariesState {{ return @{{}} }}
+function Get-OptionalSha256 {{ return '' }}
+function Test-BinDirProtected {{ return $true }}
+{_ps1_function('Get-LifecycleState')}
+$state = Get-LifecycleState
+if (@($state.Connectors).Count -ne 1 -or $state.Connectors[0] -ne 'codex') {{
+    throw 'the old gateway JSON gap erased the configured connector'
+}}
+'OK'
+"""
+    result = _run_powershell(script)
+    assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
+
+
+def test_effective_config_fallback_reads_old_external_connector_roster(tmp_path: Path) -> None:
+    # The staged interpreter reads the old config as data, so a missing old
+    # status --json does not erase a multi-connector external deployment.
+    config = tmp_path / "external.yaml"
+    config.write_text(
+        "guardrail:\n  connectors:\n    codex: {}\n    claude-code: {}\n",
+        encoding="utf-8",
+    )
+    helper = _ps1_function("Get-EffectiveConfigConnectors")
+    match = re.search(r"\$code = '([^']+)'", helper)
+    assert match is not None
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", match.group(1), str(config)],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == ["claudecode", "codex"]
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_early_restore_reports_prior_unproven_baseline_without_false_binary_claim() -> None:
+    # GAP-0702: a held hook can time out the safe drain. The current attempt
+    # restores its hook, while a previous install's empty baseline remains
+    # unproven. That state needs its own explanation and a retained lock.
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$Run = @{{ UnprovenReplacement = $true; RestorePending = $false }}
+$script:asserted = $false
+$script:warning = ''
+function Test-RecoveryPending {{ return $false }}
+function Set-RecoveryPending {{ $Run.RestorePending = $true }}
+function Write-Warn([string]$Message) {{ $script:warning = $Message }}
+function Assert-LifecycleRestored {{ $script:asserted = $true; throw 'false binary mismatch' }}
+{_ps1_function('Finish-EarlySnapshotRestore')}
+Finish-EarlySnapshotRestore ([pscustomobject]@{{ Bins = @{{}} }})
+if ($script:asserted -or -not $Run.RestorePending -or
+    $script:warning -notmatch 'earlier.*binary baseline' -or
+    $script:warning -match 'not proven back') {{ throw 'misreported the held-hook restore' }}
+'OK'
+"""
+    result = _run_powershell(script)
+    assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_outlived_recovery_keeps_connector_named_by_external_config(tmp_path: Path) -> None:
+    # rel-1-0-4:GAP-0679: a changed external config can still require the hook.
+    external = tmp_path / "external.yaml"
+    external.write_text("guardrail:\n  connectors:\n    codex: {}\n", encoding="utf-8")
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$DataDir = '{tmp_path / 'data'}'
+$BinDir = '{tmp_path / 'bin'}'
+$LifecycleManifest = '{tmp_path / 'txn.json'}'
+$env:DEFENSECLAW_CONFIG = '{external}'
+$Run = @{{ RestorePending = $false }}
+$AcceptCurrentInstall = $false
+function Wait-LifecycleProof {{ return @('connector codex is not guarded again: the gateway does not report its hooks running') }}
+function Test-LifecycleProof {{ return @() }}
+function Get-GatewayHealthReport {{ return [pscustomobject]@{{ health = [pscustomobject]@{{ connectors = @() }} }} }}
+function Get-ConfiguredConnectors {{ return @() }}
+function Get-OptionalSha256 {{ param($Path) return 'new' }}
+function Get-GatewayDigestProblem {{ return '' }}
+function Set-RecoveryPending {{ $Run.RestorePending = $true }}
+function Get-LifecycleNextStep {{ return 'retry' }}
+function Remove-LifecycleManifest {{ }}
+function Write-Warn {{ param($Message) }}
+{_ps1_function('Get-Field')}
+{_ps1_function('Get-ExternalConfig')}
+{_ps1_function('Assert-LifecycleRestored')}
+$manifest = [pscustomobject]@{{ Bins = @{{}}; GatewayWasRunning = $true; Connectors = @('codex'); Config = ''; ExternalConfig = '{external}'; ExternalConfigSha256 = 'old'; HookFailModes = ''; BinDirProtected = $false; SetupRoot = '' }}
+try {{ Assert-LifecycleRestored $manifest -Outlived; throw 'external configured connector was accepted unguarded' }}
+catch {{ if ($_.Exception.Message -notmatch 'connector codex is not guarded again') {{ throw }} }}
+'OK'
+"""
+    result = _run_powershell(script)
+    assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
+
+
 def _list(name: str) -> list[str]:
     match = re.search(rf"\${name} = @\((.*?)\)", _text(), re.S)
     assert match is not None, name
@@ -990,7 +1133,7 @@ _TXN_REAL = ("Write-DurableText", "ConvertTo-Map", "Get-BinariesState", "Get-Opt
              "Read-LifecycleManifest", "New-RecoveryManifest", "Remove-LifecycleManifest", "Test-LifecycleProof",
              "Set-RecoveryPending", "Set-RecoverySetupRoot", "Wait-LifecycleProof", "Get-LifecycleNextStep", "Assert-LifecycleRestored",
              "Close-AllHooks", "Save-LifecycleCloser", "Test-SameBinaries", "Read-Json", "Get-ConfiguredConnectors",
-             "Get-Field", "Get-Sha256")
+             "Get-Field", "Get-Sha256", "Get-ExternalConfig")
 
 
 def _txn_real_functions() -> str:
@@ -2815,10 +2958,26 @@ def test_an_upgrade_replaces_an_installed_binary_in_place() -> None:
     switch = _ps_functions("Switch-InPlace")
     assert "Remove-Aside" not in switch and "Move-Path" not in switch
     assert "Invoke-AtomicReplace $New $Destination" in switch
-    assert "MoveFileExW($New, $Destination, 0x9)" in _ps_functions("Invoke-AtomicReplace")
+    assert "FileRenameInfoEx" in _ps_functions("Invoke-AtomicReplace")
+    assert "FILE_RENAME_FLAG_POSIX_SEMANTICS" in _ps_functions("Invoke-AtomicReplace")
     assert "function Invoke-FileReplace" not in _text()
     install = _ps_functions("Install-File")
     assert install.index('(Get-Sha256 "$Destination.new") -ne (Get-Sha256 $Source)') < install.index("Publish-File")
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_atomic_replacement_native_helper_compiles() -> None:
+    # The Windows API call itself needs a Windows runner, but C# compilation
+    # also catches signature and layout mistakes on a cross-platform runner.
+    script = (
+        "$ErrorActionPreference = 'Stop'\n"
+        + _ps1_function("Invoke-AtomicReplace")
+        + "\ntry { Invoke-AtomicReplace 'missing.new' 'missing.exe' } catch { }\n"
+        + "if (-not ('DefenseClawInstall.Rename' -as [type])) { throw 'native helper did not compile' }\n"
+        + "'OK'\n"
+    )
+    result = _run_powershell(script)
+    assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
     hook_state = _text().split("function Write-HookState {", 1)[1].split("\n}\n", 1)[0]
     for body in (_ps_functions("Write-PosixShim"), _ps_functions("Write-Shim"), hook_state):
         assert 'Publish-File "$path.new" $path' in body and "Remove-Aside" not in body
@@ -2848,6 +3007,31 @@ Write-Output "ATOMIC=$script:atomic"
     assert completed.returncode == 0 and "ATOMIC=1" in out, out
     assert dest.read_text(encoding="ascii") == "new"
     assert sorted(path.name for path in tmp_path.iterdir()) == ["defenseclaw-hook.exe", "staged.exe"]
+
+
+@pytest.mark.skipif(sys.platform != "win32" or POWERSHELL is None, reason="requires a running Windows executable")
+def test_native_running_hook_is_replaced_at_its_canonical_path(tmp_path: Path) -> None:
+    # The old image keeps running while a fresh invocation resolves the new
+    # image through the same name. This is the 1/s upgrade failure in GAP-0732.
+    system32 = Path(os.environ["SystemRoot"]) / "System32"
+    hook = tmp_path / "defenseclaw-hook.exe"
+    staged = tmp_path / "defenseclaw-hook.exe.new"
+    shutil.copyfile(system32 / "cmd.exe", hook)
+    shutil.copyfile(system32 / "ping.exe", staged)
+    old = hook.read_bytes()
+    new = staged.read_bytes()
+    running = subprocess.Popen([str(hook), "/c", "ping -n 120 127.0.0.1 >nul"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        script = _ps_functions("Invoke-AtomicReplace") + f"\nInvoke-AtomicReplace '{staged}' '{hook}'\n"
+        result = _run_powershell(script)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert running.poll() is None
+        assert hook.read_bytes() == new and hook.read_bytes() != old
+        assert not staged.exists()
+    finally:
+        running.kill()
+        running.wait(timeout=30)
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
@@ -3244,12 +3428,10 @@ def test_a_failed_run_closes_unfinished_hooks_while_it_still_holds_the_lock() ->
     assert swap.index('Remove-Tree (Join-Path $Snap "closer")') < swap.index("Move-Path $Snap $Previous")
 
 
-@pytest.mark.skipif(sys.platform != "win32" or POWERSHELL is None, reason="a running Windows program refuses its replacement")
-def test_native_a_running_hook_refuses_the_restore_and_the_hooks_close(tmp_path: Path) -> None:
-    # The same chain with the real MoveFileEx switch: a copy of cmd.exe runs
-    # as the installed hook (it waits on ping), so Windows refuses to replace
-    # its file. The restore keeps its snapshot and the gateway in place, and
-    # that gateway closes the hooks.
+@pytest.mark.skipif(sys.platform != "win32" or POWERSHELL is None, reason="requires Windows executable replacement")
+def test_native_a_running_hook_does_not_block_snapshot_restore(tmp_path: Path) -> None:
+    # A mapped old image continues to run while its canonical name is
+    # restored atomically. The snapshot can then retire in the same run.
     data, bin_dir, slot = tmp_path / "data", tmp_path / "bin", tmp_path / "data" / "previous.new"
     hook = bin_dir / "defenseclaw-hook.exe"
     hook.parent.mkdir(parents=True)
@@ -3270,21 +3452,13 @@ def test_native_a_running_hook_refuses_the_restore_and_the_hooks_close(tmp_path:
             + f"\ntry {{ Restore-Slot '{slot}' | Out-Null; Write-Output 'RESTORED' }} catch {{ Write-Output \"REFUSED: $($_.Exception.Message)\" }}\n"
             "Close-UnfinishedInstallHooks\n",
         )
+        still_running = running.poll() is None
     finally:
         running.kill()
         running.wait(timeout=30)
-    assert "RESTORED" not in out and "REFUSED:" in out and "defenseclaw-hook.exe" in out, out
-    assert (slot / "COMPLETE").exists()
-    assert (bin_dir / "defenseclaw-gateway.exe").read_text(encoding="ascii") == "new defenseclaw-gateway.exe"
-    assert (slot / "bin" / "defenseclaw-hook.exe").read_text(encoding="ascii") == "old defenseclaw-hook.exe"
-    assert "--closed" in out and "every agent hook blocks tool calls" in out, out
-    # The program has exited; a scanner may still hold the file for a moment.
-    pause = "function Start-Sleep { [Threading.Thread]::Sleep(250) }\n"
-    out = _restore_case(
-        tmp_path,
-        _ps1_function("Invoke-AtomicReplace") + pause + f"\nRestore-Slot '{slot}' | Out-Null\nWrite-Output 'RESTORED'\n",
-    )
-    assert "RESTORED" in out, out
+    assert still_running and "RESTORED" in out and "REFUSED:" not in out, out
+    assert not slot.exists()
+    assert (bin_dir / "defenseclaw-gateway.exe").read_text(encoding="ascii") == "old defenseclaw-gateway.exe"
     assert hook.read_text(encoding="ascii") == "old defenseclaw-hook.exe"
 
 
@@ -3427,12 +3601,10 @@ def test_a_closer_that_cannot_be_kept_is_never_hidden() -> None:
     assert "try { $saved = Save-Snapshot } catch { Write-Err $_.Exception.Message" in install
 
 
-@pytest.mark.skipif(sys.platform != "win32" or POWERSHELL is None, reason="a running Windows program refuses its replacement")
-def test_native_a_busy_hook_during_interrupted_resume_closes_the_hooks(tmp_path: Path) -> None:
-    # The interrupted-resume chain with the real MoveFileEx switch: the first
-    # run put a copy of cmd.exe in as the new hook and was killed before it
-    # published the new gateway. While that hook runs, the retry's recovery
-    # is refused, and the gateway kept in the slot closes the hooks.
+@pytest.mark.skipif(sys.platform != "win32" or POWERSHELL is None, reason="requires Windows executable replacement")
+def test_native_running_hook_during_interrupted_resume_restores_immediately(tmp_path: Path) -> None:
+    # Recovery restores the old canonical hook name while the new image's
+    # in-flight process finishes against its original mapped bytes.
     data, bin_dir, slot = tmp_path / "data", tmp_path / "bin", tmp_path / "data" / "previous.new"
     _interrupted_fixture(data, bin_dir, slot, hook=Path(os.environ["SystemRoot"]) / "System32" / "cmd.exe")
     real = _ps1_function("Invoke-AtomicReplace")
@@ -3442,16 +3614,11 @@ def test_native_a_busy_hook_during_interrupted_resume_closes_the_hooks(tmp_path:
     running = subprocess.Popen([str(hook), "/c", "ping -n 120 127.0.0.1 >nul"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         out = _restore_case(tmp_path, real + _close_mocks() + _RESUME_MOCKS + "\n" + _resume_and_finish())
+        still_running = running.poll() is None
     finally:
         running.kill()
         running.wait(timeout=30)
-    closer = slot / "closer" / "defenseclaw-gateway.exe"
-    assert "RESUMED" not in out and "REFUSED:" in out and "defenseclaw-hook.exe" in out, out
-    assert f"RAN: {closer} connector refresh-fail-modes --closed" in out, out
-    assert "every agent hook blocks tool calls" in out and "err:" not in out, out
-    assert (slot / "COMPLETE").exists() and closer.exists() and not (data / ".staging").exists()
-    out = _restore_case(tmp_path, real + pause + _close_mocks() + _RESUME_MOCKS + "\n" + _resume_and_finish())
-    assert "RESUMED" in out and "RAN:" not in out, out
+    assert still_running and "RESUMED" in out and "REFUSED:" not in out and "RAN:" not in out, out
     assert not slot.exists()
     assert hook.read_text(encoding="ascii") == "old defenseclaw-hook.exe"
 

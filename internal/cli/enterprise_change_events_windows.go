@@ -21,6 +21,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"path/filepath"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -45,7 +46,12 @@ var windowsChangeSpool = func(layout managed.StandaloneLayout) (enterprisestatus
 		Prepare: func(dir string) error {
 			err := prepareChangeSpoolDirectory(dir,
 				func(parent string) error {
-					return createWindowsBundleDirectory(parent, windowsBundleDirectorySDDL(service.String()))
+					sddl, err := windowsChangeSpoolParentSDDL(parent,
+						enterprisestatus.ChangeEventsDir(layout.ConfigDir), service.String())
+					if err != nil {
+						return err
+					}
+					return createWindowsBundleDirectory(parent, sddl)
 				},
 				func(path string) error {
 					return createWindowsBundleDirectory(path, windowsBundleVersionSDDL(service.String(), true))
@@ -59,6 +65,20 @@ var windowsChangeSpool = func(layout managed.StandaloneLayout) (enterprisestatus
 			return applyWindowsBundleSDDL(path, windowsBundleVersionSDDL(service.String(), false))
 		},
 	}, nil
+}
+
+// The bundle root is public for traversal; the change spool and its
+// reservation folder are private to administrators and the gateway service.
+// Preparing reserved must preserve the already-protected spool parent.
+func windowsChangeSpoolParentSDDL(parent, spool, serviceSID string) (string, error) {
+	switch filepath.Clean(parent) {
+	case filepath.Clean(filepath.Dir(spool)):
+		return windowsBundleDirectorySDDL(serviceSID), nil
+	case filepath.Clean(spool):
+		return windowsBundleVersionSDDL(serviceSID, true), nil
+	default:
+		return "", fmt.Errorf("unexpected change spool parent: %s", parent)
+	}
 }
 
 // reserveWindowsChange reserves room in the change spool for the event of
