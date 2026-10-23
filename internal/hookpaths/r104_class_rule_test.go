@@ -47,6 +47,8 @@ func TestR104ActionClassUnknownShellAndInterpreter(t *testing.T) {
 		{"computed data in write statement", `echo "$(id)" > report.txt`, true},
 		{"unknown read path in write statement", `cat "$source" > report.txt`, true},
 		{"unknown copy source", `cp "$source" report.txt`, true},
+		{"sort dynamic output option", `sort --output="$destination" docs/a.txt`, true},
+		{"sort attached dynamic output", `sort -o"$destination" docs/a.txt`, true},
 		{"unknown variable target", `echo marker >> "$destination"`, true},
 		{"unknown input to write-capable program", `tee report.txt < "$source"`, true},
 		{"unknown input to read-only program", `cat < "$source"`, false},

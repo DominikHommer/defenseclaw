@@ -276,9 +276,13 @@ func actionStmtMayWrite(stmt *syntax.Stmt, home string) bool {
 	program, known := StaticWord(call.Args[0], home)
 	if known && programBase(program) == "sort" {
 		for _, arg := range call.Args[1:] {
-			if value, fixed := StaticWord(arg, home); fixed &&
-				(value == "-o" || value == "--output" || strings.HasPrefix(value, "-o") && len(value) > 2 ||
-					strings.HasPrefix(value, "--output=")) {
+			var rendered strings.Builder
+			if syntax.NewPrinter().Print(&rendered, arg) != nil {
+				continue
+			}
+			value := rendered.String()
+			if value == "-o" || value == "--output" || strings.HasPrefix(value, "-o") && len(value) > 2 ||
+				strings.HasPrefix(value, "--output=") {
 				return true
 			}
 		}
