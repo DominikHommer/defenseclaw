@@ -53,12 +53,17 @@ func TestUnenrolledRefusalStopWritesQueuedRowsAndOpenWindowCounts(t *testing.T) 
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	attempts := 0
+	counts := make(map[string]int)
 	for _, row := range rows {
-		attempts += row.Attempts
+		if row.SID != sid || row.Report.Reason != refusalpipe.ReasonSIDUnregistered || row.Attempts < 1 {
+			t.Fatalf("invalid refusal row after the stop: %+v", row)
+		}
+		counts[row.Report.Connector] += row.Attempts
 	}
-	if len(rows) != 3 || attempts != 51 {
-		t.Fatalf("rows after the stop = %+v (attempts %d), want 3 rows covering all 51 refusals", rows, attempts)
+	// The queue may merge a first row with the open window's count while
+	// the writer is stalled. Either two or three rows preserve all refusals.
+	if len(rows) < 2 || len(rows) > 3 || len(counts) != 2 || counts["claudecode"] != 50 || counts["codex"] != 1 {
+		t.Fatalf("rows after the stop = %+v; want 50 claudecode and 1 codex refusal in at most 3 rows", rows)
 	}
 }
 
