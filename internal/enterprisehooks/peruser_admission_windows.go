@@ -175,7 +175,7 @@ func windowsStandaloneRowAdmission(profileHome, connectorName, version string) (
 // the managed contract covers the builds an earlier release enrolled only so
 // those rows keep being repaired at their own version, as on Unix.
 func windowsStandaloneEnrollmentAdmission(profileHome, connectorName, version string) (bool, string) {
-	if reason := standaloneKiroCLIFloorRefusal(resolveHookContract(connectorName, version)); reason != "" {
+	if reason := kiroCLIFloorRefusal(resolveHookContract(connectorName, version)); reason != "" {
 		return false, reason
 	}
 	return windowsStandaloneRowAdmission(profileHome, connectorName, version)

@@ -36,6 +36,8 @@ treats an older kiro-cli as unsupported:
 - `defenseclaw doctor` reports that CLI as unsupported.
 - The enterprise guardian does not create a new row for that CLI (see
   [Enterprise](#enterprise-standalone-profile)).
+- A CLI enrolled by an earlier managed release keeps its interactive hooks,
+  but `status` reports it as uncovered and `verify` fails until it is updated.
 
 When Kiro IDE 1.0.182 or later is installed alongside an older CLI, setup
 installs their shared global hooks for the IDE. Discovery and doctor report
@@ -43,8 +45,10 @@ the CLI separately as unsupported: its non-interactive runs still send no
 hooks until it is updated. The managed guardian enrolls the IDE version and
 reports the older CLI as unprotected.
 
-Kiro IDE is not gated by this floor; its own floor for the global hook file
-is below.
+Kiro IDE has its own floor, 1.0.182, for the global hook file. Setup refuses
+an older IDE in every profile and guardrail mode when it is the only Kiro
+installation. Managed `status` reports an installed older IDE as uncovered,
+and `verify` fails.
 
 ## Setup
 
@@ -244,13 +248,14 @@ directory is machine-wide, so every enrolled user would share the copy, and
 the global file already covers it. Teardown still removes a workspace copy
 that an earlier release wrote.
 
-The standalone profile certifies kiro-cli 2.27.1 and later (see
-[Supported versions](#supported-versions)). In action mode the guardian
+Every profile requires kiro-cli 2.27.1 or later for a new enrollment (see
+[Supported versions](#supported-versions)). In both guardrail modes the guardian
 refuses a new row for an older kiro-cli and reports the reason, unless a
 supported IDE is installed; then it enrolls the IDE and reports the CLI. A
 user an earlier release already enrolled below 2.27.1 keeps being repaired at
-that version, on every OS, so the interactive sessions stay enforced, but that kiro-cli's
-non-interactive `--v3` runs send no hooks until it is updated. A kiro-cli
+that version, on every OS, so the interactive sessions keep their hooks. `status`
+reports that CLI as uncovered and `verify` fails because its non-interactive `--v3`
+runs send no hooks until it is updated. A kiro-cli
 change to another version below 2.27.1 is refused as hook contract drift until
 kiro-cli reaches 2.27.1. The guardian follows a kiro-cli self-update at or
 above 2.27.1 and re-renders the user's hooks. It does not follow a downgrade

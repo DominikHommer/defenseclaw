@@ -721,7 +721,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 					UID:       intPointer(account.UID),
 					Connector: conn,
 					Version:   version,
-					Code:      UnprotectedCodeHookContractUnverified,
+					Code:      UnprotectedCodeForReason(refused),
 					Reason:    refused + "; " + consequence,
 				})
 				logfSafely(opts.Logger, name, fmt.Sprintf("new (%s, %s) row skipped: %s", name, conn, refused))
@@ -803,6 +803,40 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 	for user := range withRows {
 		if source := resolvedSource[user]; source != "" {
 			opts.State.Sources[user] = source
+		}
+	}
+	// Earlier releases enrolled Kiro below both hook floors. Keep CLI rows so
+	// their interactive hooks remain installed across upgrade, but report an
+	// uncovered product even when current version evidence is unavailable.
+	for _, target := range targets {
+		if !target.IsEnabled() || target.Connector != "kiro" {
+			continue
+		}
+		reason := standaloneAgentFloorRefusal(resolveHookContract("kiro", target.AgentVersion))
+		if reason == "" {
+			continue
+		}
+		code := UnprotectedCodeForReason(reason)
+		consequence := "an earlier enrollment keeps its interactive hooks installed, but this CLI's non-interactive runs do not load them"
+		if code == UnprotectedCodeKiroIDEBelowGlobalHooksFloor {
+			consequence = "this IDE cannot read the global hooks file, even if an earlier enrollment left it installed"
+		}
+		if code != UnprotectedCodeKiroCLIBelowHookFloor && code != UnprotectedCodeKiroIDEBelowGlobalHooksFloor {
+			continue
+		}
+		alreadyReported := false
+		for _, agent := range report.Unprotected {
+			if agent.User == target.User && agent.Connector == "kiro" && agent.Code == code {
+				alreadyReported = true
+				break
+			}
+		}
+		if !alreadyReported {
+			report.Unprotected = append(report.Unprotected, UnprotectedAgent{
+				User: target.User, UID: target.UID, Connector: "kiro", Version: target.AgentVersion,
+				Code:   code,
+				Reason: reason + "; " + consequence,
+			})
 		}
 	}
 

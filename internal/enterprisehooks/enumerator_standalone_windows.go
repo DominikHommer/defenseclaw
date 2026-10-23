@@ -236,6 +236,20 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 		}
 		emit := applyPreviousRowState(row, previous, logf)
 		row.AgentVersion = version
+		// A pre-floor row stays installed for upgrade compatibility, but its
+		// headless V3 calls never load the hook. Report it even when the CLI
+		// version is unchanged or the user is signed out. A separately
+		// reported CLI beside a supported IDE, or a refused version change,
+		// already supplies this coverage warning.
+		if emit && row.IsEnabled() && row.Connector == "kiro" && notFollowed == "" {
+			if reason := windowsKiroCLIBelowHookFloor(version); reason != "" {
+				ide, _ := discoverWindowsKiroIDEVersion(row.UserHome)
+				if ide == "" || kiroIDEBelowGlobalHooksFloor(ide) {
+					rowContext.reportAgent(row, version, reason,
+						"an earlier enrollment keeps its interactive hooks installed, but this CLI's non-interactive runs do not load them")
+				}
+			}
+		}
 		return emit
 	}
 	version, reason := standaloneWindowsAgentVersionExplainFor(row.SID, row.UserHome, row.Connector)

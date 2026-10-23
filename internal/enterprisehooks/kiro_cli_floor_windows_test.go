@@ -49,8 +49,8 @@ func TestApplyStandaloneRowStateKeepsAKiroRowAnEarlierReleaseEnrolledBelowTheFlo
 		session               bool
 		keptReport            bool
 	}{
-		{name: "signed out", installed: "2.24.1", want: "2.24.1"},
-		{name: "unchanged", installed: "2.24.1", want: "2.24.1", session: true},
+		{name: "signed out", installed: "2.24.1", want: "2.24.1", keptReport: true},
+		{name: "unchanged", installed: "2.24.1", want: "2.24.1", session: true, keptReport: true},
 		{name: "change below the floor", installed: "2.26.1", want: "2.24.1", session: true, keptReport: true},
 		{name: "upgrade to the floor", installed: "2.27.1", want: "2.27.1", session: true},
 	} {
@@ -68,8 +68,8 @@ func TestApplyStandaloneRowStateKeepsAKiroRowAnEarlierReleaseEnrolledBelowTheFlo
 			if tc.keptReport != (len(reports) == 1) {
 				t.Fatalf("reports = %+v, want kept report %t", reports, tc.keptReport)
 			}
-			if tc.keptReport && (reports[0].Version != tc.installed || !strings.Contains(reports[0].Reason, "is below 2.27.1") ||
-				!strings.Contains(reports[0].Reason, "the row stays enrolled at 2.24.1")) {
+			if tc.keptReport && (reports[0].Version != tc.installed || reports[0].Code != "kiro_cli_below_hook_floor" ||
+				!strings.Contains(reports[0].Reason, "is below 2.27.1")) {
 				t.Fatalf("report = %+v, want the version below the floor kept at 2.24.1", reports[0])
 			}
 		})
@@ -84,6 +84,22 @@ func TestApplyStandaloneRowStateKeepsAKiroRowAnEarlierReleaseEnrolledBelowTheFlo
 	}
 	if len(reports) != 1 || reports[0].Version != "2.26.1" || !strings.Contains(reports[0].Reason, "is below 2.27.1") {
 		t.Fatalf("reports = %+v, want the new row below the floor reported", reports)
+	}
+}
+
+func TestWindowsKiroIDEVersionIsNotJudgedByTheCLIFloor(t *testing.T) {
+	if reason := windowsKiroCLIBelowHookFloor("1.0.182" + KiroIDEVersionSuffix); reason != "" {
+		t.Fatalf("a supported IDE was judged as an unhooked CLI: %s", reason)
+	}
+	setStandaloneProfileForTest(t, true)
+	enabled := true
+	prior := ManifestTarget{SID: testLocalUserSID, Connector: "kiro", AgentVersion: "1.0.182" + KiroIDEVersionSuffix, Enabled: &enabled}
+	previous := map[string]ManifestTarget{previousManifestKey(prior.SID, prior.Connector): prior}
+	var reports []UnprotectedAgent
+	row := ManifestTarget{SID: testLocalUserSID, UserHome: t.TempDir(), Connector: "kiro"}
+	ctx := windowsStandaloneRowContext{user: "alice", report: func(a UnprotectedAgent) { reports = append(reports, a) }}
+	if !applyStandaloneRowStateFor(&row, previous, nil, ctx) || row.AgentVersion != prior.AgentVersion || len(reports) != 0 {
+		t.Fatalf("signed-out supported IDE was reported uncovered: row=%+v reports=%+v", row, reports)
 	}
 }
 
@@ -165,7 +181,7 @@ func TestValidateHookContractRepairsAWindowsKiroLockBelowTheFloor(t *testing.T) 
 
 	fresh := t.TempDir()
 	if err := validateHookContract("action", conn, opts(fresh, "2.24.1")); err == nil ||
-		!strings.Contains(err.Error(), "not certified for the standalone profile") || !strings.Contains(err.Error(), "is below 2.27.1") {
+		!strings.Contains(err.Error(), "cannot load hooks") || !strings.Contains(err.Error(), "is below 2.27.1") {
 		t.Fatalf("new enrollment below the floor = %v, want the certified-minimum refusal", err)
 	}
 	if err := validateHookContract("action", conn, opts(fresh, "2.27.1")); err != nil {

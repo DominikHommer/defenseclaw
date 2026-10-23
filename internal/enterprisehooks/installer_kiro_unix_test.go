@@ -15,6 +15,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 func kiroStandaloneInstallOptions(home, version string) InstallOptions {
@@ -73,20 +74,47 @@ func TestStandaloneKiroFollowsCLIUpgradesAtOrAboveTheFloor(t *testing.T) {
 	}
 }
 
-// Outside the standalone profile the floor does not apply, and a version
-// change is no longer refused as drift (#1163): Kiro's hooks are not
-// version-gated, so the repair keeps the configured delivery policy.
-func TestKiroFloorIsStandaloneOnly(t *testing.T) {
+// A new CLI below the floor cannot protect headless runs under either managed
+// profile. Secure Client's open delivery setting does not make an unhooked
+// agent a supported connector.
+func TestKiroFloorAppliesOutsideStandalone(t *testing.T) {
 	useSecureClientHookDelivery(t)
 	skipIfRoot(t)
 	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
 	setStandaloneProfileForTest(t, false)
 	home := newTestHome(t)
-	if _, err := Install(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.20.0")); err != nil {
-		t.Fatalf("install below the standalone floor outside the standalone profile: %v", err)
+	if _, err := Install(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.20.0")); err == nil ||
+		!strings.Contains(err.Error(), "is below 2.27.1") {
+		t.Fatalf("new Secure Client install below the floor = %v", err)
 	}
-	if _, err := Install(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.25.0")); err != nil {
-		t.Fatalf("version change outside the standalone profile = %v, want the repair to follow it", err)
+	if _, err := Install(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.27.1")); err != nil {
+		t.Fatalf("install at the floor outside the standalone profile: %v", err)
+	}
+	if _, err := Install(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.25.0")); err == nil ||
+		!strings.Contains(err.Error(), "is below 2.27.1") {
+		t.Fatalf("downgrade below the floor = %v", err)
+	}
+}
+
+// Seed the protected lock an earlier release wrote, without asking the
+// current installer to make a new below-floor enrollment.
+func seedEarlierKiroLock(t *testing.T, opts InstallOptions) {
+	t.Helper()
+	dataDir := filepath.Join(opts.UserHome, ".defenseclaw")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	conn := connector.NewKiroConnector()
+	setup := connector.SetupOpts{
+		DataDir: dataDir, ProxyAddr: opts.ProxyAddr, APIAddr: opts.APIAddr,
+		APIToken: opts.APIToken, OTLPPathToken: opts.OTLPPathToken,
+		ManagedEnterprise: true, HookFailMode: opts.HookFailMode,
+		GuardrailMode: opts.GuardrailMode, AgentVersion: opts.AgentVersion,
+		HookContractID: defaultHookContractID(resolveHookContract("kiro", opts.AgentVersion)),
+	}
+	if err := connector.SaveHookContractLockEntry(dataDir,
+		connector.NewHookContractLockEntry(setup, conn, version.Current().BinaryVersion)); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -109,12 +137,8 @@ func TestEnumerateUnixKeepsABelowFloorKiroRowThatInstallCanRepair(t *testing.T) 
 	uid, gid := os.Getuid(), os.Getgid()
 	alice := makeHome(t, homes, "alice")
 
-	// An earlier release, which had no floor, enrolled and installed alice.
-	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "1")
-	if _, err := Install(context.Background(), kiroStandaloneInstallOptions(alice, enrolled)); err != nil {
-		t.Fatalf("earlier install: %v", err)
-	}
-	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
+	// An earlier release, which had no floor, enrolled alice.
+	seedEarlierKiroLock(t, kiroStandaloneInstallOptions(alice, enrolled))
 
 	info, err := os.Stat(alice)
 	if err != nil {
@@ -215,13 +239,8 @@ func TestEnumerateUnixKeepsABelowFloorKiroRowThatInstallCanRepair(t *testing.T) 
 		setStandaloneProfileForTest(t, true)
 		home := newTestHome(t)
 
-		// The earlier release's install: no floor applied, so it wrote a lock.
-		earlier := kiroStandaloneInstallOptions(home, "kiro-cli 2.22.0")
-		t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "1")
-		if _, err := Install(context.Background(), earlier); err != nil {
-			t.Fatalf("earlier install: %v", err)
-		}
-		t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
+		// The earlier release's install wrote a lock before the floor existed.
+		seedEarlierKiroLock(t, kiroStandaloneInstallOptions(home, "kiro-cli 2.22.0"))
 
 		if _, err := Install(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.22.0")); err != nil {
 			t.Fatalf("repair of a row enrolled below the floor: %v", err)

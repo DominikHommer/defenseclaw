@@ -272,6 +272,64 @@ func TestEnumerateUnixKiroChecksEachInstalledSurface(t *testing.T) {
 	}
 }
 
+func TestEnumerateUnixReportsEnrolledKiroBelowHookFloors(t *testing.T) {
+	for _, tc := range []struct {
+		name, version, code string
+	}{
+		{name: "CLI", version: "2.24.1", code: UnprotectedCodeKiroCLIBelowHookFloor},
+		{name: "IDE with no current version evidence", version: "1.0.181" + KiroIDEVersionSuffix, code: UnprotectedCodeKiroIDEBelowGlobalHooksFloor},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := trustedTestDir(t)
+			homes := filepath.Join(root, "home")
+			if err := os.MkdirAll(homes, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			home := makeHome(t, homes, "alice")
+			uid, gid := os.Getuid(), os.Getgid()
+			info, err := os.Stat(home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			enabled := true
+			manifestPath := filepath.Join(root, "targets.yaml")
+			previous, err := MarshalUnixTargetsManifest(Manifest{Version: 1, Targets: []ManifestTarget{{
+				User: "alice", UserHome: home, UID: intPointer(uid), GID: intPointer(gid), Connector: "kiro",
+				DataDir: filepath.Join(home, ".defenseclaw"), AgentVersion: tc.version, Enabled: &enabled, HomeInode: statInode(t, info),
+			}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(manifestPath, previous, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			opts := UnixEnumerateOptions{
+				ExistingManifestPath: manifestPath,
+				Resolver: &fakeResolver{accounts: map[string]unixidentity.Account{
+					"alice": {Name: "alice", UID: uid, GID: gid, Home: home, Shell: "/bin/bash"},
+				}, listed: []string{"alice"}},
+				HomeRoots: []string{homes}, UIDMin: uid, UIDMax: uid,
+				Discover: func(context.Context, unixidentity.Account, []string) (map[string]string, map[string]string, error) {
+					if tc.name == "CLI" {
+						return map[string]string{"kiro": "2.24.1"}, nil, nil
+					}
+					return nil, nil, nil
+				},
+			}
+			manifest, report, err := EnumerateUnix(context.Background(), enumeratorConfig("kiro"), connector.NewDefaultRegistry(), opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(manifest.Targets) != 1 || manifest.Targets[0].AgentVersion != tc.version {
+				t.Fatalf("earlier enrollment was lost: %+v", manifest.Targets)
+			}
+			if len(report.Unprotected) != 1 || report.Unprotected[0].Code != tc.code {
+				t.Fatalf("grandfathered unhooked %s is not uncovered: %+v", tc.name, report.Unprotected)
+			}
+		})
+	}
+}
+
 // Under unverified_versions: refuse a user whose only Antigravity install
 // is the IDE gets a refusal row at the default contract's version, and the
 // gateway refuses their calls (refused-surfaces entry, reported enforced).

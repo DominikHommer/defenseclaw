@@ -26,10 +26,10 @@ import (
 
 // standaloneNotGatedAgentFloors are the lowest agent versions the standalone
 // profile certifies for connectors whose hook contract is not version-gated
-// (connector.HookCompatibilityNotGated). Per-user installs stay not-gated;
-// only the standalone guardian applies these floors. In action mode it
-// refuses to install below the floor, and it follows an agent upgrade at or
-// above it (a not-gated connector has no known contract to follow).
+// (connector.HookCompatibilityNotGated). Kiro's CLI floor also applies to
+// per-user setup and every guardrail mode. The standalone guardian follows
+// an agent upgrade at or above the floor (a not-gated connector has no
+// known contract to follow).
 //
 // Kiro: connector.KiroCLIHookFloor (2.27.1). Before it a non-interactive
 // `kiro-cli chat --v3` run loads no hooks, so that kiro-cli has a surface
@@ -83,15 +83,11 @@ func standaloneNotGatedVersionAdmitted(resolution connector.HookContractResoluti
 	return true, ""
 }
 
-// standaloneKiroCLIFloorRefusal explains why the standalone profile does not
-// enroll a kiro-cli at a version that resolves to the managed Windows
-// contract, or follow a row to it: the contract still covers the builds 1.0.3
-// and earlier enrolled (connector.KiroWindowsManagedCLIContractFloor) so
-// those rows keep being repaired, but only connector.KiroCLIHookFloor and
-// later load hooks on every engine. Empty when it may, and for every other
-// resolution (Unix Kiro is not gated: standaloneNotGatedVersionAdmitted).
-func standaloneKiroCLIFloorRefusal(resolution connector.HookContractResolution) string {
-	if resolution.Connector != "kiro" || resolution.Status != connector.HookCompatibilityKnown ||
+// kiroCLIFloorRefusal applies the same CLI floor under every profile and
+// compatibility status. The Windows managed contract still recognizes
+// earlier enrolled builds so their interactive hooks can be repaired.
+func kiroCLIFloorRefusal(resolution connector.HookContractResolution) string {
+	if resolution.Connector != "kiro" ||
 		strings.HasSuffix(strings.TrimSpace(resolution.RawVersion), KiroIDEVersionSuffix) {
 		return ""
 	}
@@ -102,6 +98,25 @@ func standaloneKiroCLIFloorRefusal(resolution connector.HookContractResolution) 
 	return connector.KiroCLIBelowHookFloorReason(normalized)
 }
 
+// kiroHookFloorRefusal also gates IDE builds that cannot read the global
+// hooks file. The CLI and IDE share one connector but have separate floors.
+func kiroHookFloorRefusal(resolution connector.HookContractResolution) string {
+	if resolution.Connector != "kiro" {
+		return ""
+	}
+	if !strings.HasSuffix(strings.TrimSpace(resolution.RawVersion), KiroIDEVersionSuffix) {
+		return kiroCLIFloorRefusal(resolution)
+	}
+	normalized := strings.TrimSpace(resolution.NormalizedVersion)
+	if normalized == "" {
+		return fmt.Sprintf("Kiro IDE version could not be read; global hooks require %s or later", KiroIDEGlobalHooksFloor)
+	}
+	if compareStandaloneFloorVersion(normalized, KiroIDEGlobalHooksFloor) < 0 {
+		return fmt.Sprintf("Kiro IDE version %s is below the certified minimum %s", normalized, KiroIDEGlobalHooksFloor)
+	}
+	return ""
+}
+
 // standaloneAgentFloorRefusal explains why resolution's version is below
 // its connector's standalone floor, not-gated (Unix Kiro) or under the
 // managed Windows Kiro contract; empty when it is not.
@@ -110,7 +125,7 @@ func standaloneAgentFloorRefusal(resolution connector.HookContractResolution) st
 		_, reason := standaloneNotGatedVersionAdmitted(resolution)
 		return reason
 	}
-	return standaloneKiroCLIFloorRefusal(resolution)
+	return kiroCLIFloorRefusal(resolution)
 }
 
 // compareStandaloneFloorVersion compares two normalized major.minor.patch

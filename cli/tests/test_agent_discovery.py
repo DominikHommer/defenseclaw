@@ -1201,13 +1201,17 @@ def test_kiro_supported_ide_gets_a_retry_when_older_cli_answered(monkeypatch):
 
 
 def test_kiro_surface_versions_survive_discovery_cache(tmp_path):
+    cache_dir = tmp_path / "kiro cache"
+    cache_dir.mkdir()
+    if os.name == "nt":
+        set_known_windows_directory_acl(cache_dir)
     discovery = _discovery("kiro")
     discovery.scanned_at = ad._format_rfc3339(ad._now_utc())
     discovery.agents["kiro"].version = "1.0.182"
     discovery.agents["kiro"].kiro_cli_version = "kiro-cli 2.26.1"
     discovery.agents["kiro"].kiro_ide_version = "1.0.182"
-    assert ad._write_cache(discovery, data_dir=tmp_path)
-    cached = ad._read_cache(data_dir=tmp_path)
+    assert ad._write_cache(discovery, data_dir=cache_dir)
+    cached = ad._read_cache(data_dir=cache_dir)
     assert cached is not None
     signal = cached.agents["kiro"]
     assert (signal.version, signal.kiro_cli_version, signal.kiro_ide_version) == (

@@ -8,8 +8,8 @@
 // - OS allowed at all: internal/gateway/connector/platform_support.go
 //   (windowsConnectorSupport; every connector is supported on Linux and macOS).
 // - Minimum agent version: cli/defenseclaw/inventory/hook_contracts.json
-//   (lowest min_inclusive, or the exact builds); Kiro's standalone floors are in
-//   internal/enterprisehooks/agent_floor_standalone.go.
+//   (lowest min_inclusive, or the exact builds); Kiro's CLI floor also lives in
+//   internal/gateway/connector/kiro.go and is enforced by every setup path.
 // - Block, native ask and fail closed: data/capability-matrix.json (imported,
 //   never copied, so the two pages can't drift).
 // - Enterprise route: internal/enterprisepolicy/types.go RouteFor.
@@ -246,8 +246,8 @@ const connectorSources: ConnectorSource[] = [
   {
     id: 'kiro',
     integration: 'Native hooks',
-    minVersion: 'Not gated',
-    versionNote: 'kiro-cli 2.27.1 or later: an older CLI has non-interactive --v3 runs that load no hooks. If Kiro IDE 1.0.182 or later is also installed, its global hooks can be installed or enrolled while the CLI is reported unsupported. The enterprise standalone profile requires Kiro IDE 1.0.182; per-user IDE setup is not gated.',
+    minVersion: 'kiro-cli 2.27.1; Kiro IDE 1.0.182',
+    versionNote: 'Below 2.27.1, kiro-cli has non-interactive --v3 runs that load no hooks. An IDE before 1.0.182 cannot read global hooks. New setup below either floor is refused in every mode and profile. Managed status reports either below-floor product as uncovered and verify fails. Earlier managed CLI enrollments keep their interactive hooks across upgrade until updated. A supported Kiro IDE can be enrolled beside an older CLI.',
     route: PER_USER,
     routeNote: 'ACP (Agent Client Protocol) editors are not supported in enterprise managed mode in DefenseClaw 1.0.',
   },

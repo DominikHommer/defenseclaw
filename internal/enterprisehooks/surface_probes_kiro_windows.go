@@ -141,6 +141,9 @@ func kiroIDEBelowGlobalHooksFloor(version string) bool {
 }
 
 func windowsKiroCLIBelowHookFloor(version string) string {
+	if strings.HasSuffix(strings.TrimSpace(version), KiroIDEVersionSuffix) {
+		return ""
+	}
 	normalized := connector.NormalizeAgentVersion("kiro", version)
 	if normalized == "" || compareStandaloneFloorVersion(normalized, connector.KiroCLIHookFloor) >= 0 {
 		return ""
