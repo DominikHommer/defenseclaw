@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -494,14 +495,27 @@ func (o *commandUserOps) Status(ctx context.Context, a SandboxAccount) (SandboxS
 }
 
 // unitRunning reports whether the account's user unit (systemd) or agent
-// (launchd) is running.
-func (o *commandUserOps) unitRunning(ctx context.Context, a SandboxAccount, unit, label string) bool {
+// (launchd: a job of any label of base) is running.
+func (o *commandUserOps) unitRunning(ctx context.Context, a SandboxAccount, unit, base string) bool {
 	if o.env.GOOS == "darwin" {
-		res, err := o.env.Runner.Run(ctx, "launchctl", "print", o.domain(ctx, a)+"/"+label)
-		return err == nil && strings.Contains(string(res.Stdout), "state = running")
+		domain := o.domain(ctx, a)
+		for _, label := range o.agentLabels(ctx, domain, base) {
+			res, err := o.env.Runner.Run(ctx, "launchctl", "print", domain+"/"+label)
+			if err == nil && strings.Contains(string(res.Stdout), "state = running") {
+				return true
+			}
+		}
+		return false
 	}
 	res, err := o.runAs(ctx, a, userCommandTimeout, "/usr/bin/systemctl", "--user", "is-active", unit)
 	return err == nil && strings.TrimSpace(string(res.Stdout)) == "active"
+}
+
+// agentLabels are the labels of base to act on in an account's domain: the
+// installed one and each earlier one the domain still lists (GAP-0206).
+func (o *commandUserOps) agentLabels(ctx context.Context, domain, base string) []string {
+	res, _ := o.env.Runner.Run(ctx, "launchctl", "print", domain)
+	return domainAgentLabels(res.Stdout, base, o.env.launchAgentLabel(base))
 }
 
 func (o *commandUserOps) Stop(ctx context.Context, a SandboxAccount, scope StopScope) error {
@@ -521,9 +535,11 @@ func (o *commandUserOps) Stop(ctx context.Context, a SandboxAccount, scope StopS
 			if scope&item.scope == 0 {
 				continue
 			}
-			res, err := e.Runner.Run(ctx, "launchctl", "bootout", domain+"/"+item.label)
-			if err != nil && !bootoutNotLoaded(res, err) {
-				errs = append(errs, err)
+			for _, label := range o.agentLabels(ctx, domain, item.label) {
+				res, err := e.Runner.Run(ctx, "launchctl", "bootout", domain+"/"+label)
+				if err != nil && !bootoutNotLoaded(res, err) {
+					errs = append(errs, err)
+				}
 			}
 		}
 		return errors.Join(errs...)
@@ -569,9 +585,15 @@ var (
 func (o *commandUserOps) killDaemon(ctx context.Context, a SandboxAccount) error {
 	e := o.env
 	if e.GOOS == "darwin" {
-		res, err := e.Runner.Run(ctx, "launchctl", "kill", "SIGKILL", o.domain(ctx, a)+"/"+labelSandbox)
-		if err != nil && !bootoutNotLoaded(res, err) && o.unitRunning(ctx, a, userUnitSandboxService, labelSandbox) {
-			return fmt.Errorf("end the sandbox daemon of %s, which an earlier DefenseClaw started, before its stop: %w", a.Name, err)
+		domain := o.domain(ctx, a)
+		var failed error
+		for _, label := range o.agentLabels(ctx, domain, labelSandbox) {
+			if res, err := e.Runner.Run(ctx, "launchctl", "kill", "SIGKILL", domain+"/"+label); err != nil && !bootoutNotLoaded(res, err) {
+				failed = err
+			}
+		}
+		if failed != nil && o.unitRunning(ctx, a, userUnitSandboxService, labelSandbox) {
+			return fmt.Errorf("end the sandbox daemon of %s, which an earlier DefenseClaw started, before its stop: %w", a.Name, failed)
 		}
 		return nil
 	}
@@ -996,6 +1018,13 @@ func (l *lifecycle) performAccountChange(ctx context.Context, ops SandboxUserOps
 			defer release()
 		}
 		for _, job := range jobs {
+			if job.old() {
+				if err := l.env.migrateMacOSAgent(ctx, job, jobs); err != nil {
+					return err
+				}
+				l.openshellChange("replaced %s of %s with %s, the label of this DefenseClaw's LaunchAgent, after its sandboxes stopped", job.domain+"/"+job.label, a.Name, job.current)
+				continue
+			}
 			if err := l.env.reloadMacOSAgent(ctx, job, job.state.Failure(false) != ""); err != nil {
 				return err
 			}
@@ -1510,8 +1539,17 @@ func (l *lifecycle) macOSAgentJobs(ctx context.Context) ([]string, error) {
 	var jobs []string
 	for _, uid := range uids {
 		for _, domain := range []string{"gui/" + strconv.Itoa(uid), "user/" + strconv.Itoa(uid)} {
-			for _, label := range []string{labelSandbox, labelOpenShellGateway} {
-				jobs = append(jobs, domain+"/"+label)
+			// The installed label, the bare one of 1.0.0 to 1.0.3, and any
+			// earlier one the domain still lists (GAP-0206).
+			listing, _ := l.env.Runner.Run(ctx, "launchctl", "print", domain)
+			for _, base := range openshell.LaunchAgentBases {
+				labels := domainAgentLabels(listing.Stdout, base, l.env.launchAgentLabel(base))
+				if !slices.Contains(labels, base) {
+					labels = append(labels, base)
+				}
+				for _, label := range labels {
+					jobs = append(jobs, domain+"/"+label)
+				}
 			}
 		}
 	}

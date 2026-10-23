@@ -24,6 +24,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -348,6 +349,7 @@ type plannedInputs struct {
 // ExitCode is set.
 func Run(ctx context.Context, env *Env, opts Options) *enterprisestatus.Result {
 	env.fillDefaults()
+	env.agentDigest = "" // set by this run's plan, if it plans
 	if env.Yield != nil {
 		env.Yield()
 	}
@@ -1486,11 +1488,11 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		}
 	}
 	// Files the previous deployment wrote that this one no longer does.
+	want := map[string]bool{}
+	for _, file := range append(append([]desiredFile{}, p.files...), p.binaries...) {
+		want[file.Path] = true
+	}
 	if record != nil {
-		want := map[string]bool{}
-		for _, file := range append(append([]desiredFile{}, p.files...), p.binaries...) {
-			want[file.Path] = true
-		}
 		for path := range record.Files {
 			if !want[path] {
 				if p.channel == ChannelPackage && env.packageOwns(path) {
@@ -1499,8 +1501,17 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 				p.stale = append(p.stale, path)
 			}
 		}
-		sort.Strings(p.stale)
 	}
+	if env.GOOS == "darwin" {
+		// The LaunchAgents of an earlier label, also the ones a package put
+		// there that no record names.
+		for _, path := range env.strayLaunchAgents(want) {
+			if !slices.Contains(p.stale, path) {
+				p.stale = append(p.stale, path)
+			}
+		}
+	}
+	sort.Strings(p.stale)
 	return p, nil
 }
 
