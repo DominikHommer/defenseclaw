@@ -1310,7 +1310,7 @@ Write-Output "RECORD=$(Test-Path -LiteralPath $LifecycleManifest) STARTS=$script
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
 @pytest.mark.parametrize("new_binaries", ["gateway", "hook", "both"])
 @pytest.mark.parametrize("gateway_running", [False, True])
-def test_empty_first_install_record_keeps_later_binaries_stopped_until_the_replacement_is_proven(
+def test_empty_first_install_record_requires_acceptance_without_stopping_a_working_gateway(
     tmp_path: Path, new_binaries: str, gateway_running: bool
 ) -> None:
     # A 1.0.4 first install stopped after recording Bins={} but before its
@@ -1350,7 +1350,8 @@ try {{ Resume-InterruptedRun; throw 'unproven binaries were accepted' }} catch {
     if ($_.Exception.Message -notlike '*-AcceptCurrentInstall*') {{ throw }}
 }}
 if (-not (Test-Path -LiteralPath $LifecycleManifest) -or -not $Run.RestorePending) {{ throw 'refusal lost the record or lock' }}
-if ($script:gateway) {{ throw 'the unproven gateway was left running' }}
+    if (${str(gateway_running).lower()} -and -not $script:gateway) {{ throw 'refusal stopped the working gateway' }}
+    if ($script:stops -ne 0) {{ throw 'refusal stopped the working gateway before acceptance' }}
 $Run.RestorePending = $false; $AcceptCurrentInstall = $true; $Rollback = $true
 try {{ Resume-InterruptedRun; throw 'rollback of unproven binaries was accepted' }} catch {{
     if ($_.Exception.Message -notlike '*-AcceptCurrentInstall*') {{ throw }}
@@ -1359,6 +1360,7 @@ if (-not (Test-Path -LiteralPath $LifecycleManifest)) {{ throw 'rollback retired
 $Run.RestorePending = $false; $Rollback = $false
 Resume-InterruptedRun
 if (-not $Run.UnprovenReplacement -or -not (Test-Path -LiteralPath $LifecycleManifest)) {{ throw 'acceptance retired the record before staging' }}
+if ($script:stops -ne 0) {{ throw 'acceptance stopped the gateway before the release was staged and checked' }}
 # If staging now fails, the retained lock names the command that can finish it.
 $Run.RestorePending = $true
 Close-InstallLock
@@ -1367,8 +1369,12 @@ $Run.RestorePending = $false
 # A staging failure makes no new journal entry and cannot retire the record.
 if ((Read-LifecycleManifest).Committed) {{ throw 'staging alone committed the record' }}
 function Get-LifecycleState {{ throw 'the unproven gateway was queried while writing the journal' }}
+$checked = Join-Path $LifecycleCloser 'defenseclaw-gateway.exe'
+[void][IO.Directory]::CreateDirectory($LifecycleCloser)
+[IO.File]::WriteAllText($checked, 'checked 1.0.4 gateway')
+$Run.UnprovenCloserSha256 = Get-Sha256 $checked
 $state = Write-LifecycleManifest 'install' '' '1.0.4' (Join-Path $DataDir 'previous.new')
-if ((ConvertTo-Map $state.Bins).Count -ne 0 -or -not $state.UnprovenReplacement) {{ throw 'the journal adopted unproven binaries' }}
+if ((ConvertTo-Map $state.Bins).Count -ne 0 -or -not $state.UnprovenReplacement -or $state.ReplacementCloserSha256 -ne $Run.UnprovenCloserSha256) {{ throw 'the journal adopted unproven binaries or forgot the checked closer' }}
 $target = @{{}}
 foreach ($name in @('defenseclaw-gateway.exe', 'defenseclaw-hook.exe')) {{
     [IO.File]::WriteAllText((Join-Path $BinDir $name), "1.0.4 $name")
@@ -1387,7 +1393,68 @@ if (Test-Path -LiteralPath $LifecycleManifest) {{ throw 'proven replacement kept
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
-@pytest.mark.parametrize("snapshot", ["complete", "incomplete"])
+def test_accepted_empty_record_stops_only_after_checked_closer_and_closed_hold(tmp_path: Path) -> None:
+    result = _txn_harness(tmp_path, _ps1_function("Prepare-UnprovenReplacement") + """
+$Staging = Join-Path $DataDir '.staging'
+$stagedBin = Join-Path $Staging 'bin'
+[void][IO.Directory]::CreateDirectory($stagedBin)
+$stagedGateway = Join-Path $stagedBin 'defenseclaw-gateway.exe'
+[IO.File]::WriteAllText($stagedGateway, 'checked 1.0.4 gateway')
+[IO.File]::WriteAllText((Join-Path $stagedBin 'defenseclaw-hook.exe'), 'checked hook')
+$expected = Get-BinariesState $stagedBin
+$script:gateway = [pscustomobject]@{ Id = 123; Path = (Join-Path $BinDir 'defenseclaw-gateway.exe') }
+$script:stops = 0; $script:holds = 0; $script:completes = 0
+function Start-HookFailModeHold { param($Gateway, $GatewayId, [switch]$Closed)
+    if (-not $Closed -or $GatewayId -ne 123 -or $script:closes -ne 1) { throw 'hooks were not closed before the hold' }
+    $script:holds++; return $true
+}
+function Stop-UnprovenGateway {
+    if ($script:closes -ne 1 -or $script:holds -ne 1) { throw 'the older gateway stopped before hooks were closed and held' }
+    $script:stops++; $script:gateway = $null
+}
+function Stop-HookFailModeHold { throw 'the held closure was abandoned' }
+function Complete-HookFailModeHold {
+    if ($script:gateway) { throw 'the hold completed before the gateway stopped' }
+    $script:completes++; return $true
+}
+Prepare-UnprovenReplacement $stagedGateway $expected
+$closer = Join-Path $LifecycleCloser 'defenseclaw-gateway.exe'
+if ($script:stops -ne 1 -or $script:completes -ne 1 -or (Get-Sha256 $closer) -ne (Get-Sha256 $stagedGateway)) {
+    throw 'the checked closer or stop order was lost'
+}
+$script:gateway = [pscustomobject]@{ Id = 123; Path = (Join-Path $BinDir 'defenseclaw-gateway.exe') }
+[IO.File]::WriteAllText($stagedGateway, 'changed after release verification')
+try { Prepare-UnprovenReplacement $stagedGateway $expected; throw 'changed staged gateway was accepted' } catch {
+    if ($_.Exception.Message -notlike '*staged release changed*') { throw }
+}
+if ($script:stops -ne 1 -or $script:closes -ne 1 -or (Get-Sha256 $closer) -eq (Get-Sha256 $stagedGateway)) {
+    throw 'the changed release touched the working gateway or replaced the checked closer'
+}
+'OK'
+""")
+    out = result.stdout + result.stderr
+    assert result.returncode == 0 and "OK" in out, out
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_unproven_replacement_refuses_a_closer_without_closed_hold_support(tmp_path: Path) -> None:
+    (tmp_path / "hooks").mkdir()
+    script = _ps1_function("Start-HookFailModeHold") + f"\n$DataDir = '{str(tmp_path).replace("'", "''")}'\n" + """
+function Test-HookFailModeRefresh { param($Gateway) return 1 }
+if (Start-HookFailModeHold 'checked-gateway.exe' 123 -Closed) {
+    throw 'the unsupported gateway was accepted as a closed hold'
+}
+'OK'
+"""
+    result = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("snapshot", ["complete", "complete-down", "incomplete"])
 def test_interrupted_replacement_of_an_empty_first_install_record_keeps_the_original_recovery_path(
     tmp_path: Path, snapshot: str
 ) -> None:
@@ -1395,8 +1462,10 @@ def test_interrupted_replacement_of_an_empty_first_install_record_keeps_the_orig
     # Restoring its snapshot brings the older install's unproven binaries
     # back. That must still require acceptance; the journal must not quietly
     # treat its snapshot as a proven first-install baseline.
-    expected_stops = 2 if snapshot == "complete" else 1
-    result = _txn_harness(tmp_path, _ps1_function("Read-Text") + _ps1_function("Resume-InterruptedRun") + f"""
+    expected_stops = 1 if snapshot == "complete" else 0
+    expected_closes = 2 if snapshot.startswith("complete") else 0
+    result = _txn_harness(tmp_path, _ps1_function("Read-Text") +
+        _ps1_function("Stop-UnprovenRecoveryGateway") + _ps1_function("Resume-InterruptedRun") + f"""
 $Venv = Join-Path $DataDir '.venv'
 $InstallerDir = Join-Path $DataDir 'installer'
 $Staging = Join-Path $DataDir '.staging'
@@ -1409,12 +1478,29 @@ function Write-Warn {{ param($Message) }}
 function Write-Info {{ param($Message) }}
 function Stop-Gateway {{ throw 'the unproven gateway was asked to run its stop command' }}
 function Start-RecoveredGateway {{ $script:starts++ }}
-function Stop-UnprovenGateway {{ $script:stops++; $script:gateway = $null }}
+function Stop-UnprovenGateway {{
+    if ($script:closes -ne 1 -or $script:holds -ne 1) {{ throw 'recovery stopped before closing and holding hooks' }}
+    $script:stops++; $script:gateway = $null
+}}
+function Close-AllHooks {{ param($Gateways)
+    if ((Get-Sha256 $Gateways[0]) -ne $Run.UnprovenCloserSha256) {{ throw 'the recovery closer was not checked' }}
+    $script:closes++; return $true
+}}
+function Start-HookFailModeHold {{ param($Gateway, $GatewayId, [switch]$Closed)
+    if (-not $Closed -or $GatewayId -ne 123 -or $script:closes -ne 1) {{ throw 'recovery hold was not closed' }}
+    $script:holds++; return $true
+}}
+function Complete-HookFailModeHold {{ if ($script:gateway) {{ throw 'recovery hold ended before the stop' }}; return $true }}
+function Stop-HookFailModeHold {{ throw 'recovery abandoned the hook hold' }}
 function Restore-Slot {{ param($Slot) Remove-Tree $Slot; return (Join-Path $DataDir '.failed') }}
 function Undo-Snapshot {{ param($Slot) Remove-Tree $Slot }}
-$script:starts = 0; $script:stops = 0
+$script:starts = 0; $script:stops = 0; $script:closes = 0; $script:holds = 0
 [IO.File]::WriteAllText((Join-Path $BinDir 'defenseclaw-gateway.exe'), 'older gateway')
 [IO.File]::WriteAllText((Join-Path $BinDir 'defenseclaw-hook.exe'), 'older hook')
+$checked = Join-Path $LifecycleCloser 'defenseclaw-gateway.exe'
+[void][IO.Directory]::CreateDirectory($LifecycleCloser)
+[IO.File]::WriteAllText($checked, 'checked 1.0.4 gateway')
+$Run.UnprovenCloserSha256 = Get-Sha256 $checked
 $Run.UnprovenReplacement = [pscustomobject]@{{ Bins = @{{}}; Config = ''; ExternalConfig = '';
     ExternalConfigSha256 = ''; HookFailModes = ''; BinDirProtected = $false; SetupRoot = '' }}
 $Run.UnprovenGatewayWasRunning = $true
@@ -1424,12 +1510,37 @@ if (-not $state.UnprovenReplacement -or -not $state.ReplacementGatewayWasRunning
 $Run.UnprovenReplacement = $null; $Run.UnprovenGatewayWasRunning = $false
 [void][IO.Directory]::CreateDirectory($slot)
 [IO.File]::WriteAllText((Join-Path $slot 'VERSION'), '1.0.3')
-if ('{snapshot}' -eq 'complete') {{ [IO.File]::WriteAllText((Join-Path $slot 'COMPLETE'), '') }}
+if ('{snapshot}' -like 'complete*') {{ [IO.File]::WriteAllText((Join-Path $slot 'COMPLETE'), '') }}
+if ('{snapshot}' -eq 'complete') {{ $script:gateway = [pscustomobject]@{{ Id = 123; Path = (Join-Path $BinDir 'defenseclaw-gateway.exe') }} }}
 $AcceptCurrentInstall = $true; $Rollback = $false
 Resume-InterruptedRun
 if (-not $Run.UnprovenReplacement -or -not $Run.UnprovenGatewayWasRunning) {{ throw 'recovery adopted or forgot the unproven previous state' }}
 if (-not (Test-Path -LiteralPath $LifecycleManifest) -or (Test-Path -LiteralPath $slot)) {{ throw 'recovery dropped the journal or kept the consumed snapshot' }}
 if ($script:starts -ne 0 -or $script:stops -ne {expected_stops}) {{ throw 'recovery started the unproven gateway or failed to stop it' }}
+if ($script:closes -ne {expected_closes} -or $script:holds -ne {expected_stops}) {{ throw 'recovery did not close before stopping and again after restoring old hook files' }}
+'OK'
+""")
+    out = result.stdout + result.stderr
+    assert result.returncode == 0 and "OK" in out, out
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_interrupted_replacement_refuses_to_stop_without_its_recorded_closer(tmp_path: Path) -> None:
+    result = _txn_harness(tmp_path, _ps1_function("Stop-UnprovenRecoveryGateway") + """
+$Staging = Join-Path $DataDir '.staging'
+$script:gateway = [pscustomobject]@{ Id = 123; Path = (Join-Path $BinDir 'defenseclaw-gateway.exe') }
+$script:stops = 0
+function Stop-UnprovenGateway { $script:stops++; $script:gateway = $null }
+$manifest = [pscustomobject]@{ ReplacementCloserSha256 = ('a' * 64) }
+try {
+    Stop-UnprovenRecoveryGateway $manifest (Join-Path $DataDir 'previous.new')
+    throw 'a missing checked closer was accepted'
+} catch {
+    if ($_.Exception.Message -notlike '*checked release hook closer is missing or changed*') { throw }
+}
+if (-not $script:gateway -or $script:stops -ne 0 -or $script:closes -ne 0) {
+    throw 'recovery stopped the working gateway before proving a closer'
+}
 'OK'
 """)
     out = result.stdout + result.stderr

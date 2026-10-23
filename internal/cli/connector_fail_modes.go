@@ -94,9 +94,6 @@ func runConnectorRefreshFailModes(cmd *cobra.Command, _ []string) error {
 		if connectorFlagJSON {
 			return errors.New("connector refresh-fail-modes: --hold-until-exit does not take --json")
 		}
-		if refreshFailModesClosed {
-			return errors.New("connector refresh-fail-modes: --closed does not take --hold-until-exit")
-		}
 		if refreshFailModesHoldPID < 0 || refreshFailModesHoldTimeout <= 0 {
 			return errors.New("connector refresh-fail-modes: --hold-until-exit takes a process ID and --hold-timeout a positive time")
 		}
@@ -124,7 +121,7 @@ func runConnectorRefreshFailModes(cmd *cobra.Command, _ []string) error {
 }
 
 // holdConnectorFailModes is refresh-fail-modes --hold-until-exit: the
-// refresh under the sidecar lock held until the gateway exits
+// refresh under the sidecar lock is held until the gateway exits
 // (connector.HoldHookFailModes). A managed install is left alone and has
 // nothing to hold.
 func holdConnectorFailModes(cmd *cobra.Command, hookDir string, mode func(string) string, managedInstall bool) error {
