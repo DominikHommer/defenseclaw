@@ -139,11 +139,9 @@ func (c *ClaudeCodeConnector) checkAgentSettings(opts SetupOpts) error {
 	if err := claudeCodeSettingsParseable(settingsPath); err != nil {
 		return refuseForAgentConfig(err)
 	}
-	// Settings this read cannot inspect are left to the registration
-	// verifier, as before.
 	sources, err := inspectClaudeCodeUserSources(opts)
 	if err != nil {
-		return nil
+		return refuseForAgentConfig(err)
 	}
 	if disabled, source, err := effectiveClaudeCodeUserHooksDisabled(sources); err == nil && disabled {
 		return refuseForAgentConfig(fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
@@ -163,7 +161,7 @@ func (c *ClaudeCodeConnector) checkAgentSettings(opts SetupOpts) error {
 func claudeCodeSettingsParseable(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil || len(bytes.TrimSpace(data)) == 0 {
-		return nil // a missing or unreadable file is reported by the patch
+		return nil // inspectClaudeCodeUserSources handles unreadable files
 	}
 	var settings map[string]interface{}
 	if err := json.Unmarshal(data, &settings); err != nil {

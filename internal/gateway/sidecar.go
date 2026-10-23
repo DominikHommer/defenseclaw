@@ -5920,15 +5920,15 @@ type multiConnectorSetupTransaction struct {
 	// agentSettingsRefused maps each connector whose agent's own settings
 	// refused DefenseClaw hooks to the reason, which names the fix.
 	agentSettingsRefused map[string]string
+	// notStartedReasons maps each connector this start skipped to the reason,
+	// so setup and status name it instead of only a roster mismatch
+	// (GAP-0620).
+	notStartedReasons map[string]string
 	// keptRegistrations lists the agentSettingsRefused connectors that still
 	// hold their earlier registration. They stay in the saved active set, so a
 	// later per-connector disable removes them through the non-fatal
 	// set-difference teardown instead of the orphan reconciliation (GAP-0578).
 	keptRegistrations []string
-	// notStartedReasons maps each connector this start skipped to the reason,
-	// so setup and status name it instead of only a roster mismatch
-	// (GAP-0620).
-	notStartedReasons map[string]string
 	// publishSetupProgress reports each connector's setup step in guardrail
 	// health. Only the boot path sets it: a running guardrail stays running.
 	publishSetupProgress bool
@@ -6149,8 +6149,8 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 		transaction.admissionRefused = nil
 		transaction.releaseRefused = false
 		transaction.agentSettingsRefused = nil
-		transaction.keptRegistrations = nil
 		transaction.notStartedReasons = nil
+		transaction.keptRegistrations = nil
 	}
 	registrations := make([]connectorRegistration, 0, len(conns))
 	for _, conn := range conns {
@@ -6244,10 +6244,10 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 				transaction.agentSettingsRefused = map[string]string{}
 			}
 			transaction.agentSettingsRefused[registration.conn.Name()] = err.Error()
+			transaction.noteNotStarted(registration.conn.Name(), err)
 			if strings.TrimSpace(previousLock.Connector) != "" {
 				transaction.keptRegistrations = append(transaction.keptRegistrations, registration.conn.Name())
 			}
-			transaction.noteNotStarted(registration.conn.Name(), err)
 			continue
 		}
 		if err != nil {

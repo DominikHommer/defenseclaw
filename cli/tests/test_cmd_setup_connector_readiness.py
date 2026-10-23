@@ -1509,6 +1509,52 @@ def test_setup_refuses_agent_settings_before_it_changes_anything(monkeypatch, tm
     assert "defenseclaw-gateway restart" not in err
 
 
+@pytest.mark.parametrize(
+    ("connector", "reason", "cause"),
+    [
+        (
+            "claudecode",
+            "inspect Claude Code user settings /home/u/.claude/settings.json: settings source is a link "
+            "to /private/tmp/x.json, outside your home folder; replace the link",
+            "outside your home folder",
+        ),
+        (
+            "claudecode",
+            "inspect Claude Code user settings /home/u/.claude/settings.json: settings source is a link "
+            "that cannot be followed: no such file or directory",
+            "cannot be followed",
+        ),
+        (
+            "codex",
+            "Codex config /home/u/.codex/config.toml cannot be read: permission denied; fix the file",
+            "permission denied",
+        ),
+    ],
+)
+def test_setup_preserves_unreadable_settings_cause_without_restarting(
+    monkeypatch, tmp_path: Path, capsys, connector: str, reason: str, cause: str,
+) -> None:
+    calls = _gateway_check_agent_settings(
+        monkeypatch,
+        {"connector": connector, "action": "check-agent-settings", "refused": True, "reason": reason},
+    )
+    touched: list[str] = []
+    monkeypatch.setattr(
+        cmd_setup, "_check_connector_version_supported_for_setup", lambda *_a, **_k: touched.append("version")
+    )
+    monkeypatch.setattr(cmd_setup, "_capture_setup_config_snapshot", lambda *_a, **_k: touched.append("snapshot"))
+    monkeypatch.setattr(cmd_setup, "_restart_services", lambda *_a, **_k: touched.append("restart"))
+
+    app = SimpleNamespace(cfg=_config(tmp_path))
+    assert cmd_setup._apply_hook_connector_setup(app, connector=connector, mode="action", restart=True) is False
+    assert touched == []
+    assert calls and calls[0][1:5] == ["connector", "check-agent-settings", "--connector", connector]
+    message = capsys.readouterr().err
+    assert reason in message
+    assert cause in message
+    assert "Setup changed nothing and the gateway keeps running as it was" in message
+
+
 def test_setup_continues_when_the_agent_settings_let_hooks_run(monkeypatch, tmp_path: Path) -> None:
     """GAP-0615: usable settings, an older gateway without the check, or a
     connector without such settings change nothing about setup."""

@@ -23,7 +23,7 @@ import (
 // hookAuditRowBytesBudget bounds the audit_events bytes (the sum of every
 // column of the rows one Claude Code PreToolUse writes) of a benign hook
 // decision in a long single-session flood. At fc6794381d a decision wrote
-// about 42 KB: each native row stored its body three times, in the signed
+// about 44 KB: each native row stored its body three times, in the signed
 // envelope, payload_json and an identical structured_json (GAP-0614: audit.db
 // grew 79.7 MiB to 1,556.6 MiB over 18,000 decisions on Windows).
 const hookAuditRowBytesBudget = 42 << 10
@@ -32,10 +32,10 @@ const hookAuditRowBytesBudget = 42 << 10
 // input: the hook body is not stored whole in any row.
 const hookAuditMaxRowBytes = 24 << 10
 
-// TestClaudeCodePreToolUseAuditRowsStoreEachBodyOnce drives the real Claude
+// TestClaudeCodePreToolUseAuditRowsBounded drives the real Claude
 // Code hook handler, audit store and v8 runtime with one session, as the
 // T6Z-08 flood did, and measures what each decision adds to audit_events.
-func TestClaudeCodePreToolUseAuditRowsStoreEachBodyOnce(t *testing.T) {
+func TestClaudeCodePreToolUseAuditRowsBounded(t *testing.T) {
 	installCorrelationHMACForTest()
 	installDefaultProfileConnector(t, "claudecode")
 	fixture := newSidecarRuntimeFixture(t, true)
