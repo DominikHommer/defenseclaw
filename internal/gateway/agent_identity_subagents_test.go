@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -138,7 +139,7 @@ func TestAgentIdentityRecorderOrdersSubagentsByFirstSighting(t *testing.T) {
 			if got := r.subagents[subSessionKey(agentID, firstID)]; !got.FirstSeen.Equal(t0) || !got.LastSeen.Equal(wantLast) {
 				t.Errorf("first sub-agent sightings = %s..%s; want %s..%s", got.FirstSeen, got.LastSeen, t0, wantLast)
 			}
-			pending, _ := r.snapshot()
+			pending, _, _ := r.snapshot()
 			if got := pending[agentID]; got.SubagentsSeen != 2 || got.LastSubagentID != lastID {
 				t.Errorf("buffered identity = %+v; want two sub-agents, last %s", got, lastID)
 			}
@@ -153,6 +154,86 @@ func TestAgentIdentityRecorderOrdersSubagentsByFirstSighting(t *testing.T) {
 			rows, _, err := store.ListAgentIdentities(context.Background(), inventory.AgentIdentityFilter{})
 			if err != nil || len(rows) != 1 || rows[0].SubagentsSeen != 2 || rows[0].LastSubagentID != lastID {
 				t.Errorf("stored identities = %+v, err %v; want two sub-agents, last %s", rows, err, lastID)
+			}
+		})
+	}
+}
+
+// A failed write leaves sightings in memory while the store still has the
+// previous batch. The API must reconcile instance IDs and original first
+// sightings before overlaying the buffered count and newest ID.
+func TestAgentIdentityAPIReconcilesBufferedSubagentsAfterFailedWrite(t *testing.T) {
+	agentIdentityTestSetup(t)
+	previous := sharedAgentIdentities
+	t.Cleanup(func() { sharedAgentIdentities = previous })
+	t0 := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
+	const agentID, firstID, lastID, middleID, newID = "agt-00000000000000c1", "ais-00000000000000a1", "ais-00000000000000b2", "ais-00000000000000c3", "ais-00000000000000d4"
+	for _, tc := range []struct {
+		name        string
+		storedFirst time.Time
+		buffered    inventory.AgentIdentitySubagent
+		extra       []inventory.AgentIdentitySubagent
+		wantCount   int64
+		wantLast    string
+	}{
+		{"resumed older instance", t0, inventory.AgentIdentitySubagent{AgentID: agentID, InstanceID: firstID, FirstSeen: t0.Add(2 * time.Second), LastSeen: t0.Add(2 * time.Second)}, nil, 2, lastID},
+		{"new instance before stored newest", t0, inventory.AgentIdentitySubagent{AgentID: agentID, InstanceID: middleID, FirstSeen: t0.Add(500 * time.Millisecond), LastSeen: t0.Add(2 * time.Second)}, nil, 3, lastID},
+		{"new instance after stored newest", t0, inventory.AgentIdentitySubagent{AgentID: agentID, InstanceID: newID, FirstSeen: t0.Add(2 * time.Second), LastSeen: t0.Add(2 * time.Second)}, nil, 3, newID},
+		{"earlier first sighting corrects stored newest", t0.Add(3 * time.Second), inventory.AgentIdentitySubagent{AgentID: agentID, InstanceID: firstID, FirstSeen: t0, LastSeen: t0.Add(3 * time.Second)}, nil, 2, lastID},
+		{"mixed resumed and new older instances", t0, inventory.AgentIdentitySubagent{AgentID: agentID, InstanceID: firstID, FirstSeen: t0.Add(2 * time.Second), LastSeen: t0.Add(2 * time.Second)},
+			[]inventory.AgentIdentitySubagent{{AgentID: agentID, InstanceID: middleID, FirstSeen: t0.Add(500 * time.Millisecond), LastSeen: t0.Add(2 * time.Second)}}, 3, lastID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			path := filepath.Join(t.TempDir(), "inventory.db")
+			store, err := inventory.NewInventoryStore(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			identity := inventory.AgentIdentityRecord{AgentID: agentID, UserID: "u1", Connector: "codex", MachineHash: "m", FirstSeen: t0, LastSeen: t0.Add(time.Second)}
+			stored := []inventory.AgentIdentitySubagent{
+				{AgentID: agentID, InstanceID: firstID, FirstSeen: tc.storedFirst, LastSeen: tc.storedFirst},
+				{AgentID: agentID, InstanceID: lastID, FirstSeen: t0.Add(time.Second), LastSeen: t0.Add(time.Second)},
+			}
+			if err := store.UpsertAgentIdentityBatch(ctx, []inventory.AgentIdentityRecord{identity}, nil, stored); err != nil {
+				t.Fatal(err)
+			}
+			r := &agentIdentityRecorder{pending: map[string]*inventory.AgentIdentityRecord{
+				agentID: {AgentID: agentID, UserID: "u1", Connector: "codex", MachineHash: "m", FirstSeen: t0.Add(2 * time.Second), LastSeen: t0.Add(3 * time.Second)},
+			}}
+			r.noteSubagentLocked(tc.buffered)
+			for _, sub := range tc.extra {
+				r.noteSubagentLocked(sub)
+			}
+			r.setStoreSource(func() *inventory.InventoryStore { return store }, nil, nil)
+			sharedAgentIdentities = r
+			// The trigger rejects writes only; listing can still read the
+			// persisted rows and must merge the buffered sighting correctly.
+			if _, err := db.ExecContext(ctx, `CREATE TRIGGER fail_identity_write BEFORE INSERT ON agent_identities BEGIN SELECT RAISE(FAIL, 'forced write failure'); END`); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.flush(ctx, store); err == nil {
+				t.Fatal("expected the inventory write to fail")
+			}
+			row := listedAgentIdentityRows(t)[agentID]
+			if row == nil || row["subagents_seen"] != float64(tc.wantCount) || row["last_subagent_id"] != tc.wantLast {
+				t.Errorf("API row after failed write = %v; want count %d, newest %s", row, tc.wantCount, tc.wantLast)
+			}
+			if _, err := db.ExecContext(ctx, `DROP TRIGGER fail_identity_write`); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.flush(ctx, store); err != nil {
+				t.Fatal(err)
+			}
+			row = listedAgentIdentityRows(t)[agentID]
+			if row == nil || row["subagents_seen"] != float64(tc.wantCount) || row["last_subagent_id"] != tc.wantLast {
+				t.Errorf("API row after recovery = %v; want count %d, newest %s", row, tc.wantCount, tc.wantLast)
 			}
 		})
 	}

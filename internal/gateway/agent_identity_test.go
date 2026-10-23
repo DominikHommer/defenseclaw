@@ -191,7 +191,7 @@ func TestHookAgentIdentityIgnoresClaimsAndKeysInstances(t *testing.T) {
 	if again.IdentityID != want || again.AgentInstanceID != first.AgentInstanceID {
 		t.Fatalf("claims moved the identity: %q/%q, want %q/%q", again.IdentityID, again.AgentInstanceID, want, first.AgentInstanceID)
 	}
-	if _, hints := sharedAgentIdentities.snapshot(); hints[want] != "/srv/elsewhere/.claude" {
+	if _, hints, _ := sharedAgentIdentities.snapshot(); hints[want] != "/srv/elsewhere/.claude" {
 		t.Fatalf("install hint = %q", hints[want])
 	}
 
@@ -334,7 +334,7 @@ func TestAgentIdentitySessionsSurviveRestartAndSkipDoctorProbe(t *testing.T) {
 		ConnectorName: "claudecode", SessionID: doctorProbeSessionID, HookEventName: "SessionStart",
 		Payload: map[string]interface{}{},
 	})
-	if pending, _ := sharedAgentIdentities.snapshot(); probe.IdentityID == "" || pending[probe.IdentityID].AgentID != "" {
+	if pending, _, _ := sharedAgentIdentities.snapshot(); probe.IdentityID == "" || pending[probe.IdentityID].AgentID != "" {
 		t.Fatalf("doctor probe recorded identity %q: %+v", probe.IdentityID, pending[probe.IdentityID])
 	}
 }
@@ -384,7 +384,7 @@ func TestCodexTranscriptlessThreadIsNotASession(t *testing.T) {
 	}
 	chat := hook("thread-chat", "/home/erin/.codex/sessions/rollout.jsonl")
 	hook("thread-helper", nil)
-	pending, _ := sharedAgentIdentities.snapshot()
+	pending, _, _ := sharedAgentIdentities.snapshot()
 	if rec := pending[chat.IdentityID]; rec.SessionsSeen != 1 || rec.LastSessionID != "thread-chat" {
 		t.Fatalf("recorded %+v, want only the chat counted", rec)
 	}

@@ -31,7 +31,7 @@ var agentIdentitiesDDL = []string{
 	// The sub-agent instances (ais-) an agent identity has counted, so one
 	// that hooks again after a gateway restart is not counted twice.
 	`CREATE TABLE IF NOT EXISTS agent_identity_subagents (agent_id TEXT NOT NULL, instance_id TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, PRIMARY KEY (agent_id, instance_id)) WITHOUT ROWID`,
-	`CREATE INDEX IF NOT EXISTS idx_agent_identity_subagents_last_seen ON agent_identity_subagents(last_seen)`,
+	`CREATE INDEX IF NOT EXISTS idx_agent_identity_subagents_first_seen ON agent_identity_subagents(agent_id, first_seen DESC, instance_id DESC)`,
 	// The records a prune keeps aside for the gateway's 1.0.3 assignment
 	// bridge (retireLegacyAgentIdentities); never listed.
 	`CREATE TABLE IF NOT EXISTS agent_identities_retired (agent_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, user_name TEXT, connector TEXT NOT NULL, install_fp TEXT, machine_hash TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, last_session_id TEXT, sessions_seen INTEGER NOT NULL DEFAULT 0)`,
@@ -88,8 +88,8 @@ type AgentIdentityRecord struct {
 }
 
 // AgentIdentitySubagent is the first and last sightings of a sub-agent
-// instance in a batch. FirstSeen orders distinct instances; LastSeen keeps
-// an active instance in the deduplication table during retention.
+// instance in a batch. FirstSeen orders distinct instances; LastSeen records
+// their latest activity. Both remain stored while their agent identity exists.
 type AgentIdentitySubagent struct {
 	AgentID    string
 	InstanceID string
@@ -375,13 +375,12 @@ func (s *InventoryStore) UpsertAgentIdentityBatch(
 }
 
 // upsertAgentIdentitySubagents counts each sub-agent instance of a stored
-// agent identity once, oldest first sighting first, so the last one counted
-// is the newest distinct instance. A sub-agent of an identity the store has
-// no row for is dropped: the hooks that report it record the identity in the
+// agent identity once. The newest is selected from original first sightings,
+// including instances written in earlier batches. A sub-agent of an identity
+// the store has no row for is dropped: its hooks record the identity in the
 // same batch.
 func upsertAgentIdentitySubagents(ctx context.Context, tx *sql.Tx, subagents []AgentIdentitySubagent) error {
-	subagents = slices.Clone(subagents)
-	slices.SortStableFunc(subagents, func(a, b AgentIdentitySubagent) int { return a.FirstSeen.Compare(b.FirstSeen) })
+	updated := make(map[string]struct{})
 	for _, sub := range subagents {
 		if sub.AgentID == "" || sub.InstanceID == "" {
 			continue
@@ -412,21 +411,171 @@ func upsertAgentIdentitySubagents(ctx context.Context, tx *sql.Tx, subagents []A
 				WHERE agent_id = ? AND instance_id = ?`, firstAt, lastAt, sub.AgentID, sub.InstanceID); err != nil {
 				return err
 			}
-			continue
+		} else {
+			if _, err := tx.ExecContext(ctx, `UPDATE agent_identities SET subagents_seen = subagents_seen + 1
+				WHERE agent_id = ?`, sub.AgentID); err != nil {
+				return err
+			}
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE agent_identities SET subagents_seen = subagents_seen + 1, last_subagent_id = ?
-			WHERE agent_id = ?`, sub.InstanceID, sub.AgentID); err != nil {
+		updated[sub.AgentID] = struct{}{}
+	}
+	for agentID := range updated {
+		if _, err := tx.ExecContext(ctx, `UPDATE agent_identities SET last_subagent_id =
+			(SELECT instance_id FROM agent_identity_subagents WHERE agent_id = ?
+				ORDER BY first_seen DESC, instance_id DESC LIMIT 1)
+			WHERE agent_id = ?`, agentID, agentID); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// PruneAgentIdentitySessions deletes orphaned and expired deduplication
-// rows of sessions and sub-agents. A resumed chat refreshes last_seen, so it
-// stays deduplicated while active; sessions_seen and subagents_seen remain
-// cumulative counts after rows expire. A zero cutoff deletes only orphaned
-// rows.
+// AgentIdentitySubagentOverlay is the part of a buffered identity row that
+// must be added to its stored row. LastSubagentID is the newest instance
+// across both the store and the buffer, ordered by original first sighting.
+type AgentIdentitySubagentOverlay struct {
+	NewCount       int64
+	LastSubagentID string
+}
+
+// ReconcileAgentIdentitySubagents compares a failed write's buffered
+// instances with their retained keys. It looks up only the buffered keys and
+// the newest other stored key per identity, so a long-lived identity does not
+// make an API read scan its entire sub-agent history.
+func (s *InventoryStore) ReconcileAgentIdentitySubagents(
+	ctx context.Context, buffered []AgentIdentitySubagent,
+) (map[string]AgentIdentitySubagentOverlay, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("inventory store: not open")
+	}
+	if s.legacySchema || len(buffered) == 0 {
+		return nil, nil
+	}
+	if err := ensureAgentIdentitiesTable(ctx, s.db); err != nil {
+		return nil, err
+	}
+	type sighting struct {
+		first  time.Time
+		stored bool
+	}
+	byAgent := make(map[string]map[string]*sighting)
+	unique := make([]AgentIdentitySubagent, 0, len(buffered))
+	for _, sub := range buffered {
+		if sub.AgentID == "" || sub.InstanceID == "" {
+			continue
+		}
+		first := sub.FirstSeen
+		if first.IsZero() || !sub.LastSeen.IsZero() && first.After(sub.LastSeen) {
+			first = sub.LastSeen
+		}
+		instances := byAgent[sub.AgentID]
+		if instances == nil {
+			instances = make(map[string]*sighting)
+			byAgent[sub.AgentID] = instances
+		}
+		if known := instances[sub.InstanceID]; known != nil {
+			if first.Before(known.first) {
+				known.first = first
+			}
+			continue
+		}
+		instances[sub.InstanceID] = &sighting{first: first}
+		unique = append(unique, sub)
+	}
+	// SQLite installations can have a 999-variable limit; each pair uses two.
+	const pairsPerQuery = 400
+	for start := 0; start < len(unique); start += pairsPerQuery {
+		chunk := unique[start:min(start+pairsPerQuery, len(unique))]
+		args := make([]any, 0, 2*len(chunk))
+		for _, sub := range chunk {
+			args = append(args, sub.AgentID, sub.InstanceID)
+		}
+		query := `SELECT agent_id, instance_id, first_seen FROM agent_identity_subagents
+			WHERE (agent_id, instance_id) IN (` + strings.TrimSuffix(strings.Repeat(`(?,?),`, len(chunk)), `,`) + `)`
+		rows, err := s.queryDB(ctx, "agent_identities.subagents_buffered", query, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var agentID, instanceID, firstAt string
+			if err := rows.Scan(&agentID, &instanceID, &firstAt); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			first, err := time.Parse(agentIdentityTimeLayout, firstAt)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			known := byAgent[agentID][instanceID]
+			known.stored = true
+			if first.Before(known.first) || known.first.IsZero() {
+				known.first = first
+			}
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+	overlays := make(map[string]AgentIdentitySubagentOverlay, len(byAgent))
+	for agentID, instances := range byAgent {
+		var newestID string
+		var newestAt time.Time
+		choose := func(id string, first time.Time) {
+			if newestID == "" || first.After(newestAt) || first.Equal(newestAt) && id > newestID {
+				newestID, newestAt = id, first
+			}
+		}
+		overlay := AgentIdentitySubagentOverlay{}
+		for id, sub := range instances {
+			if !sub.stored {
+				overlay.NewCount++
+			}
+			choose(id, sub.first)
+		}
+		// At most len(instances) leading stored rows can belong to the
+		// buffered keys. The next one is the newest unaffected instance.
+		rows, err := s.queryDB(ctx, "agent_identities.subagents_newest", `SELECT instance_id, first_seen
+			FROM agent_identity_subagents WHERE agent_id = ? ORDER BY first_seen DESC, instance_id DESC LIMIT ?`,
+			agentID, len(instances)+1)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id, firstAt string
+			if err := rows.Scan(&id, &firstAt); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if _, buffered := instances[id]; buffered {
+				continue
+			}
+			first, err := time.Parse(agentIdentityTimeLayout, firstAt)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			choose(id, first)
+			break
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
+		overlay.LastSubagentID = newestID
+		overlays[agentID] = overlay
+	}
+	return overlays, nil
+}
+
+// PruneAgentIdentitySessions deletes expired session deduplication rows and
+// orphaned session and sub-agent rows. An identity keeps every counted
+// sub-agent key and its first sighting until the identity itself is removed;
+// otherwise a resumed older instance would be counted again and become the
+// newest. A zero cutoff deletes only orphaned rows.
 func (s *InventoryStore) PruneAgentIdentitySessions(ctx context.Context, cutoff time.Time) (int64, error) {
 	if s == nil || s.db == nil {
 		return 0, errors.New("inventory store: not open")
@@ -439,11 +588,17 @@ func (s *InventoryStore) PruneAgentIdentitySessions(ctx context.Context, cutoff 
 		if err := ensureAgentIdentitiesTable(ctx, tx); err != nil {
 			return err
 		}
-		for _, table := range []string{"agent_identity_sessions", "agent_identity_subagents"} {
-			result, err := tx.ExecContext(ctx, `DELETE FROM `+table+`
-				WHERE last_seen < ? OR NOT EXISTS (SELECT 1 FROM agent_identities
-					WHERE agent_identities.agent_id = `+table+`.agent_id)`,
-				formatAgentIdentityTime(cutoff))
+		for _, deletion := range []struct {
+			query string
+			args  []any
+		}{
+			{`DELETE FROM agent_identity_sessions WHERE last_seen < ? OR NOT EXISTS
+				(SELECT 1 FROM agent_identities WHERE agent_identities.agent_id = agent_identity_sessions.agent_id)`,
+				[]any{formatAgentIdentityTime(cutoff)}},
+			{`DELETE FROM agent_identity_subagents WHERE NOT EXISTS
+				(SELECT 1 FROM agent_identities WHERE agent_identities.agent_id = agent_identity_subagents.agent_id)`, nil},
+		} {
+			result, err := tx.ExecContext(ctx, deletion.query, deletion.args...)
 			if err != nil {
 				return err
 			}

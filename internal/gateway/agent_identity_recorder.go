@@ -290,9 +290,10 @@ func (r *agentIdentityRecorder) restore(
 	}
 }
 
-// snapshot copies the buffered rows and hints for the API. A buffered row
-// counts the sub-agents buffered for it.
-func (r *agentIdentityRecorder) snapshot() (map[string]inventory.AgentIdentityRecord, map[string]string) {
+// snapshot copies buffered rows, hints and distinct sub-agent sightings for
+// the API. A buffered row counts its sub-agents until the store reconciles
+// those sightings with instances already persisted there.
+func (r *agentIdentityRecorder) snapshot() (map[string]inventory.AgentIdentityRecord, map[string]string, []inventory.AgentIdentitySubagent) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	pending := make(map[string]inventory.AgentIdentityRecord, len(r.pending))
@@ -300,7 +301,9 @@ func (r *agentIdentityRecorder) snapshot() (map[string]inventory.AgentIdentityRe
 		pending[id] = *rec
 	}
 	newest := map[string]time.Time{}
+	subagents := make([]inventory.AgentIdentitySubagent, 0, len(r.subagents))
 	for _, sub := range r.subagents {
+		subagents = append(subagents, sub)
 		rec, ok := pending[sub.AgentID]
 		if !ok {
 			continue
@@ -316,7 +319,7 @@ func (r *agentIdentityRecorder) snapshot() (map[string]inventory.AgentIdentityRe
 	for id, hint := range r.hints {
 		hints[id] = hint
 	}
-	return pending, hints
+	return pending, hints, subagents
 }
 
 // flush writes the buffered batch to store.
@@ -599,12 +602,29 @@ func (a *APIServer) handleAgentIdentities(w http.ResponseWriter, r *http.Request
 			fmt.Fprintf(os.Stderr, "[sidecar] agent identity flush failed: %v\n", err)
 		}
 	}
-	pending, hints := sharedAgentIdentities.snapshot()
+	// Keep a successful ticker flush from moving the buffered sightings into
+	// the store between this snapshot and the reconciliation below.
+	sharedAgentIdentities.flushMu.Lock()
+	pending, hints, bufferedSubagents := sharedAgentIdentities.snapshot()
 	var stored []inventory.AgentIdentityRecord
 	start, total, persisted := 0, 0, false
 	if store := sharedAgentIdentities.store(); store != nil {
 		var err error
+		var overlays map[string]inventory.AgentIdentitySubagentOverlay
+		if overlays, err = store.ReconcileAgentIdentitySubagents(r.Context(), bufferedSubagents); err != nil {
+			sharedAgentIdentities.flushMu.Unlock()
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "agent identities unavailable"})
+			return
+		}
+		for id, overlay := range overlays {
+			if rec, ok := pending[id]; ok {
+				rec.SubagentsSeen = overlay.NewCount
+				rec.LastSubagentID = overlay.LastSubagentID
+				pending[id] = rec
+			}
+		}
 		if stored, start, total, err = storedAgentIdentityWindow(r.Context(), store, filter, offset, limit, pending); err != nil {
+			sharedAgentIdentities.flushMu.Unlock()
 			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "agent identities unavailable"})
 			return
 		}
@@ -618,6 +638,7 @@ func (a *APIServer) handleAgentIdentities(w http.ResponseWriter, r *http.Request
 	}
 	// rows begins at merged row start.
 	rows := mergeAgentIdentityRows(stored, pending, hints, filter)
+	sharedAgentIdentities.flushMu.Unlock()
 	from := offset - start
 	page := rows[min(from, len(rows)):min(from+limit, len(rows))]
 	next := ""
@@ -739,6 +760,8 @@ func mergeAgentIdentityRows(
 		if buffered.UPN != "" {
 			rec.UPN = buffered.UPN
 		}
+		// With a store, buffered.SubagentsSeen contains only instance IDs
+		// absent from it and LastSubagentID was ordered against its keys.
 		rec.SubagentsSeen += buffered.SubagentsSeen
 		if buffered.LastSubagentID != "" {
 			rec.LastSubagentID = buffered.LastSubagentID

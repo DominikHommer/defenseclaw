@@ -83,13 +83,13 @@ func TestAgentIdentitiesRecordUPNAndSubagentsAcrossTheV9Upgrade(t *testing.T) {
 		t.Fatalf("sub-agent rows of an unknown identity = %d, err %v", orphans, err)
 	}
 
-	// The retention sweep expires the sub-agent deduplication rows with the
-	// session ones; the count stays cumulative.
+	// A retained identity keeps every sub-agent deduplication row, including
+	// one whose last hook preceded the retention cutoff.
 	if _, err := st.PruneAgentIdentitySessions(ctx, t0.Add(30*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	var kept []string
-	list, err := st.db.QueryContext(ctx, `SELECT instance_id FROM agent_identity_subagents`)
+	list, err := st.db.QueryContext(ctx, `SELECT instance_id FROM agent_identity_subagents ORDER BY instance_id`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,8 +101,8 @@ func TestAgentIdentitiesRecordUPNAndSubagentsAcrossTheV9Upgrade(t *testing.T) {
 		kept = append(kept, id)
 	}
 	_ = list.Close()
-	if len(kept) != 1 || kept[0] != "ais-00000000000000a1" {
-		t.Fatalf("sub-agent rows after the prune = %v, want only the one seen again", kept)
+	if len(kept) != 2 || kept[0] != "ais-00000000000000a1" || kept[1] != "ais-00000000000000b2" {
+		t.Fatalf("sub-agent rows after the prune = %v, want both counted instances", kept)
 	}
 	if rows, _, err = st.ListAgentIdentities(ctx, AgentIdentityFilter{}); err != nil || rows[0].SubagentsSeen != 2 {
 		t.Fatalf("count after the prune = %+v, err %v; want 2", rows, err)
@@ -143,7 +143,76 @@ func TestAgentIdentitySubagentsOrderByFirstSeenAndRetainByLastSeen(t *testing.T)
 		t.Fatalf("first sub-agent sighting range = %q..%q; want %q..%q", firstAt, lastAt,
 			formatAgentIdentityTime(t0), formatAgentIdentityTime(t0.Add(3*time.Second)))
 	}
-	if removed, err := st.PruneAgentIdentitySessions(ctx, t0.Add(2*time.Second)); err != nil || removed != 1 {
-		t.Fatalf("prune removed %d rows, err %v; want only the inactive sub-agent", removed, err)
+	if removed, err := st.PruneAgentIdentitySessions(ctx, t0.Add(2*time.Second)); err != nil || removed != 0 {
+		t.Fatalf("prune removed %d rows, err %v; want both retained while the identity exists", removed, err)
+	}
+}
+
+func TestAgentIdentitySubagentRetentionPreservesDistinctOrder(t *testing.T) {
+	st, err := NewInventoryStore(filepath.Join(t.TempDir(), "inventory.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	t0 := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
+	const agentID, firstID, lastID = "agt-00000000000000c1", "ais-00000000000000a1", "ais-00000000000000b2"
+	identity := AgentIdentityRecord{AgentID: agentID, UserID: "u1", Connector: "codex", MachineHash: "m", FirstSeen: t0, LastSeen: t0.Add(time.Hour)}
+	first := AgentIdentitySubagent{AgentID: agentID, InstanceID: firstID, FirstSeen: t0, LastSeen: t0}
+	last := AgentIdentitySubagent{AgentID: agentID, InstanceID: lastID, FirstSeen: t0.Add(time.Hour), LastSeen: t0.Add(time.Hour)}
+	if err := st.UpsertAgentIdentityBatch(ctx, []AgentIdentityRecord{identity}, nil, []AgentIdentitySubagent{first, last}); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := st.PruneAgentIdentitySessions(ctx, t0.Add(30*time.Minute)); err != nil || removed != 0 {
+		t.Fatalf("prune removed %d rows, err %v; want both instances while their identity remains", removed, err)
+	}
+	first.LastSeen = t0.Add(2 * time.Hour)
+	first.FirstSeen = first.LastSeen // a resumed hook has no memory of the original first sighting
+	identity.LastSeen = first.LastSeen
+	if err := st.UpsertAgentIdentityBatch(ctx, []AgentIdentityRecord{identity}, nil, []AgentIdentitySubagent{first}); err != nil {
+		t.Fatal(err)
+	}
+	rows, _, err := st.ListAgentIdentities(ctx, AgentIdentityFilter{})
+	if err != nil || len(rows) != 1 || rows[0].SubagentsSeen != 2 || rows[0].LastSubagentID != lastID {
+		t.Fatalf("resumed older instance = %+v, err %v; want count 2 and newest %s", rows, err, lastID)
+	}
+	var firstAt, lastAt string
+	if err := st.db.QueryRowContext(ctx, `SELECT first_seen, last_seen FROM agent_identity_subagents WHERE agent_id = ? AND instance_id = ?`,
+		agentID, firstID).Scan(&firstAt, &lastAt); err != nil {
+		t.Fatal(err)
+	}
+	if firstAt != formatAgentIdentityTime(t0) || lastAt != formatAgentIdentityTime(first.LastSeen) {
+		t.Fatalf("resumed instance sightings = %q..%q; want original first and refreshed last", firstAt, lastAt)
+	}
+	if _, err := st.db.ExecContext(ctx, `DELETE FROM agent_identities WHERE agent_id = ?`, agentID); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := st.PruneAgentIdentitySessions(ctx, time.Time{}); err != nil || removed != 2 {
+		t.Fatalf("orphan prune removed %d rows, err %v; want both sub-agent keys", removed, err)
+	}
+}
+
+func TestAgentIdentitySubagentDelayedFirstSightingKeepsNewest(t *testing.T) {
+	st, err := NewInventoryStore(filepath.Join(t.TempDir(), "inventory.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	t0 := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
+	const agentID, firstID, lastID = "agt-00000000000000c1", "ais-00000000000000a1", "ais-00000000000000b2"
+	identity := AgentIdentityRecord{AgentID: agentID, UserID: "u1", Connector: "codex", MachineHash: "m", FirstSeen: t0, LastSeen: t0}
+	first := AgentIdentitySubagent{AgentID: agentID, InstanceID: firstID, FirstSeen: t0, LastSeen: t0}
+	last := AgentIdentitySubagent{AgentID: agentID, InstanceID: lastID, FirstSeen: t0.Add(time.Second), LastSeen: t0.Add(time.Second)}
+	if err := st.UpsertAgentIdentityBatch(ctx, []AgentIdentityRecord{identity}, nil, []AgentIdentitySubagent{last}); err != nil {
+		t.Fatal(err)
+	}
+	// A delayed older first sighting can be written after the newer one.
+	if err := st.UpsertAgentIdentityBatch(ctx, nil, nil, []AgentIdentitySubagent{first}); err != nil {
+		t.Fatal(err)
+	}
+	rows, _, err := st.ListAgentIdentities(ctx, AgentIdentityFilter{})
+	if err != nil || len(rows) != 1 || rows[0].SubagentsSeen != 2 || rows[0].LastSubagentID != lastID {
+		t.Fatalf("delayed older instance = %+v, err %v; want count 2 and newest %s", rows, err, lastID)
 	}
 }
