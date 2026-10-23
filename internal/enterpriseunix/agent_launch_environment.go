@@ -12,7 +12,7 @@ import (
 
 func pluginLaunchConnector(name string) bool {
 	switch name {
-	case "opencode", "amp", "kiro-cli", "devin", "hermes", "agy", "antigravity":
+	case "opencode", "amp", "kiro-cli", "devin", "hermes", "agy":
 		return true
 	}
 	return false

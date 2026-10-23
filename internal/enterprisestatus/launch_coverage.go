@@ -5,6 +5,7 @@ package enterprisestatus
 
 import (
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -42,7 +43,7 @@ func PluginLaunchCoverage(connector string, argv []string, env map[string]string
 		if accountHome == "" {
 			return "launch_environment_unverified"
 		}
-		if home := env["HOME"]; home != "" && !sameLaunchPath(home, accountHome) {
+		if launchHomeRelocated(env, accountHome) {
 			return "opencode_user_config_relocated"
 		}
 		if xdg := env["XDG_CONFIG_HOME"]; xdg != "" && !sameLaunchPath(xdg, filepath.Join(accountHome, ".config")) {
@@ -55,6 +56,9 @@ func PluginLaunchCoverage(connector string, argv []string, env map[string]string
 			if arg == "--config" || strings.HasPrefix(arg, "--config=") {
 				return "devin_config_override"
 			}
+		}
+		if launchWindowsAppDataRelocated(env, accountHome, "APPDATA", "Roaming") {
+			return "user_config_relocated"
 		}
 		return userConfigLaunchCoverage(env, envKnown, accountHome, "user_config_relocated")
 	case "antigravity":
@@ -74,6 +78,9 @@ func PluginLaunchCoverage(connector string, argv []string, env map[string]string
 		}
 		if env["HERMES_MANAGED_DIR"] != "" || env["HERMES_HOME"] != "" &&
 			(accountHome == "" || !sameLaunchPath(env["HERMES_HOME"], filepath.Join(accountHome, ".hermes"))) {
+			return "hermes_config_relocated"
+		}
+		if launchWindowsAppDataRelocated(env, accountHome, "LOCALAPPDATA", "Local") {
 			return "hermes_config_relocated"
 		}
 		return userConfigLaunchCoverage(env, envKnown, accountHome, "user_config_relocated")
@@ -107,7 +114,29 @@ func PluginLaunchCoverage(connector string, argv []string, env map[string]string
 }
 
 func sameLaunchPath(a, b string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
+	}
 	return filepath.Clean(a) == filepath.Clean(b)
+}
+
+func launchHomeRelocated(env map[string]string, accountHome string) bool {
+	keys := []string{"HOME"}
+	if runtime.GOOS == "windows" {
+		keys = append(keys, "USERPROFILE")
+	}
+	for _, key := range keys {
+		if home := env[key]; home != "" && !sameLaunchPath(home, accountHome) {
+			return true
+		}
+	}
+	return false
+}
+
+func launchWindowsAppDataRelocated(env map[string]string, accountHome, key, leaf string) bool {
+	value := env[key]
+	return runtime.GOOS == "windows" && value != "" && accountHome != "" &&
+		!sameLaunchPath(value, filepath.Join(accountHome, "AppData", leaf))
 }
 
 func launchOptions(argv []string) []string {
@@ -123,10 +152,11 @@ func launchOptions(argv []string) []string {
 }
 
 func userConfigLaunchCoverage(env map[string]string, envKnown bool, accountHome, relocatedReason string) string {
-	if !envKnown || accountHome == "" || env["HOME"] == "" && env["XDG_CONFIG_HOME"] == "" {
+	profileKnown := runtime.GOOS == "windows" && env["USERPROFILE"] != ""
+	if !envKnown || accountHome == "" || env["HOME"] == "" && !profileKnown && env["XDG_CONFIG_HOME"] == "" {
 		return "launch_environment_unverified"
 	}
-	if home := env["HOME"]; home != "" && !sameLaunchPath(home, accountHome) {
+	if launchHomeRelocated(env, accountHome) {
 		return relocatedReason
 	}
 	if xdg := env["XDG_CONFIG_HOME"]; xdg != "" && !sameLaunchPath(xdg, filepath.Join(accountHome, ".config")) {

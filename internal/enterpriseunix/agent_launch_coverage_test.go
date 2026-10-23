@@ -15,8 +15,56 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+func TestLinuxDirectoryAgentNormalLaunchUsesNSSHome(t *testing.T) {
+	h := newTestHost(t, "linux")
+	h.env.ReportLaunchCoverage = func(context.Context, managed.LaunchCoverageReport) error { return nil }
+	const uid = 711337
+	const home = "/home/alice@example.com"
+	h.runner.replies = map[string]fakeReply{
+		"getent passwd 711337": {result: CommandResult{Stdout: []byte("alice@example.com:x:711337:711337::" + home + ":/bin/bash\n")}},
+	}
+	for _, connector := range []string{"opencode", "amp", "devin", "hermes", "antigravity"} {
+		t.Run(connector, func(t *testing.T) {
+			result := enterprisestatus.New(ActionVerify, managed.ProfileStandalone, "linux", "1.0.4")
+			result.CoverageComplete, result.SecurityComplete = true, true
+			l := lifecycle{env: h.env, result: result, opts: Options{Action: ActionVerify}}
+			agent := connector
+			if connector == "antigravity" {
+				agent = "agy"
+			}
+			l.describePluginLaunchSession(context.Background(), agentSession{
+				PID: 7133, UID: uid, Agent: agent, Args: []string{agent}, ArgsKnown: true,
+				Env: map[string]string{"HOME": home}, EnvKnown: true,
+			}, connector)
+			if !result.CoverageComplete || !result.SecurityComplete || len(result.Warnings) != 0 || len(result.Errors) != 0 {
+				t.Fatalf("normal directory-account launch reported uninspected: %+v", result)
+			}
+		})
+	}
+	result := enterprisestatus.New(ActionVerify, managed.ProfileStandalone, "linux", "1.0.4")
+	result.CoverageComplete, result.SecurityComplete = true, true
+	l := lifecycle{env: h.env, result: result, opts: Options{Action: ActionVerify}}
+	l.describePluginLaunchSession(context.Background(), agentSession{PID: 7134, UID: uid, Agent: "opencode",
+		Args: []string{"opencode"}, ArgsKnown: true, Env: map[string]string{"HOME": "/tmp/other"}, EnvKnown: true}, "opencode")
+	if result.CoverageComplete || result.SecurityComplete || len(result.Errors) != 1 ||
+		!strings.Contains(result.Warnings[0].Message, "user config directory was relocated") {
+		t.Fatalf("relocated directory-account launch reported healthy: %+v", result)
+	}
+	delete(h.runner.replies, "getent passwd 711337")
+	result = enterprisestatus.New(ActionVerify, managed.ProfileStandalone, "linux", "1.0.4")
+	result.CoverageComplete, result.SecurityComplete = true, true
+	l.result = result
+	l.describePluginLaunchSession(context.Background(), agentSession{PID: 7135, UID: uid, Agent: "opencode",
+		Args: []string{"opencode"}, ArgsKnown: true, Env: map[string]string{"HOME": home}, EnvKnown: true}, "opencode")
+	if result.CoverageComplete || result.SecurityComplete || len(result.Errors) != 1 ||
+		!strings.Contains(result.Warnings[0].Message, "launch environment unverified") {
+		t.Fatalf("unresolved directory account reported healthy: %+v", result)
+	}
+}
 
 func TestDarwinLaunchEnvironmentKeepsOnlyPluginSelectors(t *testing.T) {
 	raw := make([]byte, 4)

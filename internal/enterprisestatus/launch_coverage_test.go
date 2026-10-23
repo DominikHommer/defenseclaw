@@ -3,7 +3,10 @@
 
 package enterprisestatus
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
 // A plugin cannot report its own absence. The process scan must name the
 // supported launches that bypass plugin loading, including the equivalent
@@ -56,5 +59,21 @@ func TestPluginLaunchCoverage(t *testing.T) {
 				t.Fatalf("coverage = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestPluginLaunchCoveragePlatformHomeSelectors(t *testing.T) {
+	const home = "/home/alice"
+	profileOnly := PluginLaunchCoverage("amp", []string{"amp"}, map[string]string{"USERPROFILE": home}, true, home)
+	profileMismatch := PluginLaunchCoverage("amp", []string{"amp"}, map[string]string{"HOME": home, "USERPROFILE": "/tmp/other"}, true, home)
+	devinAppData := PluginLaunchCoverage("devin", []string{"devin"}, map[string]string{"HOME": home, "APPDATA": "/tmp/other"}, true, home)
+	hermesLocalAppData := PluginLaunchCoverage("hermes", []string{"hermes"}, map[string]string{"HOME": home, "LOCALAPPDATA": "/tmp/other"}, true, home)
+	if runtime.GOOS == "windows" {
+		if profileOnly != "" || profileMismatch != "amp_plugin_config_relocated" ||
+			devinAppData != "user_config_relocated" || hermesLocalAppData != "hermes_config_relocated" {
+			t.Fatalf("Windows profile selectors: only=%q, mismatch=%q, Devin=%q, Hermes=%q", profileOnly, profileMismatch, devinAppData, hermesLocalAppData)
+		}
+	} else if profileOnly != "launch_environment_unverified" || profileMismatch != "" || devinAppData != "" || hermesLocalAppData != "" {
+		t.Fatalf("Unix profile selectors: only=%q, mismatch=%q, Devin=%q, Hermes=%q", profileOnly, profileMismatch, devinAppData, hermesLocalAppData)
 	}
 }

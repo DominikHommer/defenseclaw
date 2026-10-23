@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentprocess"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 )
@@ -25,12 +26,13 @@ const windowsManagedLaunchAuditUnavailable = "managed_launch_audit_unavailable"
 
 var windowsManagedLaunchAudit = reportWindowsManagedLaunchCoverage
 var windowsManagedLaunchAuditEndpoint = managedScanGatewayEndpoint
+var windowsManagedLaunchEnvironment = agentprocess.LaunchEnvironmentForPID
 
 // applyWindowsEnterpriseLaunchCoverage uses the native process inventory
-// after the installer has established managed readiness. Windows exposes the
-// command line of an agent process but cannot prove its launch environment
-// through that API. A normal-looking process is therefore unverified, never
-// treated as proof that it loaded DefenseClaw's hook or plugin.
+// after the installer has established managed readiness. The elevated CLI
+// reads selected launch selectors from process memory and resolves the
+// account profile from the process owner SID. An unreadable process remains
+// unverified, never treated as proof that it loaded the managed connector.
 func applyWindowsEnterpriseLaunchCoverage(result *enterprisestatus.Result) {
 	if result == nil || !result.Installed || result.TransactionPending ||
 		(result.Action != "status" && result.Action != "verify") {
@@ -61,7 +63,16 @@ func applyWindowsEnterpriseLaunchCoverage(result *enterprisestatus.Result) {
 		if !selected[name] || windowsServiceIdentity(process.User) || windowsServiceSID(process.OwnerSID) {
 			continue
 		}
-		reason := enterprisestatus.PluginLaunchCoverage(name, process.Args, nil, false, "")
+		launchEnv, envErr := windowsManagedLaunchEnvironment(process.PID)
+		home := ""
+		ownerSID := process.OwnerSID
+		if ownerSID == "" && process.User != "" {
+			ownerSID = windowsEnterpriseAccountSID(process.User)
+		}
+		if ownerSID != "" {
+			home, _ = enterpriseHookSIDProfilePath(ownerSID)
+		}
+		reason := enterprisestatus.PluginLaunchCoverage(name, process.Args, launchEnv, envErr == nil, home)
 		if reason == "" && !process.ArgsKnown {
 			reason = "launch_arguments_unverified"
 		}
@@ -75,7 +86,7 @@ func applyWindowsEnterpriseLaunchCoverage(result *enterprisestatus.Result) {
 		if who == "" {
 			who = "unknown account"
 		}
-		message := fmt.Sprintf("user %s runs %s (pid %d): %s; Windows cannot prove that this process loaded its managed hook or plugin, so its tool calls may be uninspected. Close the session and restart without the bypass", who, name, process.PID, reason)
+		message := fmt.Sprintf("user %s runs %s (pid %d): %s; its managed hook or plugin load is not proven, so tool calls in this session may be uninspected. Close this session and restart without the bypass", who, name, process.PID, reason)
 		windowsLaunchCoverageWarning(result, windowsManagedLaunchUninspected, message)
 		if err := windowsManagedLaunchAudit(process, name, reason); err != nil {
 			result.AddWarning(windowsManagedLaunchAuditUnavailable,
