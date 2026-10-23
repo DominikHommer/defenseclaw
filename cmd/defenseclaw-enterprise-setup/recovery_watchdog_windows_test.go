@@ -20,20 +20,28 @@ import (
 // exited, then replays only a pending transaction. A successful uninstall
 // leaves no pending record and must not be undone.
 func TestStandaloneUninstallRecoveryWatcher(t *testing.T) {
-	oldReady, oldWait, oldPending, oldReplay := setupRecoveryParentReachable, setupRecoveryWaitForParent, setupRecoveryPending, setupRecoveryReplay
+	oldOpen, oldPending, oldReplay := setupRecoveryOpenParent, setupRecoveryPending, setupRecoveryReplay
 	t.Cleanup(func() {
-		setupRecoveryParentReachable, setupRecoveryWaitForParent, setupRecoveryPending, setupRecoveryReplay = oldReady, oldWait, oldPending, oldReplay
+		setupRecoveryOpenParent, setupRecoveryPending, setupRecoveryReplay = oldOpen, oldPending, oldReplay
 	})
 	var events []string
-	setupRecoveryParentReachable = func(pid int) error { events = append(events, "parent reachable"); return nil }
-	setupRecoveryWaitForParent = func(pid int) error { events = append(events, "parent exited"); return nil }
+	var output bytes.Buffer
+	setupRecoveryOpenParent = func(pid int) (standaloneSetupParent, error) {
+		events = append(events, "parent opened")
+		return &fakeStandaloneSetupParent{wait: func() error {
+			if !bytes.HasPrefix(output.Bytes(), []byte("READY\n")) {
+				t.Error("watcher did not announce readiness before waiting for Setup to exit")
+			}
+			events = append(events, "parent exited")
+			return nil
+		}}, nil
+	}
 	setupRecoveryPending = func() (bool, error) { events = append(events, "pending checked"); return true, nil }
 	setupRecoveryReplay = func() error { events = append(events, "replayed"); return nil }
-	var output bytes.Buffer
 	if code := runEnterpriseSetup([]string{"--internal-recover-after-parent", "4321"}, &output, &output); code != 0 {
 		t.Fatalf("pending uninstall recovery exit=%d: %s", code, output.String())
 	}
-	if want := []string{"parent reachable", "parent exited", "pending checked", "replayed"}; !reflect.DeepEqual(events, want) {
+	if want := []string{"parent opened", "parent exited", "pending checked", "replayed"}; !reflect.DeepEqual(events, want) {
 		t.Fatalf("recovery order=%v, want %v", events, want)
 	}
 	if !bytes.HasPrefix(output.Bytes(), []byte("READY\n")) {
@@ -44,7 +52,7 @@ func TestStandaloneUninstallRecoveryWatcher(t *testing.T) {
 	if code := runEnterpriseSetup([]string{"--internal-recover-after-parent", "4321"}, &output, &output); code != 0 {
 		t.Fatalf("committed uninstall recovery exit=%d: %s", code, output.String())
 	}
-	if want := []string{"parent reachable", "parent exited", "pending checked"}; !reflect.DeepEqual(events, want) {
+	if want := []string{"parent opened", "parent exited", "pending checked"}; !reflect.DeepEqual(events, want) {
 		t.Fatalf("committed uninstall incorrectly replayed: %v", events)
 	}
 	events = nil
@@ -53,13 +61,18 @@ func TestStandaloneUninstallRecoveryWatcher(t *testing.T) {
 	if code := runEnterpriseSetup([]string{"--internal-recover-after-parent", "4321"}, &output, &output); code != enterpriseFailureExitCode {
 		t.Fatalf("failed recovery exit=%d, want %d", code, enterpriseFailureExitCode)
 	}
-	setupRecoveryParentReachable = func(int) error { return errors.New("parent handle inaccessible") }
+	setupRecoveryOpenParent = func(int) (standaloneSetupParent, error) { return nil, errors.New("parent handle inaccessible") }
 	output.Reset()
 	if code := runEnterpriseSetup([]string{"--internal-recover-after-parent", "4321"}, &output, &output); code != enterpriseFailureExitCode ||
 		bytes.Contains(output.Bytes(), []byte("READY\n")) {
 		t.Fatalf("inaccessible parent announced readiness: exit=%d output=%q", code, output.String())
 	}
 }
+
+type fakeStandaloneSetupParent struct{ wait func() error }
+
+func (parent *fakeStandaloneSetupParent) Wait() error  { return parent.wait() }
+func (parent *fakeStandaloneSetupParent) Close() error { return nil }
 
 func TestStandaloneUninstallRecoveryRefusesUnbreakableJob(t *testing.T) {
 	if _, err := standaloneSetupRecoveryFlagsForJob(windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, nil); err == nil {

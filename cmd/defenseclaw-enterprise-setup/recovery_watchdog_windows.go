@@ -29,8 +29,7 @@ import (
 var (
 	enterpriseSetupArmUninstallRecovery = armStandaloneUninstallRecovery
 	setupRecoveryCreationFlags          = standaloneSetupRecoveryCreationFlags
-	setupRecoveryParentReachable        = standaloneSetupParentReachable
-	setupRecoveryWaitForParent          = waitForStandaloneSetupParent
+	setupRecoveryOpenParent             = openStandaloneSetupParent
 	setupRecoveryPending                = standaloneUninstallTransactionPending
 	setupRecoveryReplay                 = replayStandaloneSetupTransaction
 )
@@ -111,14 +110,16 @@ func runStandaloneSetupRecoveryWatchdog(parentArgument string, stdout, stderr io
 	if err != nil || parentPID <= 0 || parentPID == os.Getpid() {
 		return enterpriseInvalidArgsExitCode
 	}
-	if err := setupRecoveryParentReachable(parentPID); err != nil {
+	parent, err := setupRecoveryOpenParent(parentPID)
+	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return enterpriseFailureExitCode
 	}
+	defer parent.Close() //nolint:errcheck -- the wait result determines recovery.
 	if _, err := io.WriteString(stdout, "READY\n"); err != nil {
 		return enterpriseFailureExitCode
 	}
-	if err := setupRecoveryWaitForParent(parentPID); err != nil {
+	if err := parent.Wait(); err != nil {
 		fmt.Fprintln(stderr, err)
 		return enterpriseFailureExitCode
 	}
@@ -137,27 +138,29 @@ func runStandaloneSetupRecoveryWatchdog(parentArgument string, stdout, stderr io
 	return 0
 }
 
-func standaloneSetupParentReachable(pid int) error {
-	handle, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid))
-	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
-		return nil // Parent died before the watcher became ready.
-	}
-	if err != nil {
-		return fmt.Errorf("open uninstall Setup parent before arming recovery: %w", err)
-	}
-	return windows.CloseHandle(handle)
+type standaloneSetupParent interface {
+	Wait() error
+	Close() error
 }
 
-func waitForStandaloneSetupParent(pid int) error {
+type standaloneSetupParentHandle struct{ handle windows.Handle }
+
+func openStandaloneSetupParent(pid int) (standaloneSetupParent, error) {
 	handle, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid))
 	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
-		return nil // Parent already exited before the watcher opened it.
+		return standaloneSetupParentHandle{}, nil // Parent already exited.
 	}
 	if err != nil {
-		return fmt.Errorf("open uninstall Setup parent: %w", err)
+		return nil, fmt.Errorf("open uninstall Setup parent before arming recovery: %w", err)
 	}
-	defer windows.CloseHandle(handle) //nolint:errcheck -- process is already exiting.
-	result, err := windows.WaitForSingleObject(handle, windows.INFINITE)
+	return standaloneSetupParentHandle{handle: handle}, nil
+}
+
+func (parent standaloneSetupParentHandle) Wait() error {
+	if parent.handle == 0 {
+		return nil
+	}
+	result, err := windows.WaitForSingleObject(parent.handle, windows.INFINITE)
 	if err != nil {
 		return fmt.Errorf("wait for uninstall Setup parent: %w", err)
 	}
@@ -165,6 +168,13 @@ func waitForStandaloneSetupParent(pid int) error {
 		return fmt.Errorf("wait for uninstall Setup parent: unexpected result %d", result)
 	}
 	return nil
+}
+
+func (parent standaloneSetupParentHandle) Close() error {
+	if parent.handle == 0 {
+		return nil
+	}
+	return windows.CloseHandle(parent.handle)
 }
 
 func standaloneUninstallTransactionPending() (bool, error) {
