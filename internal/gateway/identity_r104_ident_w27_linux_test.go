@@ -36,15 +36,15 @@ func (*managedLocalNSS) LookupUID(uid int) (unixidentity.Account, error) {
 	return unixidentity.Account{Name: "t7ar-u1", UID: uid, GID: 49202}, nil
 }
 
-func (*managedLocalNSS) DirectoryFactsForUID(int, time.Time) (useridentity.DirectoryFacts, error) {
+func (nss *managedLocalNSS) DirectoryFactsForUID(uid int, _ time.Time) (useridentity.DirectoryFacts, error) {
+	if nss.holderInSSSD {
+		return useridentity.DirectoryFacts{}, &unixidentity.SharedUIDError{UID: uid, Accounts: []string{"t7ar-u1", "SSSD account"}}
+	}
 	return useridentity.DirectoryFacts{}, errW27SSSDNeedsRoot
 }
 
 func (nss *managedLocalNSS) DirectoryFactsForRecordedUnsharedUID(uid int, now time.Time) (useridentity.DirectoryFacts, error) {
 	nss.recordedCalls++
-	if nss.holderInSSSD {
-		return useridentity.DirectoryFacts{}, &unixidentity.SharedUIDError{UID: uid, Accounts: []string{"t7ar-u1", "SSSD account"}}
-	}
 	return useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal, Source: useridentity.SourceNSSFiles,
 		Groups: []string{"49202"}, Assurance: useridentity.AssuranceVerified, ResolvedAt: now}, nil
 }
@@ -61,19 +61,20 @@ func TestManagedLocalAccountRecoversWhenGuardianRecordsUnsharedUID(t *testing.T)
 	const uid, gid = 49201, "49202"
 	key := strconv.Itoa(uid)
 	previousResolver, previousRootProof := newPeerNSSResolver, peerUnsharedUIDNeedsRoot
-	previousIncarnation := managedHookPeerAccountIncarnation
+	previousIncarnation, previousRecordedIncarnation := managedHookPeerAccountIncarnation, managedHookPeerRecordedAccountIncarnation
 	previousValidate, previousDir := validateManagedGuardianAuthorization, currentIdentitySpoolDir()
 	previousService := managedServiceHosted.Load()
 	t.Cleanup(func() {
 		newPeerNSSResolver, peerUnsharedUIDNeedsRoot = previousResolver, previousRootProof
-		managedHookPeerAccountIncarnation = previousIncarnation
+		managedHookPeerAccountIncarnation, managedHookPeerRecordedAccountIncarnation = previousIncarnation, previousRecordedIncarnation
 		validateManagedGuardianAuthorization = previousValidate
 		setIdentitySpoolDir(previousDir)
 		setManagedServiceHosted(previousService)
 	})
 	setManagedServiceHosted(true)
 	validateManagedGuardianAuthorization = func(string, string) error { return nil }
-	managedHookPeerAccountIncarnation = func(account unixidentity.Account) (string, bool) {
+	managedHookPeerAccountIncarnation = func(unixidentity.Account) (string, bool) { return "", false }
+	managedHookPeerRecordedAccountIncarnation = func(account unixidentity.Account) (string, bool) {
 		return "files", account.Name == "t7ar-u1" && account.UID == uid
 	}
 	peerUnsharedUIDNeedsRoot = func(err error) bool { return errors.Is(err, errW27SSSDNeedsRoot) }
@@ -88,7 +89,7 @@ func TestManagedLocalAccountRecoversWhenGuardianRecordsUnsharedUID(t *testing.T)
 		{name: "current guardian record", recordIncarnation: "files", wantRecorded: 1},
 		{name: "no guardian record"},
 		{name: "record of prior incarnation", recordIncarnation: "prior", wantRecorded: 0},
-		{name: "SSSD also holds the uid", recordIncarnation: "files", sssdHolds: true, wantRecorded: 1},
+		{name: "SSSD also holds the uid", recordIncarnation: "files", sssdHolds: true, wantRecorded: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
