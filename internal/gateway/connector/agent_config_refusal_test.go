@@ -25,6 +25,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/pelletier/go-toml/v2"
 )
 
 // GAP-0578: when the agent's own settings turn its hooks off or do not
@@ -292,8 +294,9 @@ func TestCheckAgentSettingsAllowsMissingUserSettings(t *testing.T) {
 	}
 }
 
-// An OSS upgrade must keep the hooks active when the account keeps its agent
-// settings on a user-owned dotfiles volume outside the home directory.
+// The tagged 1.0.2 and 1.0.3 POSIX registration goldens have identical
+// Codex and Claude Code settings bytes. Upgrade both supported predecessors
+// through user-owned dotfile links without losing the enforcing hooks.
 func TestOSSSetupKeepsHooksThroughExternalDotfileLinks(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix dotfile links; Windows path behavior is covered separately")
@@ -303,78 +306,186 @@ func TestOSSSetupKeepsHooksThroughExternalDotfileLinks(t *testing.T) {
 	}{
 		{"codex config link", "codex", "file"},
 		{"codex home link", "codex", "parent"},
+		{"claude code settings link", "claudecode", "file"},
 		{"claude code home link", "claudecode", "parent"},
 	} {
+		for _, predecessor := range []string{"1.0.2", "1.0.3"} {
+			t.Run(predecessor+"/"+tc.name, func(t *testing.T) {
+				root := t.TempDir()
+				home := filepath.Join(root, "home")
+				outside := filepath.Join(root, "dotfiles")
+				if err := os.MkdirAll(home, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(outside, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("HOME", home)
+				filename := "config.toml"
+				folder := ".codex"
+				fixture := "codex.toml"
+				conn := Connector(NewCodexConnector())
+				if tc.connector == "claudecode" {
+					filename, folder, fixture = "settings.json", ".claude", "claudecode.json"
+					conn = NewClaudeCodeConnector()
+				}
+				body, err := os.ReadFile(filepath.Join("testdata", "predecessor_1_0_2_1_0_3", fixture))
+				if err != nil {
+					t.Fatal(err)
+				}
+				settingsDir := filepath.Join(home, folder)
+				settingsPath := filepath.Join(settingsDir, filename)
+				outsidePath := filepath.Join(outside, filename)
+				body = []byte(strings.ReplaceAll(strings.ReplaceAll(string(body), "{home}", home), "{data_dir}", filepath.Join(home, ".defenseclaw")))
+				if tc.connector == "codex" {
+					body = materializePredecessorCodexTrust(t, body, settingsPath)
+				}
+				if err := os.WriteFile(outsidePath, body, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if tc.linkKind == "parent" {
+					if err := os.Symlink(outside, settingsDir); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if err := os.MkdirAll(settingsDir, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(outsidePath, settingsPath); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if tc.connector == "codex" {
+					previousRequirements := codexSystemRequirementsPathForInspection
+					codexSystemRequirementsPathForInspection = func() (string, error) {
+						return filepath.Join(root, "absent-requirements.toml"), nil
+					}
+					t.Cleanup(func() { codexSystemRequirementsPathForInspection = previousRequirements })
+					t.Setenv("CODEX_HOME", settingsDir)
+					pointCodexConfig(t, settingsPath)
+				} else {
+					t.Setenv("CLAUDE_CONFIG_DIR", settingsDir)
+					previous := ClaudeCodeSettingsPathOverride
+					ClaudeCodeSettingsPathOverride = settingsPath
+					t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previous })
+				}
+				opts := SetupOpts{DataDir: filepath.Join(home, ".defenseclaw"), APIAddr: "127.0.0.1:18970", APIToken: "test-token", HookFailMode: "closed"}
+				if err := CheckAgentSettings(conn, opts); err != nil {
+					t.Fatalf("upgrade precheck refused user-owned settings at %s: %v", settingsPath, err)
+				}
+				if err := conn.Setup(context.Background(), opts); err != nil {
+					t.Fatalf("upgrade setup through %s: %v", settingsPath, err)
+				}
+				if present, err := OwnedHooksPresent(conn, opts); err != nil || !present {
+					t.Fatalf("hooks after upgrade: present=%v, err=%v", present, err)
+				}
+				if tc.linkKind == "parent" {
+					if info, err := os.Lstat(settingsDir); err != nil || info.Mode()&os.ModeSymlink == 0 {
+						t.Fatalf("setup replaced the dotfile directory link: %v", err)
+					}
+				}
+				if tc.connector == "claudecode" {
+					if _, err := conn.(*ClaudeCodeConnector).ConvertHooksForRollback(opts); err != nil {
+						t.Fatalf("rollback conversion through linked .claude: %v", err)
+					}
+				}
+			})
+		}
+	}
+}
+
+// The tagged registration golden uses {digest} for each Codex trust hash.
+// Materialize the positional hashes that the predecessor wrote for this
+// test's actual paths, leaving its hook matrix and other settings intact.
+func materializePredecessorCodexTrust(t *testing.T, raw []byte, path string) []byte {
+	t.Helper()
+	cfg := map[string]interface{}{}
+	if err := parseCodexTOML(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	hooks := cfg["hooks"].(map[string]interface{})
+	state := map[string]interface{}{}
+	for eventType, rawGroups := range hooks {
+		if eventType == "state" {
+			continue
+		}
+		for groupIndex, rawGroup := range rawGroups.([]interface{}) {
+			group := rawGroup.(map[string]interface{})
+			for handlerIndex, rawHandler := range group["hooks"].([]interface{}) {
+				handler := rawHandler.(map[string]interface{})
+				eventKey := codexHookEventKeyLabel(eventType)
+				hash, err := codexCommandHookHashForPlatform(runtime.GOOS, eventKey, group["matcher"], handler)
+				if err != nil {
+					t.Fatal(err)
+				}
+				key := codexHookStateKey(codexHookStateKeySource(path), eventKey, groupIndex, handlerIndex)
+				state[key] = map[string]interface{}{"trusted_hash": hash}
+			}
+		}
+	}
+	hooks["state"] = state
+	data, err := toml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+// A user may choose a dotfiles link, but a different account must not choose
+// the settings that the per-user gateway will read or rewrite.
+func TestOSSSetupRefusesForeignOwnedSettingsLinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix ownership check")
+	}
+	for _, tc := range []struct {
+		name, connector, linkKind string
+	}{
+		{"codex file", "codex", "file"},
+		{"codex parent", "codex", "parent"},
+		{"claude file", "claudecode", "file"},
+		{"claude parent", "claudecode", "parent"},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
-			root := t.TempDir()
-			home := filepath.Join(root, "home")
-			outside := filepath.Join(root, "dotfiles")
-			if err := os.MkdirAll(home, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.MkdirAll(outside, 0o700); err != nil {
-				t.Fatal(err)
-			}
+			home := t.TempDir()
+			outside := t.TempDir()
 			t.Setenv("HOME", home)
-			filename := "config.toml"
-			folder := ".codex"
+			folder, filename := ".codex", "config.toml"
 			body := []byte("model = \"gpt-5\"\n")
 			conn := Connector(NewCodexConnector())
 			if tc.connector == "claudecode" {
-				filename, folder, body = "settings.json", ".claude", []byte("{}\n")
+				folder, filename, body = ".claude", "settings.json", []byte("{}\n")
 				conn = NewClaudeCodeConnector()
 			}
-			settingsDir := filepath.Join(home, folder)
-			settingsPath := filepath.Join(settingsDir, filename)
-			outsidePath := filepath.Join(outside, filename)
-			if err := os.WriteFile(outsidePath, body, 0o600); err != nil {
+			dir := filepath.Join(home, folder)
+			target := filepath.Join(outside, filename)
+			if err := os.WriteFile(target, body, 0o600); err != nil {
 				t.Fatal(err)
 			}
 			if tc.linkKind == "parent" {
-				if err := os.Symlink(outside, settingsDir); err != nil {
+				if err := os.Symlink(outside, dir); err != nil {
 					t.Fatal(err)
 				}
 			} else {
-				if err := os.MkdirAll(settingsDir, 0o700); err != nil {
+				if err := os.Mkdir(dir, 0o700); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.Symlink(outsidePath, settingsPath); err != nil {
+				if err := os.Symlink(target, filepath.Join(dir, filename)); err != nil {
 					t.Fatal(err)
 				}
 			}
+			path := filepath.Join(dir, filename)
 			if tc.connector == "codex" {
-				previousRequirements := codexSystemRequirementsPathForInspection
-				codexSystemRequirementsPathForInspection = func() (string, error) {
-					return filepath.Join(root, "absent-requirements.toml"), nil
-				}
-				t.Cleanup(func() { codexSystemRequirementsPathForInspection = previousRequirements })
-				t.Setenv("CODEX_HOME", settingsDir)
-				pointCodexConfig(t, settingsPath)
+				pointCodexConfig(t, path)
 			} else {
-				t.Setenv("CLAUDE_CONFIG_DIR", settingsDir)
 				previous := ClaudeCodeSettingsPathOverride
-				ClaudeCodeSettingsPathOverride = settingsPath
+				ClaudeCodeSettingsPathOverride = path
 				t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previous })
 			}
-			opts := SetupOpts{DataDir: filepath.Join(home, ".defenseclaw"), APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
-			if err := CheckAgentSettings(conn, opts); err != nil {
-				t.Fatalf("upgrade precheck refused user-owned settings at %s: %v", settingsPath, err)
-			}
-			if err := conn.Setup(context.Background(), opts); err != nil {
-				t.Fatalf("upgrade setup through %s: %v", settingsPath, err)
-			}
-			if present, err := OwnedHooksPresent(conn, opts); err != nil || !present {
-				t.Fatalf("hooks after upgrade: present=%v, err=%v", present, err)
-			}
-			if tc.linkKind == "parent" {
-				if info, err := os.Lstat(settingsDir); err != nil || info.Mode()&os.ModeSymlink == 0 {
-					t.Fatalf("setup replaced the dotfile directory link: %v", err)
-				}
-			}
-			if tc.connector == "claudecode" {
-				if _, err := conn.(*ClaudeCodeConnector).ConvertHooksForRollback(opts); err != nil {
-					t.Fatalf("rollback conversion through linked .claude: %v", err)
-				}
+			previous := pluginGetUID
+			pluginGetUID = func() int { return os.Getuid() + 1 }
+			t.Cleanup(func() { pluginGetUID = previous })
+			if err := CheckAgentSettings(conn, SetupOpts{DataDir: filepath.Join(home, ".defenseclaw")}); !errors.Is(err, ErrAgentConfigRefusal) || !strings.Contains(err.Error(), "another account owns") {
+				t.Fatalf("foreign-owned settings link precheck = %v", err)
 			}
 		})
 	}

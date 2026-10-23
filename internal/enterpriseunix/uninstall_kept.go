@@ -62,6 +62,26 @@ func (env *Env) perUserLeftovers() ([]perUserKept, bool) {
 	return kept, true
 }
 
+// reportRetainedEnrolledUserData makes a successful Linux purge account for
+// enrolled users whose OSS data survived remove-all. The lifecycle only
+// observes these user-owned files; it never deletes them to make the result
+// look complete.
+func (l *lifecycle) reportRetainedEnrolledUserData() {
+	after, ok := l.env.perUserLeftovers()
+	if !ok {
+		return
+	}
+	remaining := map[string]bool{}
+	for _, entry := range after {
+		remaining[entry.user] = entry.data
+	}
+	for _, before := range l.keptPerUser {
+		if before.data && remaining[before.user] {
+			l.result.AddWarning(codePerUserState, "kept per-user data (~/.defenseclaw) for enrolled user "+before.user+" after --purge; this account-owned folder still exists and must be reviewed with its owner")
+		}
+	}
+}
+
 // perUserFilesOf is what the account user has in home: ~/.defenseclaw,
 // and the per-user install's binaries or launcher in ~/.local/bin.
 func perUserFilesOf(user, home string) perUserKept {

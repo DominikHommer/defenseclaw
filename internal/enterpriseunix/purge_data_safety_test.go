@@ -54,6 +54,31 @@ func TestUninstallPurgeNamesTheBackupOfAPerUserInstall(t *testing.T) {
 	}
 }
 
+// GAP-0727: a machine-policy-only enrollment can leave a pre-existing OSS
+// installation untouched. The result must name the retained account data;
+// lifecycle reporting never deletes or moves the account's files.
+func TestLinuxPurgeReportsAnEnrolledOSSInstallItLeavesBehind(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.3")}))
+	home := "/home/alice"
+	writeHostFile(t, h, enterprisehooks.UnixEligibleAccountsPath(h.env.Layout.ManifestPath), fmt.Sprintf(
+		`{"accounts":[{"user":"alice","uid":%d,"home":"%s"}]}`, os.Getuid(), home))
+	config := filepath.Join(home, ".defenseclaw", "config.yaml")
+	writeHostFile(t, h, config, "guardrail: {}\n")
+	h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+		return CommandResult{Stdout: []byte(`{"ok":true,"removed":0}`)}, nil
+	}}
+	done := h.run(Options{Action: ActionUninstall, Purge: true})
+	requireOK(t, done)
+	if got := h.read(config); got != "guardrail: {}\n" {
+		t.Fatalf("purge changed the account's OSS data: %q", got)
+	}
+	if got := messagesOf(done.Warnings, codePerUserState); !strings.Contains(got, "alice") ||
+		!strings.Contains(got, "~/.defenseclaw") || !strings.Contains(got, "kept") {
+		t.Fatalf("purge omitted retained OSS data from its result: %q", got)
+	}
+}
+
 // GAP-0582: a purge that keeps an account's per-user state (its pending
 // cleanup still needs it) also keeps that account's session-facts cache;
 // the other accounts' caches go.

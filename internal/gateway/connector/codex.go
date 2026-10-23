@@ -386,17 +386,15 @@ func (c *CodexConnector) checkAgentSettings(opts SetupOpts) error {
 			return refuseForAgentConfig(&AgentConfigOutsideHomeError{Path: path, Target: target})
 		}
 	}
-	info, err := os.Lstat(path)
+	if _, err := userOwnedSettingsReadPath(path); err != nil {
+		return refuseForAgentConfig(fmt.Errorf("inspect Codex config %s: %w; fix the link, then run: defenseclaw-gateway restart", path, err)) //nolint:staticcheck // Preserve the product name in this operator diagnostic.
+	}
+	_, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil // only an absent config can be created by Setup
 	}
 	if err != nil {
 		return refuseForAgentConfig(fmt.Errorf("inspect Codex config %s: %w; fix the file, then run: defenseclaw-gateway restart", path, err)) //nolint:staticcheck // Preserve the product name in this operator diagnostic.
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		if _, err := filepath.EvalSymlinks(path); err != nil {
-			return refuseForAgentConfig(fmt.Errorf("Codex config %s is a link that cannot be followed: %w; fix the link, then run: defenseclaw-gateway restart", path, err)) //nolint:staticcheck // Preserve the product name in this operator diagnostic.
-		}
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
