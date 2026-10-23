@@ -1884,7 +1884,7 @@ func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
 		return
 	}
 	for _, agent := range agents {
-		if agent.Code == enterprisehooks.UnprotectedCodeHookContractUnverified {
+		if agent.Code == enterprisehooks.UnprotectedCodeHookContractUnverified || agent.Code == enterprisehooks.UnprotectedCodeInstallScanIncomplete {
 			// No hook contract: the agent runs with no DefenseClaw hook, so
 			// the deployment does not cover it (GAP-0151).
 			result.CoverageComplete = false
@@ -1896,6 +1896,11 @@ func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
 			result.AddWarning(agent.Code, agent.Message())
 		}
 		result.SecurityComplete = false
+		if agent.InstallPath != "" && (result.Action == "status" || result.Action == "verify") {
+			if err := windowsManagedInstallAudit(agent); err != nil {
+				result.AddWarning(windowsManagedLaunchAuditUnavailable, "could not audit the unprotected "+agent.Connector+" install: "+err.Error())
+			}
+		}
 	}
 }
 
