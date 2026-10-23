@@ -2064,7 +2064,22 @@ func (c *managedSandboxController) Ready(ctx context.Context) (*sandboxapi.Statu
 		if uid, held := d.openShell.PortHolder(s); held && uid != d.uid {
 			err = accountBusyError()
 		} else {
-			err = d.readyOpenShell(ctx, s, "")
+			// Ready has no run registration yet. Ask the managed gateway for
+			// this account's current policy before installing OpenShell or
+			// starting its gateway. A forbidden profile must leave no runtime
+			// behind, including when Ready is called directly (GAP-0534).
+			viewCtx, cancel := context.WithTimeout(ctx, managedViewTimeout)
+			view, _, viewErr := d.managedExplain(viewCtx, sandboxapi.ExplainRequest{}, nil)
+			cancel()
+			switch {
+			case viewErr != nil:
+				err = viewErr
+			case !view.Allowed:
+				err = &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Status: http.StatusForbidden,
+					Message: "Your organization doesn't allow sandboxes for your account.", Detail: sandboxrelay.ReasonNotAllowed}
+			default:
+				err = d.readyOpenShell(ctx, s, "")
+			}
 		}
 	}
 	d.unlockLifecycle()
