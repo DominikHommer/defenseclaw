@@ -31,30 +31,29 @@ var peerDirectoryLookupTimeout = unixidentity.DirectoryLookupBudget()
 // account holds a uid (managedHookPeerAccountIncarnation).
 const peerIncarnationTimeout = 10 * time.Second
 
-// managedHookPeerAccountIncarnation names which directory account holds the
-// uid of account (unixidentity.AccountIncarnation): the SID SSSD holds for
-// it. false when it cannot tell. Tests replace it.
-var managedHookPeerAccountIncarnation = func(account unixidentity.Account) (string, bool) {
+// managedPeerIncarnation asks the current NSS owner for its incarnation. A
+// current local guardian record may supply root's proof of an SSSD miss;
+// NSS still checks whether SSSD now holds the uid.
+func managedPeerIncarnation(account unixidentity.Account, recordedUnshared bool) (string, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), peerIncarnationTimeout)
 	defer cancel()
 	resolver, err := unixidentity.NewNSSResolver(ctx)
 	if err != nil {
 		return "", false
+	}
+	if recordedUnshared {
+		return resolver.AccountIncarnationForRecordedUnsharedUID(account.UID, account.Name)
 	}
 	return resolver.AccountIncarnation(account.UID, account.Name)
 }
 
-// This lookup is used only after a current guardian record was read for the
-// same uid and account name. Its root-only SSSD absence proof came from that
-// record; the resolver still detects an SSSD account newly holding the uid.
+// Tests replace these boundaries for the account holding a verified uid.
+var managedHookPeerAccountIncarnation = func(account unixidentity.Account) (string, bool) {
+	return managedPeerIncarnation(account, false)
+}
+
 var managedHookPeerRecordedAccountIncarnation = func(account unixidentity.Account) (string, bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), peerIncarnationTimeout)
-	defer cancel()
-	resolver, err := unixidentity.NewNSSResolver(ctx)
-	if err != nil {
-		return "", false
-	}
-	return resolver.AccountIncarnationForRecordedUnsharedUID(account.UID, account.Name)
+	return managedPeerIncarnation(account, true)
 }
 
 // holderSpoolRecord is the guardian's current record of the uid key when it
@@ -80,7 +79,8 @@ func holderSpoolRecord(key string, account unixidentity.Account, accountSID stri
 		return enterprisehooks.IdentitySpoolRecord{}, false, nil
 	}
 	incarnation, known := managedHookPeerAccountIncarnation(account)
-	if !known {
+	if !known && record.AccountIncarnation == "files" && record.AccountSID == "" &&
+		record.Facts.Source == useridentity.SourceNSSFiles {
 		incarnation, known = managedHookPeerRecordedAccountIncarnation(account)
 	}
 	if !known || incarnation != record.AccountIncarnation {
@@ -136,9 +136,9 @@ var processGroupIDs = func() ([]int, error) {
 // tests replace it.
 var peerNSSFacts = resolveNSSPeerFacts
 
-// peerNSSResolver is the part of NSS a verified peer lookup needs. Tests
-// replace the factory to exercise the gateway's choice of proof without
-// depending on the host's NSS configuration.
+// peerNSSResolver is the NSS work this gateway does for one verified peer.
+// Keep the resolver boundary replaceable so the managed path can be tested
+// with a local uid absent from SSSD without changing the host's account DB.
 type peerNSSResolver interface {
 	LookupUID(int) (unixidentity.Account, error)
 	DirectoryFactsForUID(int, time.Time) (useridentity.DirectoryFacts, error)

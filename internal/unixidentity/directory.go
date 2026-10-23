@@ -2107,16 +2107,17 @@ func (r *NSSResolver) passwdAbsent(service, key string, byUID bool) error {
 var errServiceUncheckable = errors.New("DefenseClaw has no check for this NSS service")
 
 // passwdOwnerWithRecordedUnsharedUID names the NSS passwd service that holds
-// uid, asking the services of the passwd line in order as glibc does
-// (passwdProviders), with its answer. A service's "no such account" passes
-// the uid onward only when the miss is definitive (passwdAbsent): getent
-// reports an nslcd, ypbind, winbindd or SSSD that cannot answer the same
-// way, and an account a later service
+// uid, asking the services of the passwd line in order as glibc does, with
+// its answer. A service's "no such account" passes the uid on only when it
+// is definitive (passwdAbsent): getent reports an nslcd, ypbind, winbindd or
+// SSSD that cannot answer the same way, and an account a later service
 // still holds under the uid is then not proved to be the one the uid
 // belongs to. A service DefenseClaw has no check for (an Entra ID module,
 // another module) is taken at its word, as before. ErrNotFound when every
-// service says no account holds it. A guardian-recorded absence proof can
-// resolve the root-only SSSD check when unsharedRecorded is true.
+// service says no account holds it.
+// unsharedRecorded consumes only the guardian's root-only proof of an SSSD
+// miss. A live SSSD answer still owns the uid, and a miss from any other
+// service still needs its own proof.
 func (r *NSSResolver) passwdOwnerWithRecordedUnsharedUID(uid int, unsharedRecorded bool) (string, Account, error) {
 	services, err := passwdProviders()
 	if err != nil {
@@ -2565,9 +2566,10 @@ func (r *NSSResolver) AccountIncarnation(uid int, name string) (string, bool) {
 	return r.accountIncarnation(uid, name, false)
 }
 
-// AccountIncarnationForRecordedUnsharedUID names the current holder using a
-// guardian-recorded proof of SSSD's absence where that check needs root.
-// A newly found SSSD holder still changes the incarnation.
+// AccountIncarnationForRecordedUnsharedUID names the current account when
+// the guardian has recorded root's proof that SSSD held no account of this
+// uid. The caller must first validate that current guardian record for this
+// uid and name. A newly found SSSD holder still changes the incarnation.
 func (r *NSSResolver) AccountIncarnationForRecordedUnsharedUID(uid int, name string) (string, bool) {
 	return r.accountIncarnation(uid, name, true)
 }

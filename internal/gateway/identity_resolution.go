@@ -456,7 +456,7 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 	}
 	decision.Unproven = orderedFacts(needed)
 	decision.Candidates = candidates
-	decision.Refused = set.identityUncertaintyReason(subject, decision.Unproven, connectorName)
+	decision.Refused = set.identityUncertaintyReason(subject, decision.Unproven, connectorName, agent)
 	return decision
 }
 
@@ -479,7 +479,7 @@ func orderedFacts(facts []string) []string {
 // identityUncertaintyReason names each missing fact without naming a group,
 // another account or a candidate profile. The same text is used by hooks,
 // inspect, ACP, proxy, sandbox and the administrator's explain response.
-func (set *guardrailProfileSet) identityUncertaintyReason(subject *profileSubject, facts []string, connectorName string) string {
+func (set *guardrailProfileSet) identityUncertaintyReason(subject *profileSubject, facts []string, connectorName, agent string) string {
 	why := make([]string, 0, len(facts))
 	for _, fact := range facts {
 		switch fact {
@@ -503,12 +503,13 @@ func (set *guardrailProfileSet) identityUncertaintyReason(subject *profileSubjec
 		why = append(why, subject.tokenGroupsCause)
 	}
 	return "DefenseClaw refused this request: " + strings.Join(why, "; ") +
-		"; run `" + set.profileExplainCommand(subject, connectorName) + "` to inspect the identity decision"
+		"; run `" + set.profileExplainCommand(subject, connectorName, agent, slices.Contains(facts, "agent:unknown")) + "` to inspect the identity decision"
 }
 
 // profileExplainCommand names the installed administrator command for the
-// verified ID. Only a numeric uid or SID and a safe connector are included.
-func (set *guardrailProfileSet) profileExplainCommand(subject *profileSubject, connectorName string) string {
+// verified ID. A missing agent ownership fact includes the current verified
+// agent ID so explain checks the same assignment as the refused hook.
+func (set *guardrailProfileSet) profileExplainCommand(subject *profileSubject, connectorName, agent string, agentNeeded bool) string {
 	if subject == nil || subject.UserID != strings.TrimSpace(subject.UserID) || useridentity.KindForID(subject.UserID) == "" {
 		return "defenseclaw guardrail profile list"
 	}
@@ -525,6 +526,9 @@ func (set *guardrailProfileSet) profileExplainCommand(subject *profileSubject, c
 	}
 	if profileCommandToken(connectorName) {
 		command += " --connector " + connectorName
+	}
+	if agentNeeded && profileCommandToken(agent) {
+		command += " --agent " + agent
 	}
 	return command
 }
@@ -685,9 +689,9 @@ func profileCoverConnectors(connectorName string) []string {
 }
 
 // profileCovers reports whether profile a enforces at least what profile b
-// enforces for a request decided for connectors: the same sandbox section,
-// and wherever b blocks (action, by the hook mode or by the inspect and
-// proxy mode) a blocks too, with b's rule pack and rules, from a block
+// enforces for a request decided for connectors: a sandbox floor at least as
+// strict as b's, and wherever b blocks (action, by the hook mode or by the
+// inspect and proxy mode) a blocks too, with b's rule pack and rules, from a block
 // level at or below b's, and with a HILT that asks wherever b's asks. Where
 // b only observes it blocks nothing, so a's guardrail settings there do not
 // matter. A name that is not a profile is the base configuration. alert_at
@@ -698,7 +702,7 @@ func (set *guardrailProfileSet) profileCovers(a, b string, connectors []string) 
 		return true
 	}
 	ca, cb := set.profileConfig(a), set.profileConfig(b)
-	if ca == nil || cb == nil || !reflect.DeepEqual(set.profileSandbox(a), set.profileSandbox(b)) {
+	if ca == nil || cb == nil || !set.sandboxFloorCovers(a, b) {
 		return false
 	}
 	for _, name := range connectors {
@@ -735,13 +739,28 @@ func hiltCovers(enabledA bool, minA int, enabledB bool, minB int) bool {
 	return !enabledB || (enabledA && minA <= minB)
 }
 
-// profileSandbox is the sandbox section of profile name; nil for the base
-// configuration.
-func (set *guardrailProfileSet) profileSandbox(name string) *config.OpenShellAdminConfig {
-	if set.base == nil {
-		return nil
+// sandboxFloorCovers compares the effective floors, including all members of
+// a combined profile. Reapplying b's floor to a must change nothing; a pack
+// conflict or any incomparable setting keeps the assignment uncertain.
+func (set *guardrailProfileSet) sandboxFloorCovers(a, b string) bool {
+	floor := func(name string) (config.OpenShellAdminConfig, bool) {
+		if name == "" {
+			base, err := config.TightenOpenShellAdmin(set.base.OpenShell.Admin, nil)
+			return base, err == nil
+		}
+		derived, ok := set.derivedProfile(name)
+		return derived.Sandbox, ok
 	}
-	return set.base.Guardrail.Profiles[name].Sandbox
+	fa, ok := floor(a)
+	if !ok {
+		return false
+	}
+	fb, ok := floor(b)
+	if !ok {
+		return false
+	}
+	tightened, err := config.TightenOpenShellAdmin(fa, &fb)
+	return err == nil && reflect.DeepEqual(tightened, fa)
 }
 
 // profileStricter orders profiles that do not cover each other: a blocks

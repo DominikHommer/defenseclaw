@@ -81,7 +81,8 @@ func TestResolveNSSPeerFactsUsesSSSDFirstGuardianRecord(t *testing.T) {
 	installPeerNSSReviewFake(t, fake, true)
 	managedHookPeerAccountIncarnation = func(unixidentity.Account) (string, bool) { return "", false }
 	managedHookPeerRecordedAccountIncarnation = func(unixidentity.Account) (string, bool) { return "files", true }
-	write(enterprisehooks.IdentitySpoolRecord{User: fake.account.Name, AccountIncarnation: "files"})
+	write(enterprisehooks.IdentitySpoolRecord{User: fake.account.Name, AccountIncarnation: "files",
+		Facts: useridentity.DirectoryFacts{Source: useridentity.SourceNSSFiles, Directory: useridentity.DirectoryLocal}})
 
 	facts, err := resolveNSSPeerFacts(unixFactsUID)
 	if err != nil || fake.recordedCalls != 1 || facts.Source != useridentity.SourceNSSFiles || !facts.GuardianRecord {
@@ -151,8 +152,11 @@ func TestResolveNSSPeerFactsUsesOnlyAvailableUnsharedUIDProof(t *testing.T) {
 			recordedFacts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal, Source: useridentity.SourceNSSFiles,
 				Groups: []string{"dc-ml@corp.example"}, Assurance: useridentity.AssuranceVerified, ResolvedAt: time.Now()}}
 		installPeerNSSReviewFake(t, fake, true)
-		write(enterprisehooks.IdentitySpoolRecord{User: fake.account.Name, AccountIncarnation: "sid:current",
-			Facts: useridentity.DirectoryFacts{UPN: "dcad-strict@corp.example"}})
+		managedHookPeerAccountIncarnation = func(unixidentity.Account) (string, bool) { return "", false }
+		managedHookPeerRecordedAccountIncarnation = func(unixidentity.Account) (string, bool) { return "files", true }
+		write(enterprisehooks.IdentitySpoolRecord{User: fake.account.Name, AccountIncarnation: "files",
+			Facts: useridentity.DirectoryFacts{Source: useridentity.SourceNSSFiles, Directory: useridentity.DirectoryLocal,
+				UPN: "dcad-strict@corp.example"}})
 		facts, err := resolveNSSPeerFacts(unixFactsUID)
 		if err != nil || fake.recordedCalls != 1 || facts.Directory != useridentity.DirectoryLocal ||
 			facts.UPN != "dcad-strict@corp.example" || !facts.GuardianRecord || facts.SpoolSeenAt.IsZero() {
@@ -219,7 +223,10 @@ func TestResolveNSSPeerFactsUsesOnlyAvailableUnsharedUIDProof(t *testing.T) {
 		fake := &peerNSSReviewFake{account: unixidentity.Account{UID: 6001, Name: "dcad-strict"},
 			recordedErr: &unixidentity.SharedUIDError{UID: 6001, Accounts: []string{"local", "sss"}}}
 		installPeerNSSReviewFake(t, fake, true)
-		write(enterprisehooks.IdentitySpoolRecord{User: fake.account.Name, AccountIncarnation: "sid:current"})
+		managedHookPeerAccountIncarnation = func(unixidentity.Account) (string, bool) { return "", false }
+		managedHookPeerRecordedAccountIncarnation = func(unixidentity.Account) (string, bool) { return "files", true }
+		write(enterprisehooks.IdentitySpoolRecord{User: fake.account.Name, AccountIncarnation: "files",
+			Facts: useridentity.DirectoryFacts{Source: useridentity.SourceNSSFiles, Directory: useridentity.DirectoryLocal}})
 		facts, err := resolveNSSPeerFacts(unixFactsUID)
 		var shared *unixidentity.SharedUIDError
 		if !errors.As(err, &shared) || !facts.ResolvedAt.IsZero() || fake.recordedCalls != 1 {
