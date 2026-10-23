@@ -1134,13 +1134,10 @@ if [[ -n "${PREV_VERSION}" && -z "$(gateway_pid || true)" ]] \
 fi
 if [[ -n "${PREV_VERSION}" && "${RUN_QUICKSTART}" != true && ! -f "${DEFENSECLAW_HOME}/config.yaml" && -z "${DEFENSECLAW_CONFIG:-}" ]]; then
     # An earlier install that was never initialized: say how to start, as a
-    # fresh install does, with the connector picked back then.
-    NEXT_CONNECTOR="${CONNECTOR}"
-    if [[ -z "${NEXT_CONNECTOR}" && -f "${DEFENSECLAW_HOME}/picked_connector" ]]; then
-        NEXT_CONNECTOR="$(head -n 1 "${DEFENSECLAW_HOME}/picked_connector" | tr -cd 'a-z0-9_-')"
-    fi
-    if [[ -n "${NEXT_CONNECTOR}" && "${NEXT_CONNECTOR}" != none ]]; then
-        printf "  DefenseClaw is not set up yet. Next: ${CYAN}defenseclaw init --connector %s${NC}\n" "${NEXT_CONNECTOR}"
+    # fresh install does. The connector an earlier install recorded is not
+    # named: it may be the codex picked with no terminal to ask on (GAP-0568).
+    if [[ -n "${CONNECTOR}" && "${CONNECTOR}" != none ]]; then
+        printf "  DefenseClaw is not set up yet. Next: ${CYAN}defenseclaw init --connector %s${NC}\n" "${CONNECTOR}"
     else
         printf "  DefenseClaw is not set up yet. Next: ${CYAN}defenseclaw init${NC}\n"
     fi
@@ -2353,10 +2350,12 @@ pick_connector() {
     # An answer that is neither a number on the list nor a name is asked
     # again, never replaced with another agent (GAP-0333).
     while :; do
-        printf "  Choice (number or name) [default 1=codex]: " >&2
-        # No terminal to answer on: the default, as before.
+        printf "  Choice (number or name) [default none]: " >&2
+        # Enter, or no terminal to answer on: no agent. A default never picks
+        # one the machine may not have; 'defenseclaw init' finds the installed
+        # agents (GAP-0568).
         choice=$(read_tty_line) || choice=""
-        CONNECTOR="$(connector_choice "${choice:-1}")" && break
+        CONNECTOR="$(connector_choice "${choice:-none}")" && break
         tries=$((tries + 1))
         if [[ ${tries} -ge 3 ]]; then
             rm -rf "${STAGING}"

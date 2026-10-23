@@ -2998,10 +2998,12 @@ function Select-Connector {
     # An answer that is neither a number on the list nor a name is asked
     # again, never replaced with another agent (GAP-0333).
     for ($try = 1; $try -le 3; $try++) {
-        # No console to answer on: the default, as before.
-        try { $choice = Read-Host "  Choice (number or name) [default 1=codex]" } catch { $choice = "" }
+        # Enter, or no console to answer on: no agent. A default never picks
+        # one the machine may not have; 'defenseclaw init' finds the installed
+        # agents (GAP-0568).
+        try { $choice = Read-Host "  Choice (number or name) [default none]" } catch { $choice = "" }
         $answer = "$choice".Trim().ToLowerInvariant()
-        if (-not $answer) { $answer = "1" }
+        if (-not $answer) { $answer = "none" }
         $number = 0
         $picked = ""
         if ([int]::TryParse($answer, [ref]$number) -and $number -ge 1 -and $number -le $ConnectorChoices.Count) {
@@ -3854,14 +3856,10 @@ function Invoke-Install {
     }
     if ($PrevVersion -and -not $Setup -and -not $Quickstart -and -not $configured) {
         # An earlier install that was never initialized: say how to start, as a
-        # fresh install does, with the connector picked back then.
-        $nextConnector = $Connector
-        $pickedPath = Join-Path $DataDir "picked_connector"
-        if (-not $nextConnector -and (Test-Path -LiteralPath $pickedPath)) {
-            $nextConnector = ([string](Get-Content -LiteralPath $pickedPath -TotalCount 1)) -replace '[^a-z0-9_-]', ''
-        }
-        if ($nextConnector -and $nextConnector -ne "none") {
-            Write-Host "  DefenseClaw is not set up yet. Next: defenseclaw init --connector $nextConnector" -ForegroundColor Cyan
+        # fresh install does. The connector an earlier install recorded is not
+        # named: it may be the codex picked with no console to ask on (GAP-0568).
+        if ($Connector -and $Connector -ne "none") {
+            Write-Host "  DefenseClaw is not set up yet. Next: defenseclaw init --connector $Connector" -ForegroundColor Cyan
         } else {
             Write-Host "  DefenseClaw is not set up yet. Next: defenseclaw init" -ForegroundColor Cyan
         }

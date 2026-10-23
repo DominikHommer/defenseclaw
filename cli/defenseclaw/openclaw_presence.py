@@ -121,6 +121,30 @@ def openclaw_binary_installed() -> bool:
         return True
 
 
+def openclaw_installed(cfg: Any) -> bool:
+    """True when an openclaw.json candidate exists or an openclaw binary is found."""
+    return _openclaw_config_present(cfg) or openclaw_binary_installed()
+
+
+def openclaw_only_implied(cfg: Any) -> bool:
+    """True when only ``claw.mode`` names OpenClaw.
+
+    ``guardrail.connector`` is empty and ``guardrail.connectors`` has no
+    openclaw entry, so nothing but the ``claw.mode`` default (or a leftover
+    of it) selects OpenClaw. ``setup openclaw`` pins ``guardrail.connector``.
+    """
+    guardrail = getattr(cfg, "guardrail", None)
+    claw = getattr(cfg, "claw", None)
+    if claw is None:
+        return False
+    if str(getattr(guardrail, "connector", "") or "").strip():
+        return False
+    connectors = getattr(guardrail, "connectors", None) or {}
+    if isinstance(connectors, dict) and any(str(name).strip().lower() == "openclaw" for name in connectors):
+        return False
+    return str(getattr(claw, "mode", "") or "").strip().lower() == "openclaw"
+
+
 def openclaw_implied_but_not_installed(cfg: Any) -> bool:
     """True when the gateway reports the OpenClaw fleet off as "not installed".
 
@@ -138,19 +162,10 @@ def openclaw_implied_but_not_installed(cfg: Any) -> bool:
     if cfg is None:
         return False
     gateway = getattr(cfg, "gateway", None)
-    guardrail = getattr(cfg, "guardrail", None)
-    claw = getattr(cfg, "claw", None)
-    if gateway is None or claw is None:
+    if gateway is None:
         return False
     if str(getattr(gateway, "fleet_mode", "") or "").strip().lower() not in {"", "auto"}:
         return False
     if not _is_loopback_gateway_host(getattr(gateway, "host", "")):
         return False
-    if str(getattr(guardrail, "connector", "") or "").strip():
-        return False
-    connectors = getattr(guardrail, "connectors", None) or {}
-    if isinstance(connectors, dict) and any(str(name).strip().lower() == "openclaw" for name in connectors):
-        return False
-    if str(getattr(claw, "mode", "") or "").strip().lower() != "openclaw":
-        return False
-    return not _openclaw_config_present(cfg) and not openclaw_binary_installed()
+    return openclaw_only_implied(cfg) and not openclaw_installed(cfg)

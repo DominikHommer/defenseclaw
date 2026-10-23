@@ -16217,8 +16217,23 @@ def _doctor_cache_from_payload(raw: object) -> DoctorCache | None:
     )
 
 
+def _no_connector_configured(config: object) -> bool:
+    """True when ``config`` reports that it configures no connector.
+
+    A ``claw.mode`` that only implies an OpenClaw the machine does not have
+    configures none (GAP-0568), so the TUI names no agent for it.
+    """
+    configured = getattr(config, "has_connector_configured", None)
+    if not callable(configured):
+        return False
+    try:
+        return not configured()
+    except Exception:  # noqa: BLE001 - connector name is cosmetic in the shell.
+        return False
+
+
 def _active_connector(config: object | None) -> str:
-    if config is None:
+    if config is None or _no_connector_configured(config):
         return ""
     active = getattr(config, "active_connector", None)
     if callable(active):
@@ -16346,7 +16361,7 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
     except Exception as exc:  # noqa: BLE001 - a bad connector key must not blank the roster.
         actives = []
         roster_error = f"Connector roster unavailable: {exc}"
-    display_claw_mode = str(getattr(claw, "mode", "") or "")
+    display_claw_mode = "" if _no_connector_configured(config) else str(getattr(claw, "mode", "") or "")
     display_guardrail_connector = str(getattr(guardrail, "connector", "") or "")
 
     # A one-entry ``guardrail.connectors`` map is still connector-scoped.

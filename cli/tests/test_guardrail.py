@@ -1027,14 +1027,16 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         # Simulate scripts/install.sh --connector codex having recorded
         # the operator's choice. The CLI should pick it up without
         # requiring --connector / --agent on every subsequent setup call.
+        # The hint counts only for an installed agent (GAP-0568).
         atomic_write_private_bytes(os.path.join(self.tmp_dir, "picked_connector"), b"codex\n")
         self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
         self.app.cfg.claw.home_dir = self.tmp_dir
-        result = self.runner.invoke(
-            setup,
-            ["guardrail", "--non-interactive", "--mode", "observe", "--no-restart"],
-            obj=self.app,
-        )
+        with patch("defenseclaw.commands.cmd_setup._detect_installed_connectors", return_value=["codex"]):
+            result = self.runner.invoke(
+                setup,
+                ["guardrail", "--non-interactive", "--mode", "observe", "--no-restart"],
+                obj=self.app,
+            )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Connector: Codex (codex)", result.output)
 

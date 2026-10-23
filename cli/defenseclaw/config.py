@@ -81,6 +81,7 @@ from defenseclaw.file_permissions import (
     dotenv_key_is_valid,
     read_regular_file_no_follow,
 )
+from defenseclaw.openclaw_presence import openclaw_installed, openclaw_only_implied
 
 # libyaml parses a 150 KB policy config in tens of milliseconds where the
 # pure-Python SafeLoader takes 2 s, and every command parses config.yaml more
@@ -4111,12 +4112,17 @@ class Config:
         the shared list/scan resolver use this to avoid fabricating a
         phantom ``openclaw`` when nothing is set up.
 
-        NOTE: a *missing* config file still loads ``claw.mode`` as the
-        ``"openclaw"`` default (``config.load``), so this reports True
-        there — the unconfigured signal is the explicit empty marker
-        written on removal, not file absence.
+        A *missing* config file or claw block loads ``claw.mode`` as the
+        ``"openclaw"`` default (``config.load``). That reports True only
+        where OpenClaw is installed: a claw.mode that only implies an
+        OpenClaw the machine does not have configures nothing (GAP-0568,
+        :func:`_mark_openclaw_not_installed`).
         """
-        return bool(self.guardrail.connectors or self.guardrail.connector.strip() or self.claw.mode.strip())
+        if self.guardrail.connectors or self.guardrail.connector.strip():
+            return True
+        if getattr(self, "_openclaw_not_installed", False) and openclaw_only_implied(self):
+            return False
+        return bool(self.claw.mode.strip())
 
     def active_connectors(self) -> list[str]:
         """Return the full resolved set of connector names, sorted.
@@ -6322,6 +6328,21 @@ def _normalize_hook_fail_mode(value: Any) -> str:
     return "closed"
 
 
+def _mark_openclaw_not_installed(cfg: Config) -> None:
+    """Record that a claw.mode which only implies OpenClaw has no OpenClaw behind it.
+
+    A config.yaml without a claw block loads ``claw.mode: openclaw``, and init
+    wrote that default before 1.0.4. On a machine without OpenClaw
+    :meth:`Config.has_connector_configured` then reports no connector, so
+    status and the TUI name none (GAP-0568). Mirrors the Go loader, which
+    leaves a managed enterprise service as it was.
+    """
+    if _is_managed_enterprise_mode(cfg.deployment_mode):
+        return
+    if openclaw_only_implied(cfg) and not openclaw_installed(cfg):
+        object.__setattr__(cfg, "_openclaw_not_installed", True)
+
+
 def _apply_secure_client_hook_fail_default(cfg: Config, raw: dict[str, Any]) -> None:
     """Secure Client exception to the fail-closed hook default (#1163).
 
@@ -7518,6 +7539,7 @@ def load(
     cfg._source_config_version = source_config_version
     cfg._loaded_generation = _generation_of_loaded_text(cfg_file, loaded_text)
     _apply_secure_client_hook_fail_default(cfg, raw)
+    _mark_openclaw_not_installed(cfg)
     _migrate_llm_fields(cfg)
     _warn_plaintext_secrets(cfg)
     # Fail loud on invalid guardrail value invariants, mirroring the Go

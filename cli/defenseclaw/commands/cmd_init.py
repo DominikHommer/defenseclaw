@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from defenseclaw.config import Config
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.inventory import agent_discovery
+from defenseclaw.openclaw_presence import openclaw_installed
 from defenseclaw.paths import (
     bundled_guardrail_profiles_dir,
     bundled_local_observability_dir,
@@ -413,6 +414,12 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     if is_new_config:
         cfg = default_config()
         prepare_fresh_v8_config(cfg)
+        if not openclaw_installed(cfg):
+            # A fresh config defaults to OpenClaw. Without one on the machine,
+            # persist the "no connector" marker that init --connector none
+            # writes, so the gateway, status and uninstall never act on an
+            # OpenClaw that is not there (GAP-0568, as GAP-1056 for none).
+            cfg.claw.mode = ""
         click.echo("  Config:        " + ux._style("created new defaults", fg="green"))
         from defenseclaw.bootstrap import choose_first_run_api_port, choose_first_run_guardrail_port
 
@@ -432,8 +439,11 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         click.echo("  Config:        " + ux.dim("preserved existing"))
 
     cfg.environment = env
-    click.echo(f"  Claw mode:     {ux.bold(cfg.claw.mode)}")
-    click.echo(f"  Claw home:     {cfg.claw_home_dir()}")
+    if cfg.claw.mode.strip():
+        click.echo(f"  Claw mode:     {ux.bold(cfg.claw.mode)}")
+        click.echo(f"  Claw home:     {cfg.claw_home_dir()}")
+    else:
+        click.echo("  Connector:     none (add one with 'defenseclaw setup <connector>')")
 
     dirs = [
         cfg.data_dir,
@@ -1286,12 +1296,12 @@ def _prompt_connector_selection(
         ux.subhead("No host connector selected; DefenseClaw will not protect a host agent.")
         return ["none"]
 
-    fallback = agent_discovery.first_installed(disc, "codex")
     ux.subhead("No hook connectors were detected. Choose one active connector to configure.")
     ux.subhead(f"Choose none to protect no host agent now; {later}.")
     choices = platform_support.supported_connectors(sorted(connector_paths.KNOWN_CONNECTORS))
+    fallback = _installed_default_connector(disc)
     if fallback not in choices:
-        fallback = choices[0] if choices else "codex"
+        fallback = "none"
     raw = click.prompt(
         "  Connector",
         type=click.Choice([*choices, "none"], case_sensitive=False),
@@ -2513,6 +2523,21 @@ def _single_connector_option(values: str | tuple[str, ...] | None) -> str | None
     return values[0]
 
 
+def _installed_default_connector(disc) -> str:
+    """The connector a default picks: an installed one, else ``none``.
+
+    A default never selects an agent the machine does not have (GAP-0568):
+    with nothing detected, first-run sets up no connector, as
+    ``init --connector none`` does.
+    """
+    discovered = agent_discovery.first_installed(disc, "codex")
+    signal = disc.agents.get(discovered)
+    if signal and signal.installed and platform_support.connector_supported_on_os(discovered):
+        return discovered
+    installed = _installed_hook_connectors(disc)
+    return installed[0] if installed else "none"
+
+
 def _normalize_connector_arg(
     connector: str | None,
     *,
@@ -2521,16 +2546,10 @@ def _normalize_connector_arg(
 ) -> str:
     if connector is None and discover_default:
         try:
-            disc = agent_discovery.discover_agents(refresh=refresh_agents)
-            discovered = agent_discovery.first_installed(disc, "codex")
-            if platform_support.connector_supported_on_os(discovered):
-                connector = discovered
-            else:
-                installed = _installed_hook_connectors(disc)
-                connector = installed[0] if installed else "codex"
+            connector = _installed_default_connector(agent_discovery.discover_agents(refresh=refresh_agents))
         except Exception:
-            connector = "codex"
-    value = (connector or "codex").strip().lower()
+            connector = "none"
+    value = (connector or "none").strip().lower()
     if value in {"claude-code", "claude_code", "claude"}:
         return "claudecode"
     return value
@@ -3441,11 +3460,12 @@ def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
     Only applies connector values (host/port/token) when creating a new config.
     Existing configs preserve user-customized gateway settings.
     """
-    # SU-03: display the real primary connector (active_connector()), and gate
-    # the OpenClaw token-env on openclaw actually being active — never the
-    # phantom default of an empty guardrail.connector.
-    connector = cfg.active_connector()
-    openclaw_active = "openclaw" in cfg.active_connectors()
+    # SU-03: display the configured connectors, and gate the OpenClaw
+    # token-env on openclaw actually being active — never the phantom
+    # OpenClaw default of an unconfigured install (GAP-0568).
+    active = cfg.active_connectors()
+    connector = ", ".join(active) or "none"
+    openclaw_active = "openclaw" in active
     gw_info = _resolve_gateway_for_connector(cfg)
     token_configured = False
     if is_new_config:
@@ -3501,12 +3521,13 @@ def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
         f"  Skill watch:   enabled={cfg.gateway.watcher.skill.enabled}, "
         f"take_action={cfg.gateway.watcher.skill.take_action}"
     )
-    plugin_dirs = cfg.gateway.watcher.plugin.dirs or cfg.plugin_dirs()
+    # With no connector the gateway watches no connector folders.
+    plugin_dirs = cfg.gateway.watcher.plugin.dirs or (cfg.plugin_dirs() if active else [])
     click.echo(
         f"  Plugin watch:  enabled={cfg.gateway.watcher.plugin.enabled}, "
         f"take_action={cfg.gateway.watcher.plugin.take_action}"
     )
-    click.echo(f"  Plugin dirs:   {', '.join(plugin_dirs)}")
+    click.echo(f"  Plugin dirs:   {', '.join(plugin_dirs) or 'none'}")
     click.echo(f"  Device key:    {cfg.gateway.device_key_file}")
     click.echo()
     click.echo("  Run 'defenseclaw setup gateway' to customize.")

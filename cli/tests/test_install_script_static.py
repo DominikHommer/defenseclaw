@@ -128,13 +128,7 @@ def test_an_unknown_option_stops_and_value_options_take_the_equals_form(tmp_path
     assert "checksums.txt" in newer.stdout + newer.stderr
 
 
-@pytest.mark.parametrize(("answer", "rc", "expected"), [("ClaudeCode", 0, "Connector: claudecode"), ("99", 2, "No agent picked")])
-def test_the_agent_prompt_takes_a_name_and_never_swaps_an_unknown_answer(
-    tmp_path: Path, answer: str, rc: int, expected: str
-) -> None:
-    # GAP-0333: claudecode or 99 at the prompt installed codex without a word.
-    tty = tmp_path / "tty"
-    tty.write_text(answer + "\n", encoding="utf-8")
+def _pick_connector_script(tmp_path: Path, tty: Path) -> Path:
     text = INSTALL_SH.read_text(encoding="utf-8")
     script = tmp_path / "pick.sh"
     script.write_text(
@@ -147,12 +141,52 @@ def test_the_agent_prompt_takes_a_name_and_never_swaps_an_unknown_answer(
         + "pick_connector\n",
         encoding="utf-8",
     )
+    return script
 
-    result = _run([str(script)], tmp_path)
+
+@pytest.mark.parametrize(("answer", "rc", "expected"), [("ClaudeCode", 0, "Connector: claudecode"), ("99", 2, "No agent picked")])
+def test_the_agent_prompt_takes_a_name_and_never_swaps_an_unknown_answer(
+    tmp_path: Path, answer: str, rc: int, expected: str
+) -> None:
+    # GAP-0333: claudecode or 99 at the prompt installed codex without a word.
+    tty = tmp_path / "tty"
+    tty.write_text(answer + "\n", encoding="utf-8")
+
+    result = _run([str(_pick_connector_script(tmp_path, tty))], tmp_path)
 
     assert result.returncode == rc, result.stdout + result.stderr
     assert expected in result.stdout + result.stderr
     assert "Connector: codex" not in result.stdout
+
+
+@pytest.mark.parametrize("terminal", ["none", "enter"])
+def test_the_agent_prompt_default_picks_no_agent(tmp_path: Path, terminal: str) -> None:
+    # GAP-0568: with no terminal (curl | bash), or Enter at the prompt, the
+    # installer picked codex and recorded it in picked_connector, so setup and
+    # quickstart defaulted to an agent the machine may not have.
+    tty = tmp_path / "tty"
+    if terminal == "enter":
+        tty.write_text("\n", encoding="utf-8")
+
+    result = _run([str(_pick_connector_script(tmp_path, tty))], tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Connector: none" in result.stdout
+    assert "Connector: codex" not in result.stdout
+    assert "1=codex" not in result.stderr
+
+
+@pytest.mark.parametrize("script", ["install.sh", "install.ps1"])
+def test_the_not_set_up_next_step_names_no_recorded_connector(script: str) -> None:
+    # GAP-0568: an upgrade over a never-initialized install printed
+    # 'init --connector codex' from the codex an older installer recorded
+    # with no terminal to ask on, an agent the machine may not have.
+    text = (ROOT / "scripts" / script).read_text(encoding="utf-8")
+    start = text.index("An earlier install that was never initialized")
+    block = text[start : text.index("DefenseClaw is not set up yet. Next: ", start) + 200]
+
+    assert "picked_connector" not in block
+    assert "init --connector" in block
 
 
 def test_version_before_1_0_is_refused_without_network(tmp_path: Path) -> None:
