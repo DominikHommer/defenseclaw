@@ -95,7 +95,7 @@ enterprise:
 | `verify_only` | Only checks the file. When its entries are missing, it reports `missing_defenseclaw_hooks` and the export command to use. |
 | `off` | Neither writes nor checks the file. On Linux and macOS, Codex, Claude Code, Cursor and Copilot then get no DefenseClaw hooks at all, and `policy show` lists them as `ownership off: machine policy not managed`. OpenCode keeps its per-user plugin. |
 
-Quote `"off"`: YAML 1.1 tools read a bare `off` as the boolean `false`, which the config refuses. Use `verify_only` when an MDM already writes the file: export DefenseClaw's entries (below) and add them to the MDM's template. On Windows, `ownership` applies to Copilot and OpenCode and to the Claude Code [version floor](#claude-code-version-floor) drop-in; the Windows lifecycle writes `90-defenseclaw.json` whatever it says.
+Quote `"off"` so YAML 1.1 tools do not read a bare `off` as the boolean `false`. Use `verify_only` when an MDM already writes the file: export DefenseClaw's entries (below) and add them to the MDM's template. On Windows, `ownership` applies to Copilot and OpenCode and to the Claude Code [version floor](#claude-code-version-floor) drop-in; the Windows lifecycle writes `90-defenseclaw.json` whatever it says.
 
 ## Who writes machine policy
 
@@ -115,7 +115,7 @@ Codex, Claude Code and Cursor policy is written with Windows-specific code. A no
 
 ## Claude Code version floor
 
-DefenseClaw sets Claude Code's `requiredMinimumVersion` to 2.1.154 in `00-defenseclaw-version-floor.json`. Claude Code reads that setting only from 2.1.163, so today the floor stops no build; use application control to keep older builds off a host. Set `version_floor: enforce | report | "off"` under `connectors.claudecode`. [Detail](/docs/enterprise/configure/reference#claude-code-version-floor).
+DefenseClaw normally sets Claude Code's `requiredMinimumVersion` to 2.1.154 in `00-defenseclaw-version-floor.json`; builds below 2.1.163 do not read that setting. On standalone Windows, when every enrolled account runs 2.1.219 or later, the machine hook contract raises the floor to 2.1.219. Claude Code builds from 2.1.163 through 2.1.218 then refuse to start. Use application control for older builds. Set `version_floor: enforce | report | "off"` under `connectors.claudecode`. [Detail](/docs/enterprise/configure/reference#claude-code-version-floor).
 
 ## Higher-precedence sources
 

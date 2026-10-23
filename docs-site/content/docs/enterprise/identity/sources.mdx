@@ -319,7 +319,8 @@ ai_discovery:
 ```
 
 Each entry is a DNS domain of at least two labels, compared without regard to
-case and a trailing dot. `defenseclaw config validate` refuses a wildcard
+case and a trailing dot. On a managed Linux host, the administrator runs
+`sudo /opt/defenseclaw/bin/defenseclaw-gateway config validate ./config.yaml`; per-user installs use `defenseclaw config validate`. Validation refuses a wildcard
 (`*.corp.example.com`), a NetBIOS name (`EMEA`), an account (`alice@...` or
 `EMEA\alice`) and an entry listed twice. The gateway applies a changed list
 at reload and looks every account up again; the guardian uses it at its next
@@ -327,16 +328,21 @@ pass. List only domains of your forest that the domain controllers of the
 joined domain trust: a listed domain is trusted for every account SSSD holds
 in it.
 
-To see whether an account was trusted, run
-`defenseclaw guardrail profile explain --user gail@emea.corp.example.com --json`.
+On a managed Linux host, check an account as root:
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user gail@emea.corp.example.com --json
+```
+
+The per-user `defenseclaw guardrail profile explain` and `defenseclaw config get` commands refuse there. The configured `ai_discovery.trusted_ad_child_domains` list is in the administrator's `/etc/defenseclaw/config.yaml`.
+
 For an account of a child domain that is not listed, `subject.domain`,
 `subject.directory` and `subject.principal` are empty, and the text output
-shows the account name with no realm. `defenseclaw config get
-ai_discovery.trusted_ad_child_domains` shows the configured list.
+shows the account name with no realm.
 
 A users assignment that names only a principal (`alice@CORP.EXAMPLE.COM`)
-matches an account only while it has that principal. Check it with
-`defenseclaw guardrail profile explain --user alice --json`: `subject.principal`
+matches an account only while it has that principal. Check it with the managed
+`enterprise linux profile-explain --user alice --json`: `subject.principal`
 is the principal the gateway attributed, and is empty when no joined domain
 confirms the account's SID. Add the uid to the assignment when the account must
 match while SSSD does not answer; a short account name also matches a local or

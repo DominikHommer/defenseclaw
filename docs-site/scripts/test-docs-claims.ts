@@ -69,3 +69,102 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
     assert.ok(page('reference/configuration/fail-modes.mdx').includes('Hooks follow an open fail mode only when your config sets it'));
   });
 });
+
+describe('1.0.4 operator routes and limits', () => {
+  it('keeps managed readers off per-user HITL commands', () => {
+    const ask = page('how-to/guardrail/ask-before-risky-calls.mdx');
+    assert.match(ask, /managed computer.*guardrail\.connectors\.<id>\.hilt/i);
+    assert.match(ask, /per-user.*refus/i);
+  });
+
+  it('shows the managed OpenCode route', () => {
+    const opencode = page('connectors/opencode.mdx');
+    assert.match(opencode, /on a managed computer/i);
+    assert.match(opencode, /guardrail\.connectors\.opencode/);
+    assert.match(opencode, /enterprise policy verify/);
+    assert.match(opencode, /\/etc\/opencode\/opencode\.json/);
+  });
+
+  it('points managed identity checks to the administrator command', () => {
+    const identity = page('enterprise/identity/sources.mdx');
+    const childDomain = identity.split('On a managed Linux host, check an account as root:')[1]?.split('### Windows')[0] ?? '';
+    assert.match(identity, /administrator runs.*defenseclaw-gateway config validate/);
+    assert.match(childDomain, /enterprise linux profile-explain --user/);
+    assert.match(childDomain, /\/etc\/defenseclaw\/config\.yaml/);
+    assert.match(childDomain, /per-user.*commands refuse/);
+  });
+
+  it('says where a reported foreign hook can be seen', () => {
+    const guard = page('enterprise/configure/foreign-hook-guard.mdx');
+    assert.match(guard, /foreign_hooks: report.*enterprise policy show/i);
+    assert.doesNotMatch(guard, /hook prints a warning that names the file and digest/i);
+  });
+
+  it('gives a working managed restart route without promising it in the refusal', () => {
+    const lifecycle = page('enterprise/operate/lifecycle.mdx');
+    assert.match(lifecycle, /Windows \| Run the installed release's Setup with `\/repair JSON=1`/);
+    assert.doesNotMatch(lifecycle, /the refusal names the commands below/i);
+  });
+
+  it('does not promise a Fleet error message that payload inspection cannot reach', () => {
+    const fleet = page('reference/edge-connector/configuration.mdx');
+    assert.match(fleet, /payload_invalid/);
+    assert.match(fleet, /--payload <dir>/);
+    assert.doesNotMatch(fleet, /`fleet\.enabled is set but the managed payload has no policy_compiler\.py`/);
+  });
+
+  it('matches the Windows Claude Code version floor', () => {
+    const machine = page('enterprise/configure/machine-policy.mdx');
+    assert.match(machine, /Windows.*2\.1\.219.*2\.1\.163.*2\.1\.218/);
+    assert.doesNotMatch(machine, /floor stops no build/);
+  });
+
+  it('treats bare off as a YAML portability issue', () => {
+    const machine = page('enterprise/configure/machine-policy.mdx');
+    assert.doesNotMatch(machine, /bare `off`.*config refuses/);
+    assert.match(machine, /Quote `"off"`.*YAML 1\.1/);
+  });
+
+  it('distinguishes config validation from OpenShell install checks', () => {
+    const sandboxes = page('enterprise/runtime/sandboxes.mdx');
+    assert.match(sandboxes, /config validate.*(?:schema|profile).*ensure.*(?:install|pin)/i);
+    assert.doesNotMatch(sandboxes, /exits 1 where the gateway would refuse/);
+  });
+
+  it('gives an executable uninstall route after sandbox teardown', () => {
+    const uninstall = page('get-started/uninstall.mdx');
+    assert.match(uninstall, /If you already ran `defenseclaw sandbox teardown`.*add `--stop-sandboxes`/);
+    assert.match(uninstall, /--stop-sandboxes.*running sandboxes/i);
+  });
+
+  it('only names Agent360 panels that ship', () => {
+    const dashboard = readFileSync(
+      join(repo, 'bundles/local_observability_stack/grafana/dashboards/defenseclaw-agent-360.json'),
+      'utf8',
+    );
+    const agent360 = page('reference/observability/dashboards.mdx');
+    assert.equal(agent360.includes('Last seen'), dashboard.includes('Last seen'));
+  });
+
+  it('omits the retired Omnigent bridge from current receipt paths', () => {
+    const agent360 = page('reference/observability/dashboards.mdx');
+    assert.doesNotMatch(agent360, /Omnigent policy bridge/i);
+  });
+
+  it('pins the workspace route for older Kiro IDEs', () => {
+    const kiro = page('connectors/kiro.mdx');
+    assert.match(kiro, /before 1\.0\.182.*setup kiro --workspace/i);
+    assert.doesNotMatch(kiro, /Set `claw\.workspace_dir` to the project root before setup/);
+  });
+
+  it('states that CEL static cost can reject a regex below the size ceiling', () => {
+    const engine = page('reference/policy/cel/engine.mdx');
+    assert.match(engine, /512-byte CEL regex limit.*static cost limit can reject/i);
+  });
+
+  it('runs gateway examples on the pinned Go version through the shard runner', () => {
+    const engine = page('reference/policy/cel/engine.mdx');
+    assert.match(engine, /Go 1\.26\.4/);
+    assert.match(engine, /scripts\/go_test_shards\.py --package-dir internal\/gateway --shard-count 16/);
+  });
+});
