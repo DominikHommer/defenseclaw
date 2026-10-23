@@ -343,6 +343,11 @@ func TestOSSSetupKeepsHooksThroughExternalDotfileLinks(t *testing.T) {
 				}
 			}
 			if tc.connector == "codex" {
+				previousRequirements := codexSystemRequirementsPathForInspection
+				codexSystemRequirementsPathForInspection = func() (string, error) {
+					return filepath.Join(root, "absent-requirements.toml"), nil
+				}
+				t.Cleanup(func() { codexSystemRequirementsPathForInspection = previousRequirements })
 				t.Setenv("CODEX_HOME", settingsDir)
 				pointCodexConfig(t, settingsPath)
 			} else {
