@@ -157,6 +157,24 @@ func actionWindowsCommandDecision(command, cwd, home string, depth int) string {
 				start = end + 1
 				continue
 			}
+			if len(statement) == 5 && strings.HasPrefix(statement[0], "$") && statement[1] == "=" &&
+				strings.EqualFold(statement[2], "Join-Path") {
+				key := strings.ToLower(statement[0])
+				delete(values, key)
+				parent := statement[3]
+				if value, known := values[strings.ToLower(parent)]; known {
+					parent = value
+				}
+				child := statement[4]
+				if !strings.HasPrefix(child, "/") && !actionWindowsHome(child) &&
+					!strings.ContainsAny(child, "$%`*?[]") {
+					if joined, known := actionWindowsPath(parent+"/"+child, cwd, home); known {
+						values[key] = joined
+					}
+				}
+				start = end + 1
+				continue
+			}
 			for i, word := range statement {
 				if value, known := values[strings.ToLower(word)]; known {
 					statement[i] = value
@@ -194,7 +212,7 @@ func actionWindowsStatement(words []string, cwd, home string, depth int) string 
 	if program == "eval" || program == "invoke-expression" || program == "iex" {
 		return "eval-source"
 	}
-	if program == "cmd" || program == "cmd.exe" {
+	if program == "cmd" {
 		for i, word := range words[1:] {
 			if strings.EqualFold(word, "/c") || strings.EqualFold(word, "/k") {
 				if i+2 >= len(words) {

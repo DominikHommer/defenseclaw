@@ -31,6 +31,7 @@ func TestR104LeadPrivateKeyReaderForms(t *testing.T) {
 		`gsed -n 1p ~/.ssh/id_rsa`,
 		`awk 'NR==1 {print}' ~/.ssh/id_rsa`,
 		`tail -n 1 "$HOME/.ssh/id_rsa"`,
+		`head -c 0 ~/.ssh/id_rsa`,
 		`python3 -c "from pathlib import Path; print(Path.home().joinpath('.ssh/id_rsa').read_text())"`,
 	} {
 		t.Run(command, func(t *testing.T) {
@@ -50,7 +51,6 @@ func TestR104LeadPrivateKeyReaderForms(t *testing.T) {
 		`tail -n 1 "$HOME/report.txt"`,
 		`python3 -c "from pathlib import Path; print(Path.home().joinpath('report.txt').read_text())"`,
 		`python3 -c "from pathlib import Path; print(Path.home().joinpath('.ssh/id_rsa').stat())"`,
-		`head -c 0 ~/.ssh/id_rsa`,
 		`ssh -i ~/.ssh/id_rsa build.example.com true`,
 	} {
 		t.Run("control "+command, func(t *testing.T) {

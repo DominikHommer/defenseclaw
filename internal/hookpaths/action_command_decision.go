@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -42,6 +43,7 @@ func actionCommandDecision(command, cwd, home string, depth int) string {
 		return ""
 	}
 	called := calledFunctions(file, home)
+	functionArgs := actionLiteralFunctionArgs(file, home)
 	straightLine := make(map[*syntax.Stmt]bool, len(file.Stmts))
 	for _, stmt := range file.Stmts {
 		straightLine[stmt] = true
@@ -56,13 +58,22 @@ func actionCommandDecision(command, cwd, home string, depth int) string {
 			return false
 		}
 		if declaration, ok := node.(*syntax.FuncDecl); ok {
-			return declaration.Name != nil && called[declaration.Name.Value]
+			if declaration.Name == nil || !called[declaration.Name.Value] {
+				return false
+			}
+			for i, value := range functionArgs[declaration.Name.Value] {
+				values[strconv.Itoa(i+1)] = value
+			}
+			return true
 		}
 		stmt, ok := node.(*syntax.Stmt)
 		if !ok {
 			return true
 		}
 		if straightLine[stmt] {
+			for i := 1; i <= 9; i++ {
+				delete(values, strconv.Itoa(i))
+			}
 			actionUpdateValues(stmt, values, cwd, home)
 		} else {
 			actionForgetValues(stmt, values, home)
@@ -114,9 +125,12 @@ func actionCommandDecision(command, cwd, home string, depth int) string {
 				value, static = actionWordValue(arg, values, cwd, home)
 			}
 			if !static {
+				safeProcess := actionKnownReadOnlyProcessSubstitution(arg, home)
 				if actionPathArgument(programBase(program), i+1, len(call.Args)) &&
 					!actionBoundedCallDestination(file, call, cwd, home) ||
-					wordHasCommandSubstitution(arg) && actionProgramMayWrite(programBase(program)) {
+					actionStmtMayWrite(stmt, home) && actionUnresolvedReadPathArgument(programBase(program)) && !safeProcess ||
+					wordHasCommandSubstitution(arg) && actionStmtMayWrite(stmt, home) &&
+						!safeProcess {
 					reason = "dynamic-argument"
 					return false
 				}
@@ -146,6 +160,74 @@ func actionCommandDecision(command, cwd, home string, depth int) string {
 		return reason == ""
 	})
 	return reason
+}
+
+func actionLiteralFunctionArgs(file *syntax.File, home string) map[string][]string {
+	args := make(map[string][]string)
+	counts := make(map[string]int)
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		if name, fixed := StaticWord(call.Args[0], home); fixed {
+			counts[name]++
+		}
+		return true
+	})
+	for _, stmt := range file.Stmts {
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			continue
+		}
+		name, fixed := StaticWord(call.Args[0], home)
+		if !fixed {
+			continue
+		}
+		if counts[name] != 1 {
+			continue
+		}
+		var values []string
+		for _, word := range call.Args[1:] {
+			value, known := StaticWord(word, home)
+			if !known {
+				values = nil
+				break
+			}
+			values = append(values, value)
+		}
+		args[name] = values
+	}
+	return args
+}
+
+// A read-only producer with fixed words cannot choose a write target through
+// its process-substitution body. The body is still walked separately for a
+// protected read or a resolved protected redirect.
+func actionKnownReadOnlyProcessSubstitution(word *syntax.Word, home string) bool {
+	if len(word.Parts) != 1 {
+		return false
+	}
+	sub, ok := word.Parts[0].(*syntax.ProcSubst)
+	if !ok || sub.Op != syntax.CmdIn || len(sub.Stmts) != 1 {
+		return false
+	}
+	stmt := sub.Stmts[0]
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(stmt.Redirs) != 0 || len(call.Assigns) != 0 || len(call.Args) == 0 {
+		return false
+	}
+	program, fixed := StaticWord(call.Args[0], home)
+	if !fixed || !strings.Contains(" printf echo sort ", " "+programBase(program)+" ") {
+		return false
+	}
+	for _, arg := range call.Args[1:] {
+		value, fixed := StaticWord(arg, home)
+		if !fixed || programBase(program) == "sort" && strings.HasPrefix(value, "-") {
+			return false
+		}
+	}
+	return true
 }
 
 func actionBoundedCallDestination(file *syntax.File, call *syntax.CallExpr, cwd, home string) bool {
@@ -192,6 +274,15 @@ func actionStmtMayWrite(stmt *syntax.Stmt, home string) bool {
 		return false
 	}
 	program, known := StaticWord(call.Args[0], home)
+	if known && programBase(program) == "sort" {
+		for _, arg := range call.Args[1:] {
+			if value, fixed := StaticWord(arg, home); fixed &&
+				(value == "-o" || value == "--output" || strings.HasPrefix(value, "-o") && len(value) > 2 ||
+					strings.HasPrefix(value, "--output=")) {
+				return true
+			}
+		}
+	}
 	return !known || actionProgramMayWrite(programBase(program))
 }
 
@@ -275,6 +366,15 @@ func actionPathArgument(program string, index, count int) bool {
 	return false
 }
 
+func actionUnresolvedReadPathArgument(program string) bool {
+	switch program {
+	case "cp", "gcp", "mv", "gmv", "install", "ln", "rsync",
+		"cat", "head", "tail", "sort", "wc":
+		return true
+	}
+	return false
+}
+
 func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, depth int) string {
 	if len(words) == 0 || words[0] == "" {
 		return ""
@@ -292,6 +392,31 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 	for _, target := range directLiteralProgramOperands(words, stmt, cwd, home) {
 		if protectedReachPath(target, protected, ssh) {
 			return "dynamic-argument"
+		}
+	}
+	if program == "sort" {
+		for i := 1; i < len(words); i++ {
+			word := words[i]
+			if word == "--" {
+				break
+			}
+			var target string
+			switch {
+			case word == "-o" || word == "--output":
+				if i+1 >= len(words) {
+					return "dynamic-argument"
+				}
+				target = words[i+1]
+			case strings.HasPrefix(word, "--output="):
+				target = strings.TrimPrefix(word, "--output=")
+			case strings.HasPrefix(word, "-o") && len(word) > 2:
+				target = word[2:]
+			default:
+				continue
+			}
+			if target == "" || protectedReachPath(OperandPath(target, cwd), protected, ssh) {
+				return "dynamic-argument"
+			}
 		}
 	}
 	if program == "cat" || program == "head" || program == "tail" || program == "sort" || program == "wc" || program == "grep" {
@@ -510,6 +635,15 @@ func actionGitDecision(words []string, cwd, home string, depth int) string {
 		return "dynamic-command"
 	}
 	subcommand := strings.ToLower(words[index])
+	if subcommand == "archive" {
+		// Plain git archive writes only to stdout. Options such as --output
+		// and --exec add a filesystem target or an external program.
+		if !unknownOption && len(commands) == 0 && len(words) == index+2 &&
+			words[index+1] != "" && !strings.HasPrefix(words[index+1], "-") {
+			return ""
+		}
+		return "dynamic-command"
+	}
 	if unknownOption && !strings.Contains(" blame diff for-each-ref grep log ls-files ls-remote rev-parse show status ", " "+subcommand+" ") {
 		return "dynamic-command"
 	}
