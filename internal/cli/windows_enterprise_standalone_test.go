@@ -803,7 +803,7 @@ func TestWindowsEnterpriseUnparseableConfigRefusalReportsTheRunningDeployment(t 
 	}
 }
 
-// GAP-1433: an ensure or upgrade whose config is refused first recovers a
+// GAP-1433, GAP-0705: ensure, upgrade, and repair whose config is refused first recover a
 // pending transaction with a repair that carries no sources, so the refusal
 // reports the restored deployment instead of leaving the services stopped.
 // Without a pending transaction only the refusal's status probe runs.
@@ -820,7 +820,9 @@ func TestWindowsEnterpriseConfigRefusalRecoversAPendingTransaction(t *testing.T)
 	}{
 		{"ensure", true, "Repair Status"},
 		{"upgrade", true, "Repair Status"},
+		{"repair", true, "Repair Status"},
 		{"ensure", false, "Status"},
+		{"repair", false, "Status"},
 	} {
 		pending := tc.pending
 		windowsEnterpriseStandaloneTransactionPending = func() bool { return pending }
