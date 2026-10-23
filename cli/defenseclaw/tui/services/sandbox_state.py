@@ -41,7 +41,7 @@ _MATCH_TEXT = {
     "connector": "this agent is assigned to it",
     "default": "the default for everyone",
     "default_unverified": "the default (your identity could not be verified)",
-    "default_lookup_failed": "the default (your directory couldn't be reached)",
+    "default_lookup_failed": "the default (no assignment needs missing facts)",
     "none": "no profile applies; your organization's floor does",
 }
 

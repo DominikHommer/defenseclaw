@@ -510,7 +510,8 @@ func TestGuardrailProfileSelectionIgnoresClaimedIdentity(t *testing.T) {
 // TestGuardrailProfileSelectsVerifiedDirectoryGroup runs the real S1
 // source: a verified subject's directory group selects the group's profile,
 // a request that only claims that user in its headers gets the default, and
-// a waited-on lookup that never resolved reports default_lookup_failed.
+// a waited-on lookup that never resolved refuses when an assignment needs
+// the missing fact, naming it (default_lookup_failed).
 func TestGuardrailProfileSelectsVerifiedDirectoryGroup(t *testing.T) {
 	prevOwner := processOwnerProfileSubject
 	processOwnerProfileSubject = func() (profileSubject, bool) { return profileSubject{}, false }
@@ -859,8 +860,8 @@ func TestLocalAccountGroupsCountEachGroupOnce(t *testing.T) {
 }
 
 // TestExplainReportsAFailedDirectoryLookup pins GAP-0124: when the directory
-// lookup of an account fails, explain says so, as a request gets
-// default_lookup_failed; it must not answer from the OS account database
+// lookup of an account fails, explain says so, as a request needing that
+// fact is refused and names it; it must not answer from the OS account database
 // with a profile no request receives.
 func TestExplainReportsAFailedDirectoryLookup(t *testing.T) {
 	previousBlocking := identityLookupBlocking.Load()
@@ -879,9 +880,10 @@ func TestExplainReportsAFailedDirectoryLookup(t *testing.T) {
 }
 
 // TestExplainShowsWhatRequestsGetWhileTheGatewayLookupFails pins GAP-0212:
-// explain resolves the account afresh, but the gateway's requests for it get
-// default_lookup_failed while its own lookups fail, and explain says so; groups
-// kept as numbers are named as a sign of an unreachable directory.
+// explain resolves the account afresh, but requests use the gateway's cached
+// outcome. With no assignment needing a missing fact, they use the default
+// (default_lookup_failed), and explain says so; groups kept as numbers are
+// named as a sign of an unreachable directory.
 func TestExplainShowsWhatRequestsGetWhileTheGatewayLookupFails(t *testing.T) {
 	previousBlocking := identityLookupBlocking.Load()
 	setIdentityLookupBlocking(true)
@@ -897,9 +899,17 @@ func TestExplainShowsWhatRequestsGetWhileTheGatewayLookupFails(t *testing.T) {
 	set := &guardrailProfileSet{}
 	decision := set.match(&explained, profileSubjectLookup, "", "")
 	view, warning := explainCacheView(set, &explained, decision, "", "", time.Now())
-	if view == nil || view["match"] != profileMatchDefaultLookupFailed || !strings.Contains(warning, "default_lookup_failed") ||
-		!strings.Contains(warning, "timeout") {
+	if view == nil || view["match"] != profileMatchDefaultLookupFailed || view["refused"] != false ||
+		!strings.Contains(warning, "default_lookup_failed") ||
+		!strings.Contains(warning, "timeout") || !strings.Contains(warning, "rerun explain after a successful lookup") ||
+		strings.Contains(warning, "the profile above applies") {
 		t.Fatalf("view %v, warning %q; want the lookup failure named", view, warning)
+	}
+	set.profiles = map[string]config.DerivedGuardrailProfile{"strict": {Digest: "strict-digest"}}
+	set.assignments = []config.ProfileAssignment{{Profile: "strict", Match: config.ProfileMatch{Groups: []string{"dc-sbx-devs"}}}}
+	view, _ = explainCacheView(set, &explained, decision, "", "", time.Now())
+	if view["refused"] != true || !strings.Contains(fmt.Sprint(view["refused_reason"]), "group") {
+		t.Fatalf("view %v; want explicit refusal state and missing group fact", view)
 	}
 	if note := unnamedGroupsNote(&explained, nil); !strings.Contains(note, "1 of this account's 1 group(s) are shown by number") {
 		t.Fatalf("unnamed groups note = %q", note)
@@ -1315,7 +1325,8 @@ func TestExplainShowsTheProfileRequestsStillGet(t *testing.T) {
 		return cached, now.Add(-7 * time.Minute), true
 	}
 	view, warning := explainCacheView(set, explained, decision, "", "", now)
-	if view["age_seconds"] != 420 || view["refresh_after_seconds"] != 480 || view["profile"] != "watch" || view["differs"] != true ||
+	if view["age_seconds"] != 420 || view["refresh_after_seconds"] != 480 || view["profile"] != "watch" ||
+		view["refused"] != false || view["differs"] != true ||
 		!strings.Contains(warning, "7m0s ago") || !strings.Contains(warning, "within 8m0s") {
 		t.Fatalf("view = %v, warning = %q; want 7 minute old facts that still give watch", view, warning)
 	}
