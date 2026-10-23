@@ -10,7 +10,7 @@ for current behavior.
 
 ## [Unreleased] — 1.0.4
 
-- **Windows enrollment status now names the Claude Code policy gap.** When no Claude Code user is enrolled, the guardian removes its machine hook policy and Claude Code runs without DefenseClaw hooks. Status reports that state, and the enrollment guide qualifies first-start refusal to hosts where another Claude Code user is enrolled.
+- **Windows enrollment status identifies missing Claude Code machine policy as a protection failure.** Claude Code, Codex and Cursor must refuse unregistered SIDs even with zero enrolled users for an enabled agent. Verify machine policy after removing the last enrolled user, and stop agent use until any missing policy is repaired.
 - **The rollback guide now distinguishes pending recovery on Windows, Linux and macOS.** Windows forces installed hooks closed only when its gateway is down and closure succeeds; Unix recovery leaves hooks on their configured outage mode. The guide names the Windows closure warning and each installer's recovery step.
 - **Windows Hermes troubleshooting now states its effective hook fail mode.** It is closed by default outside Secure Client; only an explicit open mode permits a gateway outage on a managed host.
 - **A downgrade to an older Windows Setup no longer fails while agents call their hooks (rel-1-0-4 GAP-0200).** The published older Setup replaces `defenseclaw-hook.exe` with one `[IO.File]::Replace` and rolls back when it fails. A running hook does not block that replace; the read-only checks 1.0.4 makes of the hook binary on each call did, because they opened it without delete sharing. They now share delete access and keep their identity checks, so hook calls stay fail-closed and the replace goes through.

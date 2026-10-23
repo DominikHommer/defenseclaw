@@ -298,13 +298,19 @@ After an uninstall or a reinstall, ask users to restart running agents; an agent
 ## Contain an incident
 
 - **Disable the account** in your directory or on the host, then remove it from enrollment.
-  DefenseClaw inspects and blocks agent actions; it does not disable accounts. Each user's hook and
-  telemetry credentials are bound to that user's uid or SID and authenticate only while the
-  guardian's authorization ledger protects that user, so they stop working on the guardian's next
-  pass after the removal. They never reach management routes, other connectors or another user's
-  identity. An account that is cut off and still runs an agent is refused, and on Windows each
-  refused call is audited with reason `enterprise_managed_sid_unregistered` (see
+  DefenseClaw inspects and blocks agent actions; it does not disable accounts. Per-user hook and
+  telemetry credentials are bound to their uid or SID and stop authenticating on the guardian's
+  next pass after removal. They never reach management routes, other connectors or another user's
+  identity. On Linux and macOS, machine-policy hooks keep inspecting a removed account by default;
+  set `unenrolled_users: deny` to refuse its calls. On Windows, a cut-off SID must be refused, with
+  an audited `enterprise_managed_sid_unregistered` decision while the hook is in force (see
   [Review the audit log](/docs/enterprise/install/windows#review-the-audit-log)).
+- **Check the machine policy after removal.** On managed Windows, Claude Code, Codex and Cursor must
+  refuse the cut-off account even with zero enrolled users for that agent. Run
+  `defenseclaw-gateway enterprise policy verify --json` and review each enabled agent. If its policy
+  is missing, keep the account disabled, stop that agent with application control, and repair the
+  deployment before allowing agent use. On Linux and macOS the policy stays machine-wide; use
+  `unenrolled_users: deny` when enrollment alone must refuse a call.
 - **Rotate the per-user credentials** on Linux and macOS when a user's credentials may have been
   copied to another account or host. See
   [Rotate per-user credentials](/docs/enterprise/operate/operations#rotate-per-user-credentials).

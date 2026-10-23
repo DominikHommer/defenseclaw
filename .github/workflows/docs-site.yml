@@ -6,6 +6,7 @@ on:
     paths:
       - 'docs-site/**'
       - 'docs/**'
+      - 'CHANGELOG.md'
       - 'policies/**'
       # test:docs-claims reads these product sources as well as the Intune packager.
       - 'packaging/mdm/**'
@@ -21,6 +22,7 @@ on:
     paths:
       - 'docs-site/**'
       - 'docs/**'
+      - 'CHANGELOG.md'
       - 'policies/**'
       # test:docs-claims reads these product sources as well as the Intune packager.
       - 'packaging/mdm/**'
