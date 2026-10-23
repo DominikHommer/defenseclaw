@@ -59,7 +59,7 @@ Under the Secure Client integration only, hooks fail open: an unset `guardrail.h
 
 | Connector | Behavior |
 | --- | --- |
-| GitHub Copilot CLI, Antigravity | The hooks follow the effective mode on Linux, macOS and Windows; the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) gives the result per install. Copilot and Antigravity still run a call when the hook times out or cannot start. |
+| GitHub Copilot CLI, Antigravity | The hooks follow the effective mode on Linux, macOS and Windows; the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) gives the result per install. Copilot and Antigravity still run a call when the hook times out or cannot start. Under Secure Client they stay open. |
 | Hermes | Its own hook has no fail-closed surface, but the DefenseClaw hook follows the effective mode on Linux, macOS and Windows: `closed` blocks a tool call while the gateway is down or answers unusably. Hermes itself still runs a call when the hook times out or cannot start. |
 | OpenClaw, ZeptoClaw | Proxy-backed, no hooks. Requests are blocked while the gateway is down, whatever `guardrail.hook_fail_mode` says. `guardrail fail-mode` lists them as `closed (proxy-backed, no hooks ...)`. |
 

@@ -49,6 +49,10 @@ def test_hermes_page_quotes_the_doctor_row(tmp_path, running, tag):
     with (
         mock.patch.object(cmd_doctor, "_hook_health_paths_from_lock", return_value=[str(hook)]),
         mock.patch.object(cmd_doctor, "_hermes_host_running", return_value=running),
+        # A registration the execution probe proves (W5b): the page quotes the
+        # host-state rows, not the probe's own setup failure.
+        mock.patch.object(cmd_doctor, "hermes_config_path", return_value=str(hook)),
+        mock.patch.object(cmd_doctor, "_hermes_registered_execution_problem", return_value=""),
         mock.patch.object(cmd_doctor, "_json_mode", False),
         mock.patch.object(cmd_doctor.ux, "_color_enabled", return_value=False),
         mock.patch.object(ux, "_configured_unicode_output", True),
