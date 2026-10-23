@@ -2626,6 +2626,278 @@ class DoctorGatewayHomeMismatchTests(unittest.TestCase):
         listener.assert_called_once()
         sleep.assert_not_called()
 
+    @staticmethod
+    def _hold_start_lock(data_dir: str):
+        """Hold the gateway start lock the way a start or restart does."""
+        import fcntl
+
+        handle = open(os.path.join(data_dir, "gateway.start.lock"), "w")  # noqa: SIM115
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return handle
+
+    @unittest.skipIf(os.name == "nt", "the gateway start lock is a POSIX flock here")
+    def test_listener_is_checked_after_a_restart_in_progress_finishes(self):
+        # GAP-0535: during a start or restart the listener can be mid-handover.
+        # Doctor waits for the restart that holds the start lock, then checks
+        # ownership once, instead of reporting the handover as a second owner.
+        import threading
+
+        from defenseclaw.commands import cmd_doctor
+
+        process = cmd_doctor._GatewayTrust("trusted", "verified", 4321, home_bound=True)
+        mid_restart = {
+            "ambiguous": cmd_doctor.ListenerEvidence(
+                "ambiguous", reason="multiple processes own listeners for the configured API endpoint: PIDs 4321, 9001"
+            ),
+            "missing": cmd_doctor.ListenerEvidence("missing", reason="no TCP listener on the configured API endpoint"),
+            "foreign": cmd_doctor.ListenerEvidence("ok", pid=9001),
+        }
+        for name, during in mid_restart.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                cfg = self._make_cfg(tmp)
+                result = _DoctorResult()
+                lock = self._hold_start_lock(tmp)
+                released = threading.Event()
+
+                def release(lock=lock, released=released):
+                    released.set()
+                    lock.close()
+
+                timer = threading.Timer(0.3, release)
+                timer.start()
+                try:
+                    with (
+                        patch.object(cmd_doctor, "_http_probe", return_value=(200, "{}")),
+                        patch.object(cmd_doctor, "_managed_gateway_process_trust", return_value=process),
+                        patch.object(
+                            cmd_doctor,
+                            "_managed_gateway_listener_evidence",
+                            side_effect=lambda *_a, during=during, released=released, **_k: (
+                                cmd_doctor.ListenerEvidence("ok", pid=4321) if released.is_set() else during
+                            ),
+                        ) as listener,
+                    ):
+                        cmd_doctor._check_gateway_home_mismatch(cfg, result)
+                finally:
+                    timer.join()
+                rows = [c for c in result.checks if c["label"] == "Gateway home"]
+                self.assertEqual([row["status"] for row in rows], ["pass"], result.checks)
+                self.assertEqual(listener.call_count, 2)
+
+    @unittest.skipIf(os.name == "nt", "the gateway start lock is a POSIX flock here")
+    def test_restart_still_in_progress_is_reported_as_such_not_as_a_second_owner(self):
+        from defenseclaw.commands import cmd_doctor
+
+        process = cmd_doctor._GatewayTrust("trusted", "verified", 4321, home_bound=True)
+        ambiguous = cmd_doctor.ListenerEvidence(
+            "ambiguous", reason="multiple processes own listeners for the configured API endpoint: PIDs 4321, 9001"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._make_cfg(tmp)
+            result = _DoctorResult()
+            lock = self._hold_start_lock(tmp)
+            try:
+                with (
+                    patch.object(cmd_doctor, "_http_probe", return_value=(200, "{}")),
+                    patch.object(cmd_doctor, "_managed_gateway_process_trust", return_value=process),
+                    patch.object(cmd_doctor, "_managed_gateway_listener_evidence", return_value=ambiguous) as listener,
+                    patch.object(cmd_doctor, "_GATEWAY_RESTART_WAIT_SECONDS", 0.3),
+                ):
+                    cmd_doctor._check_gateway_home_mismatch(cfg, result)
+            finally:
+                lock.close()
+
+        rows = [c for c in result.checks if c["label"] == "Gateway home"]
+        self.assertEqual([row["status"] for row in rows], ["warn"], result.checks)
+        detail = rows[0]["detail"]
+        self.assertIn("gateway start, restart or stop", detail)
+        self.assertIn("still in progress", detail)
+        self.assertIn("listener ownership was not checked", detail)
+        self.assertNotIn("multiple processes", detail)
+        if sys.platform.startswith("linux"):
+            # /proc/locks names the holder: this test process.
+            self.assertIn(f"(PID {os.getpid()})", detail)
+        listener.assert_called_once()
+
+    def _run_gateway_rows_during_restart(self, tmp: str, during, *, release_after: float | None, probe=None):
+        """Run Sidecar API, Gateway authentication and Gateway home while a
+        start, restart or stop holds the start lock; release it after
+        ``release_after`` seconds, or never. ``probe(released)`` answers each
+        /health request; by default the same document every time."""
+        import threading
+
+        from defenseclaw.commands import cmd_doctor
+
+        cfg = self._make_cfg(tmp)
+        result = _DoctorResult()
+        process = cmd_doctor._GatewayTrust("trusted", "verified", 4321, home_bound=True)
+        health = {sub: {"state": "disabled"} for sub in ("gateway", "watcher", "guardrail", "sandbox")}
+        health.update(api={"state": "running"}, telemetry={"state": "running"})
+        lock = self._hold_start_lock(tmp)
+        released = threading.Event()
+
+        def release():
+            released.set()
+            lock.close()
+
+        timer = threading.Timer(release_after, release) if release_after is not None else None
+        if timer:
+            timer.start()
+        try:
+            with (
+                patch.object(
+                    cmd_doctor,
+                    "_http_probe",
+                    side_effect=lambda *_a, **_k: probe(released.is_set()) if probe else (200, json.dumps(health)),
+                ),
+                patch.object(cmd_doctor, "_daemon_effective_gateway_token", return_value=("t", "", "")),
+                patch.object(cmd_doctor, "_authenticated_runtime_matches", return_value=(True, "")),
+                patch.object(cmd_doctor, "_gateway_cli_token_mismatch_detail", return_value=""),
+                patch.object(cmd_doctor, "_linux_foreign_listener_accounts", return_value=""),
+                patch.object(cmd_doctor, "_managed_gateway_process_trust", return_value=process),
+                patch.object(
+                    cmd_doctor,
+                    "_managed_gateway_listener_evidence",
+                    side_effect=lambda *_a, **_k: (
+                        cmd_doctor.ListenerEvidence("ok", pid=4321) if released.is_set() else during
+                    ),
+                ),
+                patch.object(cmd_doctor, "_GATEWAY_RESTART_WAIT_SECONDS", 0.3 if release_after is None else 5.0),
+                patch.object(
+                    cmd_doctor, "_wait_for_gateway_start_lock", wraps=cmd_doctor._wait_for_gateway_start_lock
+                ) as wait,
+            ):
+                sidecar_health = cmd_doctor._check_sidecar(cfg, result)
+                cmd_doctor._check_gateway_auth(cfg, result)
+                cmd_doctor._check_gateway_home_mismatch(cfg, result)
+        finally:
+            if timer:
+                timer.join()
+            lock.close()
+        rows = {
+            c["label"]: c for c in result.checks if c["label"] in {"Sidecar API", "Gateway authentication", "Gateway home"}
+        }
+        return result, rows, wait, sidecar_health
+
+    _MID_RESTART_LISTENERS = {
+        "ambiguous": ("ambiguous", "multiple processes own listeners for the configured API endpoint: PIDs 4321, 9001", 0),
+        "missing": ("missing", "no TCP listener on the configured API endpoint", 0),
+        "foreign": ("ok", "", 9001),
+    }
+
+    @unittest.skipIf(os.name == "nt", "the gateway start lock is a POSIX flock here")
+    def test_every_gateway_row_is_checked_after_a_restart_in_progress_finishes(self):
+        # GAP-0535: Sidecar API and Gateway authentication read the listener
+        # too; a handover in progress failed them while Gateway home waited.
+        from defenseclaw.commands import cmd_doctor
+
+        for name, (status, reason, pid) in self._MID_RESTART_LISTENERS.items():
+            during = cmd_doctor.ListenerEvidence(status, reason=reason, pid=pid)
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                result, rows, wait, _ = self._run_gateway_rows_during_restart(tmp, during, release_after=0.3)
+                self.assertEqual(
+                    {label: row["status"] for label, row in rows.items()},
+                    {"Sidecar API": "pass", "Gateway authentication": "pass", "Gateway home": "pass"},
+                    result.checks,
+                )
+                self.assertEqual(result.failed, 0, result.checks)
+                self.assertEqual(result.gateway_down, "")
+                wait.assert_called_once()
+
+    @unittest.skipIf(os.name == "nt", "the gateway start lock is a POSIX flock here")
+    def test_sidecar_api_reads_health_again_after_a_restart_in_progress_finishes(self):
+        # The /health read before the wait came from a listener that was never
+        # verified (here another process's); only the document read once this
+        # account's gateway holds the port describes it.
+        from defenseclaw.commands import cmd_doctor
+
+        foreign = {sub: {"state": "running"} for sub in ("gateway", "watcher", "guardrail", "api", "telemetry")}
+        foreign["policy"] = {"digest": "FOREIGN-DIGEST"}
+        ours = {sub: {"state": "disabled"} for sub in ("gateway", "watcher", "guardrail", "sandbox")}
+        ours.update(api={"state": "running"}, telemetry={"state": "running"}, policy={"digest": "OURS"})
+        during = cmd_doctor.ListenerEvidence("ok", pid=9001)
+        with tempfile.TemporaryDirectory() as tmp:
+            result, rows, wait, health = self._run_gateway_rows_during_restart(
+                tmp,
+                during,
+                release_after=0.3,
+                probe=lambda released: (200, json.dumps(ours if released else foreign)),
+            )
+        self.assertEqual(rows["Sidecar API"]["status"], "pass", result.checks)
+        self.assertEqual(health, ours)
+        subsystems = {c["label"].strip(" └─"): c["status"] for c in result.checks if "└─" in c["label"]}
+        self.assertEqual(subsystems["guardrail"], "skip", result.checks)
+        self.assertEqual(subsystems["sandbox"], "skip", result.checks)
+        self.assertFalse(result.sidecar_unverified)
+        wait.assert_called_once()
+
+        # The gateway stopped while the lock was held: the earlier 200 is not
+        # reported as a running sidecar.
+        with tempfile.TemporaryDirectory() as tmp:
+            result, rows, wait, health = self._run_gateway_rows_during_restart(
+                tmp,
+                during,
+                release_after=0.3,
+                probe=lambda released: (0, "connection refused") if released else (200, json.dumps(foreign)),
+            )
+        self.assertEqual(rows["Sidecar API"]["status"], "fail", result.checks)
+        self.assertIn("the gateway is not running", rows["Sidecar API"]["detail"])
+        self.assertEqual(result.gateway_down, "stopped")
+        self.assertIsNone(health)
+        self.assertFalse([c for c in result.checks if "└─" in c["label"]], result.checks)
+
+    @unittest.skipIf(os.name == "nt", "the gateway start lock is a POSIX flock here")
+    def test_restart_never_finishing_warns_on_every_gateway_row_after_one_wait(self):
+        from defenseclaw.commands import cmd_doctor
+
+        for name, (status, reason, pid) in self._MID_RESTART_LISTENERS.items():
+            during = cmd_doctor.ListenerEvidence(status, reason=reason, pid=pid)
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                result, rows, wait, _ = self._run_gateway_rows_during_restart(tmp, during, release_after=None)
+                self.assertEqual(
+                    {label: row["status"] for label, row in rows.items()},
+                    {"Sidecar API": "warn", "Gateway authentication": "warn", "Gateway home": "warn"},
+                    result.checks,
+                )
+                self.assertEqual(result.failed, 0, result.checks)
+                self.assertEqual(result.gateway_down, "")
+                for row in rows.values():
+                    self.assertIn("gateway start, restart or stop", row["detail"])
+                    self.assertIn("listener ownership was not checked", row["detail"])
+                    self.assertNotIn("multiple processes", row["detail"])
+                self.assertIn("after 0.3 s", rows["Gateway home"]["detail"])
+                self.assertIn("the gateway token was not sent", rows["Gateway authentication"]["detail"])
+                # One doctor run waits for the lock once, not once per row.
+                wait.assert_called_once()
+
+    @unittest.skipIf(os.name == "nt", "the gateway start lock is a POSIX flock here")
+    def test_gateway_start_lock_holder_reads_the_lock_without_taking_it(self):
+        from defenseclaw.commands import cmd_doctor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # No lock file, or a free one: no start or restart in progress.
+            self.assertIsNone(cmd_doctor._gateway_start_lock_holder(tmp))
+            open(os.path.join(tmp, "gateway.start.lock"), "w").close()
+            self.assertIsNone(cmd_doctor._gateway_start_lock_holder(tmp))
+            lock = self._hold_start_lock(tmp)
+            try:
+                expected = os.getpid() if sys.platform.startswith("linux") else 0
+                self.assertEqual(cmd_doctor._gateway_start_lock_holder(tmp), expected)
+                # Without /proc/locks the shared probe still sees the holder.
+                missing = os.path.join(tmp, "no-proc-locks")
+                self.assertEqual(cmd_doctor._gateway_start_lock_holder(tmp, proc_locks=missing), 0)
+                if sys.platform.startswith("linux"):
+                    # A waiter row is not a holder.
+                    info = os.stat(os.path.join(tmp, "gateway.start.lock"))
+                    device = f"{os.major(info.st_dev):02x}:{os.minor(info.st_dev):02x}:{info.st_ino}"
+                    waiter = os.path.join(tmp, "locks")
+                    with open(waiter, "w") as rows:
+                        rows.write(f"1: -> FLOCK  ADVISORY  WRITE 77 {device} 0 EOF\n")
+                    self.assertIsNone(cmd_doctor._gateway_start_lock_holder(tmp, proc_locks=waiter))
+            finally:
+                lock.close()
+            self.assertIsNone(cmd_doctor._gateway_start_lock_holder(tmp))
+
     def test_silent_when_api_not_reachable(self):
         from defenseclaw.commands import cmd_doctor
 
