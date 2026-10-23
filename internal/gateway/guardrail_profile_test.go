@@ -1795,11 +1795,11 @@ func TestSSSDQualifiedNamesDoNotGrantBareNamesakeProfile(t *testing.T) {
 	}
 }
 
-// PM-13: a bare users entry selects the directory account of that name and
-// never a local namesake, which falls to default_profile on Linux (SSSD next
-// to /etc/passwd), Windows (the domain next to the computer's SAM) and macOS
-// (an AD account next to the local node). The local account is selected by
-// its uid or SID, or as .\name (GAP-0305, GAP-0313, GAP-0418).
+// PM-13: a bare users entry never selects a local namesake. On an SSSD host
+// with qualified names it is ambiguous across trusted domains and refuses;
+// on Windows and macOS it selects the directory account. The local account
+// is selected by its uid or SID, or as .\name (GAP-0305, GAP-0313, GAP-0418,
+// GAP-0725).
 func TestBareUsersEntrySkipsLocalNamesake(t *testing.T) {
 	previous := identityFactsEnabled.Load()
 	setIdentityFactsEnabled(true)
@@ -1855,7 +1855,13 @@ func TestBareUsersEntrySkipsLocalNamesake(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			domain := profileSubjectFromVerified(tc.domain, true)
 			local := profileSubjectFromVerified(tc.local, true)
-			if got := set.match(&domain, profileSubjectVerified, "claudecode", ""); got.Name != "contractors" || got.Match != profileMatchUser {
+			got := set.match(&domain, profileSubjectVerified, "claudecode", "")
+			if tc.name == "linux" {
+				if got.Refused == "" || got.Match != profileMatchDefaultLookupFailed ||
+					!slices.Contains(got.Unproven, "account:ambiguous_short_name") {
+					t.Fatalf("qualified directory account: %+v, want ambiguous short-name refusal", got)
+				}
+			} else if got.Name != "contractors" || got.Match != profileMatchUser {
 				t.Fatalf("directory account: %+v, want contractors by user", got)
 			}
 			if got := set.match(&local, profileSubjectVerified, "claudecode", ""); got.Name != "floor" || got.Match != profileMatchDefault {
