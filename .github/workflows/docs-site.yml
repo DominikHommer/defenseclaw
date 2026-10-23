@@ -7,16 +7,24 @@ on:
       - 'docs-site/**'
       - 'docs/**'
       - 'policies/**'
-      # test:docs-claims reads the Intune packager.
+      # test:docs-claims reads these product sources as well as the Intune packager.
       - 'packaging/mdm/**'
+      - 'scripts/install.ps1'
+      - 'scripts/install.sh'
+      - 'cli/defenseclaw/commands/cmd_setup.py'
+      - 'internal/gateway/connector/hookexec/managed_hermes.go'
       - '.github/workflows/docs-site.yml'
   pull_request:
     paths:
       - 'docs-site/**'
       - 'docs/**'
       - 'policies/**'
-      # test:docs-claims reads the Intune packager.
+      # test:docs-claims reads these product sources as well as the Intune packager.
       - 'packaging/mdm/**'
+      - 'scripts/install.ps1'
+      - 'scripts/install.sh'
+      - 'cli/defenseclaw/commands/cmd_setup.py'
+      - 'internal/gateway/connector/hookexec/managed_hermes.go'
       - '.github/workflows/docs-site.yml'
   workflow_dispatch:
 

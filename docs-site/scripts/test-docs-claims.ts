@@ -93,18 +93,71 @@ describe('setup and rollback recovery guides', () => {
     assert.doesNotMatch(rollback, /agent hooks are not guarded until `defenseclaw-gateway start` succeeds/i);
   });
 
-  it('distinguishes closed hooks from a failed closure during pending Windows recovery', () => {
+  it('describes every Windows and Unix pending recovery hook state', () => {
     const installer = readFileSync(join(repo, 'scripts/install.ps1'), 'utf8');
     const closeHooks = /function Close-UnfinishedInstallHooks \{([\s\S]*?)\n\}\n\nfunction Clear-SetupDataDir/.exec(installer)?.[1];
     assert.ok(closeHooks, 'Windows installer hook closure path not found');
+    assert.match(closeHooks, /\(-not \$unfinished\.Count -and -not \$pending\) -or \(Get-GatewayProcess\)/);
+    assert.match(closeHooks, /-not \(Test-Path -LiteralPath \(Join-Path \$DataDir "hooks"\) -PathType Container\)/);
     assert.match(closeHooks, /if \(Close-AllHooks \$gateways\)/);
     assert.match(closeHooks, /every agent hook blocks tool calls until the gateway runs again/);
     assert.match(closeHooks, /agent hooks could not be closed: until the gateway runs, they follow the outage fail mode/);
 
+    const unixInstaller = readFileSync(join(repo, 'scripts/install.sh'), 'utf8');
+    const unixRestore = /restore_snapshot\(\) \{([\s\S]*?)\n\}\n\nrestart_old\(\)/.exec(unixInstaller)?.[1];
+    assert.ok(unixRestore, 'Unix installer incomplete restore path not found');
+    assert.match(unixRestore, /The snapshot stays \(with COMPLETE\), so the next run puts the rest back first/);
+    const unixRestart = /restart_old\(\) \{([\s\S]*?)\n\}\n\n# A 1\.0\.0 gateway/.exec(unixInstaller)?.[1];
+    assert.ok(unixRestart, 'Unix installer failed gateway restart path not found');
+    assert.match(unixRestart, /connectors in fail-closed mode block tool calls/);
+    const unixUndo = /undo_rollback\(\) \{([\s\S]*?)\n\}\n\n# A 0\.x release/.exec(unixInstaller)?.[1];
+    assert.ok(unixUndo, 'Unix installer failed rollback undo path not found');
+    assert.match(unixUndo, /gateway is not running, so agent hooks are not guarded/);
+    assert.match(installer, /is installed, but its gateway is not running, so agent hooks are not guarded/);
+
     const rollback = page('get-started/upgrade.mdx').split('## Rollback', 2)[1].split('## Update notices', 1)[0];
-    assert.match(rollback, /if (?:that|hook closure) succeeds, (?:they|hooks) block tool calls until the gateway runs again/i);
+    assert.match(rollback, /on Windows.*gateway is down.*installed hooks.*if (?:that|hook closure) succeeds, (?:they|hooks) block tool calls until the gateway runs again/i);
+    assert.match(rollback, /if the gateway is running or no hooks directory exists.*does not force hooks closed/i);
     assert.match(rollback, /if the installer warns that hooks could not be closed, they follow the configured outage fail mode.*configured open may allow tool calls/i);
+    assert.match(rollback, /on Linux and macOS.*does not force hooks closed.*gateway.*down.*closed.*block.*open.*allow/i);
+    assert.match(rollback, /unfinished snapshot.*run the same install command again/i);
+    assert.match(rollback, /if undoing the rollback also fails.*gateway down.*hooks not guarded/i);
     assert.match(rollback, /stop agent activity, fix the reported cause and run the recovery command the installer prints/i);
     assert.doesNotMatch(rollback, /hooks block tool calls until recovery finishes/i);
+  });
+});
+
+describe('Windows Hermes failure guidance', () => {
+  it('matches the native hook fail mode and names the managed outage exception', () => {
+    const hook = readFileSync(join(repo, 'internal/gateway/connector/hookexec/managed_hermes.go'), 'utf8');
+    const failMode = /func hermesFailsClosed\(opts Options\) bool \{([\s\S]*?)\n\}/.exec(hook)?.[1];
+    assert.ok(failMode, 'native Hermes failure mode not found');
+    assert.match(failMode, /opts\.ManagedEnterprise && !managedNativeDecision\(opts\)/);
+    assert.match(failMode, /opts\.StrictAvailability \|\| !strings\.EqualFold\(strings\.TrimSpace\(opts\.FailMode\), "open"\)/);
+    const windows = page('troubleshooting/windows.mdx');
+    assert.doesNotMatch(windows, /Hermes.*(?:fail-open setting|always shows failures as open)/i);
+    assert.match(windows, /Hermes.*closed by default.*explicitly.*open/i);
+    assert.match(windows, /managed host.*administrator.*open.*gateway outage/i);
+    assert.match(windows, /Secure Client.*open.*default/i);
+  });
+});
+
+describe('docs claim CI coverage', () => {
+  it('runs when any product source read by these checks changes', () => {
+    const testSource = readFileSync(fileURLToPath(import.meta.url), 'utf8');
+    const dependencies = [...testSource.matchAll(/join\(repo,\s*'([^']+)'/g)].map((match) => match[1]);
+    assert.ok(dependencies.includes('scripts/install.ps1'));
+    assert.ok(dependencies.includes('cli/defenseclaw/commands/cmd_setup.py'));
+    const workflow = readFileSync(join(repo, '.github/workflows/docs-site.yml'), 'utf8');
+    for (const [event, next] of [['push', 'pull_request'], ['pull_request', 'workflow_dispatch']]) {
+      const paths = workflow.split(`  ${event}:\n`, 2)[1]?.split(`  ${next}:\n`, 1)[0];
+      assert.ok(paths, `${event} path triggers not found`);
+      const patterns = [...paths.matchAll(/- '([^']+)'/g)].map((match) => match[1]);
+      for (const dependency of dependencies) {
+        assert.ok(patterns.some((pattern) => pattern === dependency ||
+          (pattern.endsWith('/**') && dependency.startsWith(pattern.slice(0, -2)))),
+        `${event} does not trigger docs claims for ${dependency}`);
+      }
+    }
   });
 });
