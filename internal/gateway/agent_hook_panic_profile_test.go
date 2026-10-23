@@ -247,8 +247,7 @@ func TestRecoveredHookFailModeByDeployment(t *testing.T) {
 						} else if deployment.name == "secure_client" {
 							want, wantMode, reason = "allow", mode, "Secure Client's unset or open fail mode allows recovered errors"
 						} else if deployment.name == "standalone" && failMode == "open" {
-							// The administrator's explicit open (owner decision 2026-10-20).
-							want, wantMode, reason = "allow", mode, "the administrator's open is effective on a managed standalone host"
+							reason = "the administrator's open applies to outages, not recovered evaluator errors"
 						} else if failMode == "open" && name != "cursor" {
 							want, wantMode, reason = "allow", mode, "explicit open is effective for this connector"
 						} else if failMode == "open" && name == "cursor" {

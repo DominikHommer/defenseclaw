@@ -54,6 +54,8 @@ for current behavior.
 
 ### Fixed
 
+- **Recovered hook evaluator errors follow the closed panic posture on standalone managed hosts.** An administrator's `hook_fail_mode: open` applies to eligible gateway outages, not an evaluator panic. Recovered panics block advisory and lifecycle events too; the fail-mode reference now describes that behavior and the possible Stop retry loop.
+
 - An interrupted Windows upgrade refuses to continue when gateway recovery fails, including on another retry. Restoring a snapshot now checkpoints and verifies required data and environment moves, retains recovery state on failure, and verifies an external config before reporting recovery (GAP-0444, GAP-0450).
 
 - **A refused proxy-provider setup restores the vendor configuration.** Provider verification now runs before setup is published as ready and rolls back a failed prerequisite. Correcting a ZeptoClaw provider key and retrying no longer reuses a stale blank-key snapshot or leaves an orphaned localhost redirect.

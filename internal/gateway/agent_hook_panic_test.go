@@ -690,11 +690,11 @@ func TestHandleAgentHook_PostEvaluationRecoveryUsesFailMode(t *testing.T) {
 // TestHookPanicResponseFailModeMatrix pins the recovered-evaluation verdict
 // for every registered connector that can block, in every guardrail mode and
 // for each place hook_fail_mode: open can come from. Closed installs, per-user
-// and standalone managed alike, deny every failed check even in observe
-// mode, including advisory and lifecycle events; an explicit open
-// (on a standalone managed device the administrator's, owner decision
-// 2026-10-20) and Secure Client's unset default keep their open failure
-// behavior; an explicit closed denies under Secure Client too.
+// and standalone managed alike, deny every recovered panic even in observe
+// mode, including advisory and lifecycle events. A standalone
+// administrator's open applies only to outages. Per-user explicit open and
+// Secure Client's unset default keep their open failure behavior; an
+// explicit closed denies under Secure Client too.
 func TestHookPanicResponseFailModeMatrix(t *testing.T) {
 	type deployment int
 	const (
@@ -759,9 +759,9 @@ func TestHookPanicResponseFailModeMatrix(t *testing.T) {
 					cfg := newConfig(t, d, mode, failSource, connectorName)
 					api := &APIServer{scannerCfg: cfg}
 					// Per-user Cursor fails closed in action mode whatever
-					// hook_fail_mode says; a managed Cursor takes the
-					// administrator's mode.
-					open := failSource != "closed" && (connectorName != "cursor" || d != perUser)
+					// hook_fail_mode says. A standalone administrator's open
+					// applies only to outages, not evaluator panics.
+					open := failSource != "closed" && d != standalone && (connectorName != "cursor" || d != perUser)
 					for _, event := range append(append([]string{}, blocking...), lifecycle...) {
 						name := strings.Join([]string{dName, connectorName, event, mode, failSource}, "/")
 						req := agentHookRequest{ConnectorName: connectorName, HookEventName: event}
@@ -830,6 +830,13 @@ func TestHookEvaluatorPanicClosedForEveryRegisteredEvent(t *testing.T) {
 }
 
 func TestClaudePostToolBatchEvaluatorPanicStopsContinuation(t *testing.T) {
+	// This regression needs the unversioned Claude Code contract. Keep the
+	// process home and the DefenseClaw version cache out of the operator's
+	// installed Claude Code state on every OS.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("DEFENSECLAW_HOME", home)
 	for _, deployment := range []struct{ name, mode, profile string }{
 		{"per-user", "", ""},
 		{"standalone", managed.DeploymentModeManagedEnterprise, managed.ProfileStandalone},
@@ -840,8 +847,12 @@ func TestClaudePostToolBatchEvaluatorPanicStopsContinuation(t *testing.T) {
 				injectPanicForProfile(t, "claudecode")
 				store, logger := testStoreAndLogger(t)
 				cfg := config.DefaultConfig()
+				cfg.DataDir = t.TempDir()
 				cfg.DeploymentMode, cfg.Enterprise.Profile = deployment.mode, deployment.profile
 				cfg.Guardrail.Mode, cfg.Guardrail.HookFailMode = mode, "closed"
+				if version := connector.LoadCachedAgentVersion(cfg.DataDir, "claudecode"); version != "" {
+					t.Fatalf("PostToolBatch test requires no Claude Code version cache; got %q", version)
+				}
 				server := &APIServer{scannerCfg: cfg, store: store, logger: logger}
 				response, _ := postPanicTestHook(t, server, "claudecode", "PostToolBatch")
 				if response["action"] != "block" || response["raw_action"] != "block" || response["mode"] != "action" || response["would_block"] != false {

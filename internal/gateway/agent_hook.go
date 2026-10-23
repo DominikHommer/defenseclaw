@@ -1682,9 +1682,11 @@ type hookCheckFailure struct {
 //
 // A failed check produced no usable policy verdict. A recovered panic under
 // closed fail mode always answers block, including advisory and lifecycle
-// events. Other failed checks retain the native event-capability mapping and
-// neutral stop handling. An explicitly open fail mode (or Secure Client's
-// unset default) retains its open failure verdict.
+// events. On a standalone managed host, an administrator's open applies to
+// eligible gateway outages, not a recovered panic. Other failed checks retain
+// the native event-capability mapping and neutral stop handling. Per-user
+// explicit open and Secure Client's unset-open default retain their open
+// failure verdict.
 func (a *APIServer) hookFailedCheckResponse(
 	ctx context.Context,
 	connectorName string,
@@ -1718,8 +1720,10 @@ func (a *APIServer) hookFailedCheckResponse(
 	// A failed check follows the connector's resolved fail mode, the
 	// administrator's on a managed computer (owner decision 2026-10-20): an
 	// explicit closed wins everywhere, Secure Client included, whose unset
-	// value resolves to open (#1163).
-	failOpen := cfg != nil && cfg.EffectiveActionHookFailModeForConnector(connectorName) == "open"
+	// value resolves to open (#1163). A standalone administrator's open is
+	// outage-only; an evaluator panic is an internal failure, not an outage.
+	failOpen := cfg != nil && cfg.EffectiveActionHookFailModeForConnector(connectorName) == "open" &&
+		(!failure.recoveredPanic || !cfg.StandaloneEnterprise())
 	if !failOpen && action == "block" && (!lifecycle || failure.recoveredPanic) {
 		// Observe mode applies to policy verdicts, not failed checks.
 		mode = "action"
