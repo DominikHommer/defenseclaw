@@ -826,6 +826,8 @@ def _print_agents(
         _status_row("Agents", ux.dim("(no active connector)"))
         return
 
+    refused_credentials = _refused_scoped_hook_credentials(cfg, health)
+
     gc = getattr(cfg, "guardrail", None)
     agent_missing = {c for c in actives if _agent_missing(cfg, c, health_map.get(c))}
     # ``guardrail.enabled: false`` (``setup guardrail --disable``, or the
@@ -932,7 +934,7 @@ def _print_agents(
             suffix = _connector_state_verb(runtime_state)
             if runtime_detail:
                 suffix += ux.dim(f" ({runtime_detail})")
-            suffix += _hook_runtime_degraded_suffix(cfg, conn)
+            suffix += _hook_runtime_degraded_suffix(cfg, conn, credential_refused=conn in refused_credentials)
             _echo_wrapped(
                 f"                {friendly} ({conn}) — mode={mode or '?'}"
                 f"{fail_mode_suffix}{source_suffix}{disclosure_suffix}{suffix}",
@@ -970,7 +972,11 @@ def _print_agents(
             else:
                 # A drifted or removed hook registration shows with the
                 # gateway stopped too (GAP-1230).
-                _echo_wrapped(f"                {dim_text}{_hook_runtime_degraded_suffix(cfg, conn)}", 18)
+                degraded = _hook_runtime_degraded_suffix(cfg, conn, credential_refused=conn in refused_credentials)
+                _echo_wrapped(
+                    f"                {dim_text}{degraded}",
+                    18,
+                )
 
 
 def _fetch_runtime_bound_health(client, cfg) -> dict | None:
@@ -1131,12 +1137,48 @@ def _effective_status_fail_mode(cfg, connector: str) -> dict:
         }
 
 
-def _hook_runtime_degraded_suffix(cfg, connector: str) -> str:
+_HOOK_CREDENTIAL_REFUSED_DETAIL = (
+    "the scoped hook credential is refused by the gateway (HTTP 401), "
+    "so hook calls cannot obtain policy decisions"
+)
+
+
+def _refused_scoped_hook_credentials(cfg, health: dict | None) -> set[str]:
+    """Ask the verified gateway whether installed scoped credentials authenticate.
+
+    Local token shape checks cannot catch a mode, owner, ACL or directory trust
+    fault, or a valid-looking token the gateway no longer recognizes. Doctor's
+    read-only hook-route probe covers the same refusal the native hook sees.
+    """
+    if not isinstance(health, dict) or not _fetch_health_connectors(health=health):
+        return set()
+    try:
+        from defenseclaw.commands.cmd_doctor import _connector_hook_credential_problems
+
+        return set(_connector_hook_credential_problems(cfg, None))
+    except Exception:  # noqa: BLE001 - retain status if the read-only probe is unavailable.
+        return set()
+
+
+def _hook_runtime_degraded_suffix(cfg, connector: str, *, credential_refused: bool = False) -> str:
     """`` — DEGRADED (...)`` when a hook script, token or registration drifted (GAP-1141, GAP-1138, GAP-1230)."""
     try:
-        from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems, repair_command
+        from defenseclaw.hook_integrity import (
+            HookProblem,
+            hook_registration_problems,
+            hook_runtime_problems,
+            repair_command,
+        )
 
-        problems = hook_runtime_problems(cfg, connector) or hook_registration_problems(cfg, connector)
+        problems = (
+            [HookProblem(
+                _HOOK_CREDENTIAL_REFUSED_DETAIL,
+                "run `defenseclaw doctor --passive` to diagnose the scoped hook credential",
+                blocking=True,
+            )]
+            if credential_refused
+            else hook_runtime_problems(cfg, connector) or hook_registration_problems(cfg, connector)
+        )
     except Exception:  # noqa: BLE001 - status must survive incomplete runtime state.
         return ""
     if not problems:
@@ -1840,6 +1882,7 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
         )
     health_map = _fetch_health_connectors(health=health)
     not_started = _connectors_not_started(health)
+    refused_credentials = _refused_scoped_hook_credentials(cfg, health)
     for name, row in rows.items():
         # The text roster already uses this authenticated runtime state. Keep
         # the JSON projection in agreement, including manual hook connectors.
@@ -1865,6 +1908,10 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
         )
         rows["opencode"]["state"] = runtime_state
         rows["opencode"]["runtime_detail"] = runtime_detail
+    for name in refused_credentials & rows.keys() & health_map.keys():
+        if rows[name].get("enabled"):
+            rows[name]["state"] = "degraded"
+            rows[name]["runtime_detail"] = _HOOK_CREDENTIAL_REFUSED_DETAIL
     cursor = rows.get("cursor")
     if cursor is not None:
         if cursor.get("enabled") and cursor.get("state") == "running":

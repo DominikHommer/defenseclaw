@@ -5526,6 +5526,9 @@ def _connector_hook_credential_problems(cfg, trust: _GatewayTrust | None) -> lis
             continue
         path = os.path.join(hooks_dir, f".hook-{scope}.token")
         if os.path.islink(path):
+            # The gateway refuses a redirected credential path. Do not read
+            # its target, but report the connector whose hooks will get 401.
+            problems.append(scope)
             continue
         if not os.path.isfile(path):
             # A gateway restart mints a missing credential as it replaces a
