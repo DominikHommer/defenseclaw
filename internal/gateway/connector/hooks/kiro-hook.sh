@@ -98,6 +98,8 @@ defenseclaw_harden_env
 FAIL_MODE="{{.FailMode}}"{{else if .SecureClientDelivery}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{else}}FAIL_MODE="{{.FailMode}}"
 # The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the agent's
 # environment is not read, so status and doctor report what runs (GAP-0315).{{end}}
+{{if and (not .Managed) (not .Sandbox)}}defenseclaw_close_during_install
+{{end}}
 {{end}}DEFENSECLAW_HOOK_CONNECTOR="kiro"
 DEFENSECLAW_HOOK_NAME="kiro-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
@@ -128,7 +130,9 @@ fi
 
 {{if .Sandbox}}defenseclaw_sandbox_require_token kiro kiro-hook "kiro tool"
 
-PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
+PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}")")" || {
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
+{{end}}
   echo "defenseclaw: kiro hook refusing oversized payload, blocking kiro tool (sandbox hooks fail closed)" >&2
   exit 2
 }
@@ -154,7 +158,9 @@ fail_response() {
   defenseclaw_handle_missing_token kiro kiro-hook "kiro hook" "${HOOK_DIR}/{{.TokenFile}}"
 fi
 
-PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
+PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}")")" || {
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
+{{end}}
   echo "defenseclaw: kiro hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" != "open" ]; then
     exit 2
@@ -189,7 +195,8 @@ fail_unreachable() {
 }
 
 fail_response() {
-  [ "$FAIL_MODE" = "open" ] ||
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
+{{end}}  [ "$FAIL_MODE" = "open" ] ||
     defenseclaw_allow_failed_stop_event kiro kiro-hook "" "${PAYLOAD:-}" "$1" response
   defenseclaw_log_hook_delivery_failure kiro kiro-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: kiro hook error: $1" >&2
@@ -267,7 +274,9 @@ RESULT=$(echo "$RESPONSE" | sed '$d')
 if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"
 elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/null; then
-  fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  fail_response "gateway returned HTTP ${HTTP_CODE}"
+{{else}}  fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
+{{end}}
 elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi
