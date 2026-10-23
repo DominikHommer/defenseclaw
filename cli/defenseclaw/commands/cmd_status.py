@@ -934,7 +934,10 @@ def _print_agents(
             suffix = _connector_state_verb(runtime_state)
             if runtime_detail:
                 suffix += ux.dim(f" ({runtime_detail})")
-            suffix += _hook_runtime_degraded_suffix(cfg, conn, credential_refused=conn in refused_credentials)
+            if conn in refused_credentials:
+                suffix += _hook_runtime_degraded_suffix(cfg, conn, credential_refused=True)
+            else:
+                suffix += _hook_runtime_degraded_suffix(cfg, conn)
             _echo_wrapped(
                 f"                {friendly} ({conn}) — mode={mode or '?'}"
                 f"{fail_mode_suffix}{source_suffix}{disclosure_suffix}{suffix}",
@@ -972,7 +975,11 @@ def _print_agents(
             else:
                 # A drifted or removed hook registration shows with the
                 # gateway stopped too (GAP-1230).
-                degraded = _hook_runtime_degraded_suffix(cfg, conn, credential_refused=conn in refused_credentials)
+                degraded = (
+                    _hook_runtime_degraded_suffix(cfg, conn, credential_refused=True)
+                    if conn in refused_credentials
+                    else _hook_runtime_degraded_suffix(cfg, conn)
+                )
                 _echo_wrapped(
                     f"                {dim_text}{degraded}",
                     18,
