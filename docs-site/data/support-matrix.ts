@@ -247,7 +247,7 @@ const connectorSources: ConnectorSource[] = [
     id: 'kiro',
     integration: 'Native hooks',
     minVersion: 'kiro-cli 2.27.1; Kiro IDE 1.0.182',
-    versionNote: 'Below 2.27.1, kiro-cli has non-interactive --v3 runs that load no hooks. An IDE before 1.0.182 cannot read global hooks. New setup below either floor is refused in every mode and profile. Managed status reports either below-floor product as uncovered and verify fails. Earlier managed CLI enrollments keep their interactive hooks across upgrade until updated. A supported Kiro IDE can be enrolled beside an older CLI.',
+    versionNote: 'Below 2.27.1, kiro-cli has non-interactive --v3 runs that load no hooks, so per-user setup refuses that CLI without a supported IDE. An IDE before 1.0.182 cannot read global hooks. Managed setup refuses an older IDE when it is the only Kiro installation, in every guardrail mode. Per-user setup can install enforcing hooks for an older IDE only with claw.workspace_dir set to the project root; without it, setup can still complete but doctor warns that the IDE runs without DefenseClaw hooks. Managed status reports either below-floor product as uncovered and verify fails. Earlier managed CLI enrollments keep their interactive hooks across upgrade until updated. A supported Kiro IDE can be enrolled beside an older CLI.',
     route: PER_USER,
     routeNote: 'ACP (Agent Client Protocol) editors are not supported in enterprise managed mode in DefenseClaw 1.0.',
   },

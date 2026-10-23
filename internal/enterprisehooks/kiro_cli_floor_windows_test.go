@@ -65,12 +65,26 @@ func TestApplyStandaloneRowStateKeepsAKiroRowAnEarlierReleaseEnrolledBelowTheFlo
 			if row.AgentVersion != tc.want || !row.IsEnabled() {
 				t.Fatalf("row = %+v, want enabled at %s", row, tc.want)
 			}
-			if tc.keptReport != (len(reports) == 1) {
+			wantReports := 0
+			if tc.keptReport {
+				wantReports = 1
+			}
+			if len(reports) != wantReports {
 				t.Fatalf("reports = %+v, want kept report %t", reports, tc.keptReport)
 			}
-			if tc.keptReport && (reports[0].Version != tc.installed || reports[0].Code != "kiro_cli_below_hook_floor" ||
-				!strings.Contains(reports[0].Reason, "is below 2.27.1")) {
-				t.Fatalf("report = %+v, want the version below the floor kept at 2.24.1", reports[0])
+			if tc.keptReport {
+				report := reports[0]
+				if report.Version != tc.installed || report.Code != "kiro_cli_below_hook_floor" ||
+					!strings.Contains(report.Reason, "is below 2.27.1") {
+					t.Fatalf("report = %+v, want the installed version below the floor", report)
+				}
+				if tc.installed != tc.want {
+					if !strings.Contains(report.Reason, "the row stays enrolled at "+tc.want) {
+						t.Fatalf("report = %+v, want the prior enrollment consequence", report)
+					}
+				} else if !strings.Contains(report.Reason, "non-interactive runs do not load them") {
+					t.Fatalf("report = %+v, want the unhooked non-interactive consequence", report)
+				}
 			}
 		})
 	}

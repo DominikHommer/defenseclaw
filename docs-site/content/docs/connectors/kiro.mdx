@@ -45,9 +45,12 @@ the CLI separately as unsupported: its non-interactive runs still send no
 hooks until it is updated. The managed guardian enrolls the IDE version and
 reports the older CLI as unprotected.
 
-Kiro IDE has its own floor, 1.0.182, for the global hook file. Setup refuses
-an older IDE in every profile and guardrail mode when it is the only Kiro
-installation. Managed `status` reports an installed older IDE as uncovered,
+Kiro IDE has its own floor, 1.0.182, for the global hook file. Managed setup
+refuses an older IDE in every guardrail mode when it is the only Kiro
+installation. Per-user setup still accepts an older IDE, but it needs
+`claw.workspace_dir` set to the project root to install an enforcing workspace
+hook copy. Without it, that IDE does not load DefenseClaw's global hooks and
+doctor warns. Managed `status` reports an installed older IDE as uncovered,
 and `verify` fails.
 
 ## Setup
