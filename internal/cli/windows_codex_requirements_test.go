@@ -88,8 +88,10 @@ func TestValidateWindowsStagedRetireGatewayImage(t *testing.T) {
 	}
 
 	// Folders below ProgramData are what Setup and the documented payload
-	// folders use. An unelevated account owns what it creates there, which
-	// both the descriptor and this check refuse, so only the refusals run.
+	// folders use. Setup writes its stage as LocalSystem; an administrator's
+	// payload folder must be owned by Administrators for Setup's source
+	// descriptor too. Only an elevated test can give its folders that owner,
+	// so an unelevated one runs only the refusals.
 	elevated := windows.GetCurrentProcessToken().IsElevated()
 	programData, err := winpath.TrustedProgramData()
 	if err != nil {
@@ -104,7 +106,22 @@ func TestValidateWindowsStagedRetireGatewayImage(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownByAdministrators := func(t *testing.T, path string) {
+		t.Helper()
+		if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+			windows.OWNER_SECURITY_INFORMATION, administrators, nil, nil, nil); err != nil {
+			t.Fatalf("own %s by Administrators: %v", path, err)
+		}
+	}
 	const adminOnly = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+	// ProgramData's stock DACL without its CREATOR OWNER template: what an
+	// administrator's payload folder keeps once its creator's own grant is
+	// removed, including the Users create-file grant on folders.
+	const programDataLike = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;CI;0x116;;;BU)"
 	const usersModify = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;BU)"
 	setDACL := func(t *testing.T, path, sddl string) {
 		t.Helper()
@@ -122,6 +139,7 @@ func TestValidateWindowsStagedRetireGatewayImage(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	setDACL(t, root, programDataLike)
 	cases := []struct {
 		name      string
 		folder    string
@@ -130,7 +148,7 @@ func TestValidateWindowsStagedRetireGatewayImage(t *testing.T) {
 		admitted  bool
 	}{
 		{name: "Setup stage", folder: filepath.Join(root, "DefenseClaw-Enterprise-Setup-"+hex.EncodeToString(suffix)), folderACL: adminOnly, admitted: true},
-		{name: "payload folder inheriting ProgramData", folder: filepath.Join(root, "payload"), admitted: true},
+		{name: "payload folder with ProgramData's Users grants", folder: filepath.Join(root, "payload"), admitted: true},
 		{name: "payload folder with a libexec folder", folder: filepath.Join(root, "pipeline", "libexec"), admitted: true},
 		{name: "payload folder users can modify", folder: filepath.Join(root, "writable"), folderACL: usersModify},
 		{name: "gateway file users can modify", folder: filepath.Join(root, "writable-file"), folderACL: adminOnly, fileACL: usersModify},
@@ -152,6 +170,14 @@ func TestValidateWindowsStagedRetireGatewayImage(t *testing.T) {
 			}
 			if tc.fileACL != "" {
 				setDACL(t, executable, tc.fileACL)
+			}
+			if elevated {
+				for path := executable; ; path = filepath.Dir(path) {
+					ownByAdministrators(t, path)
+					if path == root {
+						break
+					}
+				}
 			}
 			err := validateWindowsStagedRetireGatewayImage(executable)
 			if tc.admitted && err != nil {
