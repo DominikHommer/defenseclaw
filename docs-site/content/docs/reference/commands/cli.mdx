@@ -1328,8 +1328,8 @@ guardian's health.
 
 | Command | Who runs it | Use it for |
 | --- | --- | --- |
-| `defenseclaw-gateway enterprise hooks status` | Administrator | Read-only: the last guardian reconcile and the authorization ledger |
-| `defenseclaw-gateway enterprise hooks verify` | Administrator | Read-only: verify every enabled target in the manifest without repairing it |
+| `defenseclaw-gateway enterprise hooks status` | Administrator on Linux and macOS. On Windows, `enterprise windows status` runs it | Read-only: the last guardian reconcile and the authorization ledger |
+| `defenseclaw-gateway enterprise hooks verify` | Administrator on Linux and macOS. On Windows, `enterprise windows verify` runs it | Read-only: verify every enabled target in the manifest without repairing it |
 | `defenseclaw-gateway enterprise hooks watch` | Guardian service | Watch the manifest's targets and repair them, with a periodic reconcile (`--interval`, default `1m`) |
 | `defenseclaw-gateway enterprise hooks reconcile` | Guardian and lifecycle | Install or repair every enabled target once |
 | `defenseclaw-gateway enterprise hooks install`, `uninstall` | Root or a guardian on Linux and macOS; only the guardian on Windows | Install, repair, or remove one user's hook registration |
@@ -1340,8 +1340,13 @@ guardian's health.
 lifecycle and the guardian use. The hooks commands read the managed config
 and the ledger directory from the service environment
 (`DEFENSECLAW_CONFIG`, `DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR`). To run `status`
-or `verify` yourself, use the same values as the guardian's unit or plist,
+or `verify` yourself on Linux or macOS, use the same values as the guardian's unit or plist,
 and pass `--manifest` on macOS (`/opt/cisco/defenseclaw/etc/hook-guardian/targets.yaml`).
+On a managed Windows computer an elevated prompt has none of the service's
+settings, so `enterprise hooks status` and `verify` refuse and name
+`enterprise windows status --profile standalone`. Run `enterprise windows status`
+or `verify` instead: each runs the hooks command with the service's settings
+and includes its result.
 
 ### ACP
 
