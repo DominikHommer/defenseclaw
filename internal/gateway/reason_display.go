@@ -80,6 +80,10 @@ func trustedBuiltInFindingLabel(label string) bool {
 			}
 		}
 	}
+	// The authorized-keys block after an archive extraction (GAP-1555).
+	if label == "persistence.ssh_authorized_keys_command:"+archiveBeforeWriteTitle {
+		return true
+	}
 	// A built-in CodeGuard rule on a file write (GAP-2029).
 	for _, rule := range scanner.BuiltinRulesMeta() {
 		if label == rule.ID+":"+strings.TrimSpace(rule.Title) {

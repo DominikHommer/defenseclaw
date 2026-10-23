@@ -554,13 +554,19 @@ Which commands prompt and which are flag-only is listed in the
 
 ### Protected-file write proof
 
-The write proof checks command text before a tool runs. It does not see what
-child programs write. A write inside a script, interpreter or shell built-in
-that the command only names cannot be fully checked from the command text.
-A rule that needs the complete action cannot block that inner write; an
-eligible rule about the complete outer argument list can still block the call
-in action mode. For protected files,
-use a sandbox or file permissions as an additional control.
+The bounded write proof checks effects visible in the tool call before it runs.
+It checks explicit write paths, shell redirects and supported inline programs.
+In action mode, an identified write is blocked when its destination cannot be
+proved to stay outside protected paths. Ordinary writes with a proved
+destination remain allowed. This check does not cover every program that a
+tool call can run, so it does not provide a complete filesystem write guarantee.
+
+A static local `awk -f` program is read within the work directory before the
+call runs. A program that writes through a protected path, or one that cannot
+be read within the size and file-type bounds, is blocked. Other separate script
+files, such as `python writer.py`, can have effects outside the tool-call
+proof. For protected files, use a sandbox or file permissions as an additional
+control.
 
 ## Common follow-ups
 

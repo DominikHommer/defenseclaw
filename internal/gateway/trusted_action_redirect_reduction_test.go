@@ -136,18 +136,19 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 		{
 			name:    "expansion in another command of the pipeline",
 			command: "echo " + redirectReductionMarker + " | tee /var/tmp/dc-x-$USER.txt",
-			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": blocks},
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
 		},
 		{
-			// A runtime cd or a function could change what the echo runs.
+			// An unknown directory does not change echo's argv or its
+			// standalone marker rule.
 			name:    "after a runtime-expanded cd",
 			command: "cd $DIR; echo " + redirectReductionMarker + " > $PWD/dc-x.txt",
-			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": blocks},
 		},
 		{
 			name:    "after a function definition",
 			command: "echo() { :; }; echo " + redirectReductionMarker + " > $PWD/dc-x.txt",
-			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": blocks},
 		},
 		{
 			name:    "no redirect",
@@ -179,10 +180,10 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
 		},
 		{
-			// A runtime-expanded export could change what echo runs.
+			// The later echo is still judged as a simple command.
 			name:    "after a runtime-expanded export",
 			command: "export PATH=$DIR; echo " + redirectReductionMarker + " $USER",
-			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
 		},
 		{
 			// A list is judged as if every command runs; its runtime-expanded
@@ -199,12 +200,11 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
 		},
 		{
-			// A rule that negates over commands decides on every command of
-			// the list, as for the same commands joined by ";": a later
-			// command's redirect turns it off.
+			// The first command has no stdout redirect when judged alone.
+			// The whole-action rule also sees the later redirect.
 			name:    "negation over a later command",
 			command: "echo " + redirectReductionMarker + " && echo done > /tmp/dc-x.txt",
-			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": absent, "TEST-MARKER-COMPLETE-ARGV": blocks},
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
 		},
 		{
 			// GAP-0616: a command in the background, a subshell, a group or
@@ -290,11 +290,11 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
 		},
 		{
-			// The view would drop what a command substitution in a loop
-			// word runs, so the loop is not reduced.
+			// The body is independently evaluated even when the loop word
+			// has a command substitution.
 			name:    "command substitution in a loop word",
 			command: "for i in $(ls); do echo " + redirectReductionMarker + "; done",
-			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly},
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks},
 		},
 		{
 			// GAP-0029: an && or || list member with a runtime-expanded
@@ -321,7 +321,7 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 		{
 			name:    "expanding argument after a runtime cd in an && list",
 			command: "cd $DIR && echo " + redirectReductionMarker + " $USER",
-			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly},
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks},
 		},
 		{
 			// GAP-1639: a PowerShell profile runs only before the body, so
@@ -362,7 +362,7 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 		{
 			name:    "pwsh -Command in a list",
 			command: `cd $DIR; pwsh -Command "echo ` + redirectReductionMarker + `"`,
-			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly},
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks},
 		},
 		{
 			// GAP-0616: as alone, `echo marker $USER` blocks.
@@ -452,8 +452,18 @@ func TestTrustedActionBlocksBuiltInRuleInEachStatementOfCompoundCommand(t *testi
 		{"X=1; rm -rf /", true},
 		{"X=; rm -rf /", true},
 		{"X=$HOME; rm -rf /", true},
+		{"echo $(rm -rf /)", true},
+		{"X=$(rm -rf /); true", true},
+		{"cat <(rm -rf /)", true},
+		{"f() { echo okay; }; f $(rm -rf /)", true},
+		{"for i in $(rm -rf /); do :; done", true},
+		{"case $(rm -rf /) in *) true;; esac", true},
+		{"f() { rm -rf /; }; f", true},
+		{"cat <<'EOF'\nhello\nEOF\nrm -rf /", true},
 		{"rm -rf /tmp/dc-x; echo $HOME", false},
 		{"(rm -rf /tmp/dc-x) 2>&1", false},
+		{"f() { rm -rf /; }; echo done", false},
+		{"cat <<'EOF'\nrm -rf /\nEOF\necho done", false},
 	} {
 		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 			Input: actionfacts.Input{
@@ -591,7 +601,8 @@ func TestTrustedActionRedirectReductionDecidesNegationOnCompleteFacts(t *testing
 // TestTrustedActionCorpusBlocksWithRuntimeExpandedRedirectTarget is the
 // corpus differential for built-in rules (#925): a POSIX corpus action that
 // blocks with an absolute redirect target also blocks with a target the
-// shell expands at run time, and one that does not block never starts to.
+// shell expands at run time. A glob in a write target is unresolvable and
+// must block even when the corresponding absolute target is ordinary.
 // It also pins the review of every built-in code prerequisite: one that
 // holds on a redirect-target view and its static-target twin holds on the
 // action with a concrete target too. A rule whose prerequisite needs a
@@ -614,7 +625,10 @@ func TestTrustedActionCorpusBlocksWithRuntimeExpandedRedirectTarget(t *testing.T
 			continue
 		}
 		if strings.ContainsAny(command[len(command)-1:], `&|\`) ||
-			strings.Contains(command, "<<") || strings.Contains(command, "\n") {
+			strings.Contains(command, "<<") || strings.Contains(command, "\n") ||
+			strings.Contains(command, "#{") {
+			// The corpus uses #{name} as a comment placeholder; a
+			// redirect appended to that line would not execute.
 			continue
 		}
 		posix = append(posix, test)
@@ -669,9 +683,13 @@ func TestTrustedActionCorpusBlocksWithRuntimeExpandedRedirectTarget(t *testing.T
 				for _, home := range []string{"/home/alice", ""} {
 					want := blocks(test, base+" > /home/alice/out.txt", home)
 					for _, target := range []string{"~/out.txt", `"$HOME/out.txt"`, "out-*.txt"} {
-						if got := blocks(test, base+" > "+target, home); got != want {
-							t.Errorf("%s home=%q target %s: block = %t, absolute target block = %t",
-								test.ID, home, target, got, want)
+						wantTarget := want
+						if target == "out-*.txt" && home != "" {
+							wantTarget = true
+						}
+						if got := blocks(test, base+" > "+target, home); got != wantTarget {
+							t.Errorf("%s home=%q target %s: block = %t, want %t",
+								test.ID, home, target, got, wantTarget)
 						}
 					}
 				}
@@ -800,7 +818,8 @@ func TestTrustedActionCustomArgvRuleMatchesUnmodeledProgram(t *testing.T) {
 // sourced by a static name before the command made the action opaque, so a
 // custom argv rule never ran and only its regex fallback recorded a
 // detection-only finding. A match on the commands after the sourced file
-// blocks; a dynamic file name still declines the view.
+// blocks when judged as a standalone command, including after a dynamic
+// source name.
 func TestTrustedActionArgvRuleBlocksAfterSourcedFile(t *testing.T) {
 	const connector = "sourced-file-reduction-test"
 	installRedirectReductionRules(t, connector,
@@ -812,7 +831,7 @@ func TestTrustedActionArgvRuleBlocksAfterSourcedFile(t *testing.T) {
 		"set -a; source .env; set +a; aws dynamodb scan --table-name T": true,
 		"cd app && source ./env.sh && aws dynamodb scan --max-items 3":  true,
 		"source .env && echo dynamodb":                                  false,
-		"source \"$ENV_FILE\" && aws dynamodb scan --table-name T":      false,
+		"source \"$ENV_FILE\" && aws dynamodb scan --table-name T":      true,
 		// The dot form is the same statement.
 		". .env && aws dynamodb scan --table-name T": true,
 		". .env && echo dynamodb":                    false,

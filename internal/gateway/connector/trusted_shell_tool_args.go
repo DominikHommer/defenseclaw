@@ -71,8 +71,9 @@ var copilotShellArgs = map[string]trustedShellArg{
 //
 // Arguments that change where or how the command runs are left for the
 // parser, which does not prove them: Devin's env, shell_flavor and shell_id,
-// Copilot's shellId, and OpenClaw's env, elevated, host and node. Claude Code's and Codex's shell calls take their
-// own hook paths (Codex passes its hooks only the command); OpenHands'
+// Copilot's shellId, and OpenClaw's env, elevated, host and node. Claude Code's
+// and Codex's shell calls take their own hook paths; the Codex exec_command
+// hook resolves its workdir before proving the command. OpenHands'
 // terminal, agy's run_command and Hermes' process have their own
 // projections, and OmniGent's sys_os_shell has only the command.
 var trustedShellTools = map[string]map[string]map[string]trustedShellArg{
@@ -185,7 +186,7 @@ func trustedShellArgValue(kind trustedShellArg, raw json.RawMessage) bool {
 // shellCommandKeys names, per connector and shell tool (as the tool is
 // named to hooks), the argument that holds the command: the tools
 // trustedShellTools lists, OpenHands' terminal, agy's run_command,
-// OmniGent's sys_os_shell, and Claude Code's and Codex's Bash.
+// OmniGent's sys_os_shell, Claude Code's Bash, and Codex's Bash and exec_command.
 var shellCommandKeys = map[string]map[string]string{
 	"opencode":    {"bash": "command"},
 	"hermes":      {"terminal": "command"},
@@ -198,7 +199,7 @@ var shellCommandKeys = map[string]map[string]string{
 	"antigravity": {"run_command": "CommandLine"},
 	"omnigent":    {"sys_os_shell": "command"},
 	"claudecode":  {"Bash": "command"},
-	"codex":       {"Bash": "command"},
+	"codex":       {"Bash": "command", "exec_command": "cmd"},
 	"openclaw":    {"exec": "command"},
 }
 

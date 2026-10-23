@@ -36,17 +36,6 @@ func applyTrustedActionContextDisposition(
 	facts actionfacts.Facts,
 	findings []RuleFinding,
 ) []RuleFinding {
-	return applyTrustedActionContextDispositionWithStatementFacts(
-		generation, facts, nil, findings,
-	)
-}
-
-func applyTrustedActionContextDispositionWithStatementFacts(
-	generation *compiledRulePackCategories,
-	facts actionfacts.Facts,
-	statementFactsByRule map[string]actionfacts.Facts,
-	findings []RuleFinding,
-) []RuleFinding {
 	adjusted := append([]RuleFinding(nil), findings...)
 	// Detection sees the complete action, while authorization considers only
 	// commands and redirects statically proven to execute. A harmless preview
@@ -55,9 +44,6 @@ func applyTrustedActionContextDispositionWithStatementFacts(
 	for index := range adjusted {
 		finding := adjusted[index]
 		findingFacts := enforcementFacts
-		if statementFacts, ok := statementFactsByRule[finding.RuleID]; ok {
-			findingFacts = statementFacts.EnforcementProjection()
-		}
 		if finding.RuleID == "CMD-WIN-REG-PERSIST" && finding.Severity == "HIGH" &&
 			finding.contributesToEnforcement() {
 			finding.enforcement = findingEnforcementAlertOnly
@@ -195,7 +181,9 @@ func trustedActionActiveSSHPrivateKeyContentRead(facts actionfacts.Facts) bool {
 				continue
 			}
 			return true
-		case "cat", "base64", "cp", "copy", "copy-item", "cpi",
+		// These readers return file content, including SSH private key data.
+		case "sed", "gsed", "awk", "gawk", "mawk", "nawk",
+			"cat", "base64", "cp", "copy", "copy-item", "cpi",
 			"get-content", "gc", "type", "read", "readfile", "read_file", "read-file",
 			"fsread", "fs_read", "fs-read", "fs.read", "fs.read_file",
 			"fileread", "file_read", "file-read", "catfile", "cat_file", "cat-file",

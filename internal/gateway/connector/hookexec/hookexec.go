@@ -45,6 +45,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
+	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/managed/refusalpipe"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -200,7 +201,7 @@ var hookDialects = map[string][]string{
 }
 
 // copilotVSCodeLocalSurface is connector.CopilotHookSurfaceVSCodeLocal.
-const copilotVSCodeLocalSurface = "vscode-local"
+const copilotVSCodeLocalSurface = copilotargs.SurfaceVSCodeLocal
 
 // copilotVSCodeLocal reports a hook command registered for the VS Code Local
 // harness rather than the Copilot CLI.
@@ -1144,7 +1145,10 @@ func (f *hookRequestFacts) set(header http.Header, opts Options, payload []byte)
 
 func setHookRequestFacts(header http.Header, opts Options, payload []byte) {
 	if opts.ManagedEnterprise && !opts.SecureClient && runtime.GOOS != "windows" {
-		if resolved := hookpaths.Resolve(payload); resolved != "" {
+		// The surface and bound event are the ones this call sends the
+		// gateway (HookDialectHeader, X-DefenseClaw-Copilot-Event), so the
+		// evidence reads the body in the dialect the gateway judges.
+		if resolved := hookpaths.ResolveConnector(opts.Connector, hookDialect(opts), opts.Event, payload); resolved != "" {
 			header.Set(hookpaths.Header, resolved)
 		}
 	}

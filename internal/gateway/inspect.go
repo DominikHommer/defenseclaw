@@ -545,8 +545,9 @@ func inspectToolTrustedShellCWD(dir string) string {
 func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRequest) *ToolInspectVerdict {
 	action := trustedActionRequest{
 		Input: actionfacts.Input{
-			Tool: req.Tool,
-			Args: req.Args,
+			Tool:       req.Tool,
+			Args:       req.Args,
+			ActiveHome: hookActiveHome(ctx),
 		},
 		LegacyText:         string(req.Args),
 		Connector:          req.Connector,

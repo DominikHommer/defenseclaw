@@ -36,11 +36,8 @@ type semanticOwner struct {
 	unmatchedClaims        []string
 	prerequisite           semanticOwnerPrerequisite
 	suppressFallback       semanticOwnerPrerequisite
-	// statementLocal is set by buildSemanticOwners after the code-owned
-	// prerequisite audit in semantic_owners_statement_local.go.
-	statementLocal bool
-	detectionOnly  bool
-	alertOnly      bool
+	detectionOnly          bool
+	alertOnly              bool
 }
 
 func (o semanticOwner) eligible(facts actionfacts.Facts) bool {
@@ -324,15 +321,6 @@ func buildSemanticOwners(owners map[string]semanticOwner) map[string]semanticOwn
 		}
 		owner.fallbackAliasesOnMatch = append([]string(nil), aliases...)
 		owners[ownerID] = owner
-	}
-	for ruleID, owner := range owners {
-		_, local := statementLocalPrerequisiteOwners[ruleID]
-		_, whole := wholeActionPrerequisiteOwners[ruleID]
-		if owner.prerequisite == nil || local == whole {
-			panic("unclassified semantic owner prerequisite " + ruleID)
-		}
-		owner.statementLocal = local
-		owners[ruleID] = owner
 	}
 	return owners
 }

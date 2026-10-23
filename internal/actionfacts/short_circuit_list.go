@@ -17,9 +17,10 @@
 package actionfacts
 
 import (
-	"slices"
+	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -68,192 +69,14 @@ func CompoundCommandReduction(input Input, facts Facts) (view Facts, ok bool) {
 	return sequenceReduction(input, facts, true)
 }
 
-// maxStatementsAlone bounds the statements StatementsAlone analyses.
+// maxStatementsAlone bounds the commands evaluated in one action.
 const maxStatementsAlone = 128
-
-// StatementAlone is one statement of an action analysed as if it were the
-// whole tool call. View is a complete view of it: its analysis, or for a
-// statement that is partial alone, its StaticCommandSubsetReduction view
-// (Subset set, and PartialArgv as that reduction reports it).
-type StatementAlone struct {
-	View Facts
-	// Source is the original statement text when View is its complete
-	// analysis. It is empty for a reduction that dropped a duplication or
-	// dynamic words, since a legacy regex must see the exact statement.
-	Source      string
-	Subset      bool
-	PartialArgv bool
-}
-
-// StatementsAlone returns each statement of a partial POSIX action analysed
-// as if it ran alone: the statements of CompoundCommandReduction's twin (the
-// commands of && and || lists, subshells, groups, if, loop and case bodies,
-// and negated and background statements, with the redirects of the compound
-// commands around them), each with the context of input. A statement that is
-// partial alone because of a descriptor duplication (2>&1) is analysed
-// without it, as is an action of one such statement. facts must be
-// Analyze(input).
-//
-// A block stops the whole tool call before any of it runs, so a rule that
-// blocks a statement alone also blocks the action (GAP-0616): `(rm -rf /);
-// echo $HOME` as `rm -rf /`. A statement alone lacks the other statements,
-// how they change the shell, and the duplications left out, so a caller may
-// count only a match on a view, for an expression that more commands,
-// redirects and data flows cannot turn off. A statement with a relative path
-// is left out when a command of the action may change the directory
-// (ChangesShellDirectory), and one that is partial alone is left out unless
-// it has a StaticCommandSubsetReduction view. Nothing is returned when the
-// action defines a function, has a here-document, a coprocess, or a for or
-// case word that runs a command, or when a command whose program expands or
-// a shell builtin with a runtime-expanded word may change what the others
-// run. At most maxStatementsAlone statements are analysed.
-func StatementsAlone(input Input, facts Facts) (statements []StatementAlone) {
-	defer func() {
-		if recover() != nil {
-			statements = nil
-		}
-	}()
-	if facts.Parse.Status != StatusPartial || facts.Parse.Dialect != DialectPOSIX ||
-		len(facts.Commands) == 0 {
-		return nil
-	}
-	_, capture := analyzeWithRedirectTargets(input, "")
-	// A bash function, or a zsh anonymous one (`function\n{ ...; }`), is
-	// not a POSIX one.
-	if definesFunction(capture.source) {
-		return nil
-	}
-	texts, reduced, ok := sequenceStatements(capture.source, true)
-	if !ok {
-		return nil
-	}
-	// One statement alone is the action, which only its duplications may
-	// leave partial.
-	single := !reduced && len(texts) == 1
-	// As for StaticCommandSubsetReduction, a shell builtin with a
-	// runtime-expanded word (cd $DIR, export PATH=$DIR, eval "$X") or a
-	// command whose program expands may change what the others run. A bare
-	// assignment has no program; only one that changes shell resolution or
-	// startup state needs to stop the pass.
-	bareAssignments := 0
-	for _, statement := range texts {
-		assignment, safe := bareAssignmentStatement(statement)
-		if assignment {
-			if !safe {
-				return nil
-			}
-			bareAssignments++
-		}
-	}
-	blankPrograms := 0
-	if slices.ContainsFunc(facts.Commands, func(command CommandFact) bool {
-		if strings.TrimSpace(command.Program) == "" {
-			blankPrograms++
-			return false
-		}
-		return shellStateBuiltins[strings.ToLower(command.Program)] &&
-			slices.ContainsFunc(command.Arguments, func(argument ArgumentFact) bool {
-				return argument.Expands || argument.StaticGlob != ""
-			})
-	}) || blankPrograms != bareAssignments {
-		return nil
-	}
-	directoryMayChange := slices.ContainsFunc(facts.Commands, ChangesShellDirectory)
-	home, _ := normalizeActiveHome(input.ActiveHome)
-	alone := input
-	alone.Args, alone.Argv = nil, nil
-	for _, text := range texts[:min(len(texts), maxStatementsAlone)] {
-		alone.Command = text
-		view := Analyze(alone)
-		legacySource := ""
-		if view.Authoritative() {
-			legacySource = text
-		}
-		if !view.Authoritative() || single {
-			stripped, ok := withoutDescriptorDuplications(text)
-			if !ok && single {
-				return nil
-			}
-			if ok {
-				alone.Command = stripped
-				view = Analyze(alone)
-			}
-		}
-		if view.Parse.Dialect != DialectPOSIX || (directoryMayChange &&
-			slices.ContainsFunc(view.Paths, func(path PathFact) bool {
-				return !path.Absolute && !homeAnchoredPath(path, home)
-			})) {
-			continue
-		}
-		if assignment, _ := bareAssignmentStatement(text); assignment {
-			continue
-		}
-		if view.Authoritative() {
-			statements = append(statements, StatementAlone{View: view, Source: legacySource})
-			continue
-		}
-		if subset, partialArgv, ok := StaticCommandSubsetReduction(alone, view); ok {
-			statements = append(statements, StatementAlone{View: subset, Subset: true, PartialArgv: partialArgv})
-		}
-	}
-	return statements
-}
-
-// homeAnchoredPath is independent of the shell's current directory even
-// though its original tilde spelling is recorded as a non-absolute path.
-func homeAnchoredPath(path PathFact, home string) bool {
-	if home == "" || path.Flavor != PathFlavorPOSIX ||
-		(path.Value != "~" && !strings.HasPrefix(path.Value, "~/")) {
-		return false
-	}
-	return path.Resolved == home+strings.TrimPrefix(path.Value, "~")
-}
-
-// bareAssignmentStatement reports whether a statement only assigns ordinary
-// variables, without running a command substitution or changing how later
-// commands or paths resolve.
-func bareAssignmentStatement(source string) (assignment, safe bool) {
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).
-		Parse(strings.NewReader(source), "")
-	if err != nil || len(file.Stmts) != 1 {
-		return false, false
-	}
-	stmt := file.Stmts[0]
-	call, ok := stmt.Cmd.(*syntax.CallExpr)
-	if !ok || len(call.Args) != 0 || len(call.Assigns) == 0 {
-		return false, false
-	}
-	if len(stmt.Redirs) != 0 || stmt.Background || stmt.Negated || stmt.Coprocess {
-		return true, false
-	}
-	for _, item := range call.Assigns {
-		if item == nil || item.Name == nil || item.Index != nil || item.Array != nil ||
-			(item.Value != nil && !inertPOSIXWords(item.Value)) ||
-			shellResolutionAssignment(item.Name.Value) {
-			return true, false
-		}
-	}
-	return true, true
-}
-
-func shellResolutionAssignment(name string) bool {
-	if strings.HasPrefix(name, "LD_") {
-		return true
-	}
-	switch name {
-	case "PATH", "IFS", "HOME", "CDPATH", "ENV", "BASH_ENV", "SHELLOPTS",
-		"BASHOPTS", "GLOBIGNORE", "FPATH", "ZDOTDIR", "PWD", "OLDPWD":
-		return true
-	}
-	return false
-}
 
 // withoutDescriptorDuplications returns statement without its descriptor
 // duplications (2>&1, <&3, >&-), and reports whether it had any.
 func withoutDescriptorDuplications(statement string) (string, bool) {
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).
-		Parse(strings.NewReader(statement), "")
-	if err != nil {
+	file, ok := shellparse.Parse(statement)
+	if !ok {
 		return "", false
 	}
 	var cuts [][2]int
@@ -366,28 +189,48 @@ func shortCircuitListSequence(source string, compound bool) (string, bool) {
 // and one where a statement could change what another runs (a function
 // definition) or where cutting the text could lose input (a here-document).
 func sequenceStatements(source string, compound bool) (statements []string, reduced, ok bool) {
+	parts, reduced, ok := sequenceStatementDetails(source, compound, false)
+	if !ok {
+		return nil, false, false
+	}
+	statements = make([]string, 0, len(parts))
+	for _, part := range parts {
+		statements = append(statements, part.text)
+	}
+	return statements, reduced, true
+}
+
+type sequenceStatement struct {
+	text, scope string
+}
+
+// sequenceStatementDetails is the one full-parser flattening step. The
+// reductions retain ordinary pipelines as a unit; simple-command policy
+// evaluation asks it to expose their individual stages too. Scope identifies
+// statements whose shell directory and variables are shared.
+func sequenceStatementDetails(source string, compound, allSimple bool) (statements []sequenceStatement, reduced, ok bool) {
 	if source == "" {
 		return nil, false, false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).
-		Parse(strings.NewReader(source), "")
-	if err != nil {
+	file, parsed := shellparse.Parse(source)
+	if !parsed {
 		return nil, false, false
 	}
 	declined := false
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch typed := node.(type) {
 		case *syntax.FuncDecl:
-			declined = true
+			declined = declined || !allSimple
 		case *syntax.Redirect:
-			declined = declined || typed.Op == syntax.Hdoc || typed.Op == syntax.DashHdoc
+			declined = declined || !allSimple &&
+				(typed.Op == syntax.Hdoc || typed.Op == syntax.DashHdoc)
 		}
 		return !declined
 	})
 	if declined {
 		return nil, false, false
 	}
-	statements = make([]string, 0, len(file.Stmts))
+	statements = make([]sequenceStatement, 0, len(file.Stmts))
 	text := func(from, to syntax.Pos) (string, bool) {
 		start, end := int(from.Offset()), int(to.Offset())
 		if start < 0 || end <= start || end > len(source) {
@@ -398,6 +241,19 @@ func sequenceStatements(source string, compound bool) (statements []string, redu
 	// redirects are those of the compound commands being replaced, outermost
 	// first, as text to append to each statement.
 	var redirects []string
+	scope := "0"
+	nextScope := 0
+	childScope := func(sharedShell bool, walk func() bool) bool {
+		parent := scope
+		nextScope++
+		kind := "s"
+		if sharedShell {
+			kind = "c"
+		}
+		scope = parent + "/" + kind + strconv.Itoa(nextScope)
+		defer func() { scope = parent }()
+		return walk()
+	}
 	// keep adds the text of node, or of a command and its redirects.
 	keep := func(node syntax.Node, redirs ...*syntax.Redirect) bool {
 		from, to := node.Pos(), node.End()
@@ -416,14 +272,39 @@ func sequenceStatements(source string, compound bool) (statements []string, redu
 		for index := len(redirects) - 1; index >= 0; index-- {
 			statement += " " + redirects[index]
 		}
-		statements = append(statements, statement)
+		statements = append(statements, sequenceStatement{text: statement, scope: scope})
 		return true
 	}
 	subshells := 0
+	functions := make(map[string]*syntax.Stmt)
+	functionDepth := 0
 	var flatten func(stmt *syntax.Stmt) bool
 	flattenAll := func(stmts []*syntax.Stmt) bool {
 		for _, stmt := range stmts {
 			if !flatten(stmt) {
+				return false
+			}
+		}
+		return true
+	}
+	flattenSubstitutions := func(node syntax.Node) bool {
+		var nested [][]*syntax.Stmt
+		syntax.Walk(node, func(part syntax.Node) bool {
+			switch part := part.(type) {
+			case *syntax.CmdSubst:
+				nested = append(nested, part.Stmts)
+				return false
+			case *syntax.ProcSubst:
+				nested = append(nested, part.Stmts)
+				return false
+			}
+			return true
+		})
+		for _, stmts := range nested {
+			subshells++
+			ok := childScope(false, func() bool { return flattenAll(stmts) })
+			subshells--
+			if !ok {
 				return false
 			}
 		}
@@ -436,8 +317,13 @@ func sequenceStatements(source string, compound bool) (statements []string, redu
 		case *syntax.BinaryCmd:
 			if typed.Op != syntax.AndStmt && typed.Op != syntax.OrStmt &&
 				(!compound || (typed.Op != syntax.Pipe && typed.Op != syntax.PipeAll) ||
-					!pipelineHasCompoundCommand(typed)) {
+					!allSimple &&
+						!pipelineHasCompoundCommand(typed)) {
 				return false, false
+			}
+			if allSimple && (typed.Op == syntax.Pipe || typed.Op == syntax.PipeAll) {
+				return true, childScope(false, func() bool { return flatten(typed.X) }) &&
+					childScope(false, func() bool { return flatten(typed.Y) })
 			}
 			return true, flatten(typed.X) && flatten(typed.Y)
 		}
@@ -445,33 +331,52 @@ func sequenceStatements(source string, compound bool) (statements []string, redu
 			return false, false
 		}
 		switch typed := command.(type) {
+		case *syntax.FuncDecl:
+			if !allSimple || typed.Name == nil || typed.Body == nil {
+				return true, false
+			}
+			functions[typed.Name.Value] = typed.Body
+			return true, true
 		case *syntax.Subshell:
 			subshells++
 			defer func() { subshells-- }()
-			return true, flattenAll(typed.Stmts)
+			return true, childScope(false, func() bool { return flattenAll(typed.Stmts) })
 		case *syntax.Block:
 			return true, flattenAll(typed.Stmts)
 		case *syntax.IfClause:
 			for clause := typed; clause != nil; clause = clause.Else {
-				if !flattenAll(clause.Cond) || !flattenAll(clause.Then) {
+				if !flattenAll(clause.Cond) || !childScope(true, func() bool { return flattenAll(clause.Then) }) {
 					return true, false
 				}
 			}
 			return true, true
 		case *syntax.WhileClause:
-			return true, flattenAll(typed.Cond) && flattenAll(typed.Do)
+			return true, flattenAll(typed.Cond) &&
+				childScope(true, func() bool { return flattenAll(typed.Do) })
 		case *syntax.ForClause:
 			iteration, isWords := typed.Loop.(*syntax.WordIter)
-			if !isWords || !inertPOSIXWords(iteration.Items...) {
+			if !isWords || !allSimple && !inertPOSIXWords(iteration.Items...) ||
+				allSimple && !flattenSubstitutions(iteration) {
 				return true, false
 			}
-			return true, flattenAll(typed.Do)
+			return true, childScope(true, func() bool { return flattenAll(typed.Do) })
 		case *syntax.CaseClause:
-			if !inertPOSIXWords(typed.Word) {
+			if !allSimple && !inertPOSIXWords(typed.Word) ||
+				allSimple && !flattenSubstitutions(typed.Word) {
 				return true, false
 			}
 			for _, item := range typed.Items {
-				if !inertPOSIXWords(item.Patterns...) || !flattenAll(item.Stmts) {
+				if !allSimple && !inertPOSIXWords(item.Patterns...) {
+					return true, false
+				}
+				if allSimple {
+					for _, pattern := range item.Patterns {
+						if !flattenSubstitutions(pattern) {
+							return true, false
+						}
+					}
+				}
+				if !childScope(true, func() bool { return flattenAll(item.Stmts) }) {
 					return true, false
 				}
 			}
@@ -514,6 +419,9 @@ func sequenceStatements(source string, compound bool) (statements []string, redu
 			if replaced, ok := flattenRedirected(stmt); replaced {
 				return ok
 			}
+			if allSimple && !flattenSubstitutions(stmt) {
+				return false
+			}
 			return stmt.Cmd != nil && keep(stmt.Cmd, stmt.Redirs...)
 		}
 		if replaced, ok := flattenRedirected(stmt); replaced {
@@ -521,7 +429,35 @@ func sequenceStatements(source string, compound bool) (statements []string, redu
 			return ok
 		}
 		if stmt.Cmd == nil {
+			if allSimple && !flattenSubstitutions(stmt) {
+				return false
+			}
 			return len(stmt.Redirs) != 0 && keep(stmt.Redirs[0], stmt.Redirs...)
+		}
+		if allSimple && !flattenSubstitutions(stmt) {
+			return false
+		}
+		if allSimple {
+			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) != 0 {
+				if body, found := functions[call.Args[0].Lit()]; found {
+					if functionDepth >= 8 || !keep(stmt.Cmd, stmt.Redirs...) {
+						return false
+					}
+					reduced = true
+					functionDepth++
+					defer func() { functionDepth-- }()
+					if len(stmt.Redirs) != 0 {
+						moved, ok := text(stmt.Redirs[0].Pos(), stmt.Redirs[len(stmt.Redirs)-1].End())
+						if !ok {
+							return false
+						}
+						saved := redirects
+						redirects = append(redirects[:len(redirects):len(redirects)], moved)
+						defer func() { redirects = saved }()
+					}
+					return flatten(body)
+				}
+			}
 		}
 		// Not stmt itself, whose text may end in a ; that a moved redirect
 		// cannot follow.

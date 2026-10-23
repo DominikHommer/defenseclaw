@@ -163,6 +163,7 @@ func promotedArtifactFindings(
 		matched := dispatchTrustedAction(ctx, trustedActionRequest{
 			Input:              input,
 			LegacyText:         string(body),
+			ArtifactBody:       true,
 			Connector:          req.ConnectorName,
 			EnforcementCapable: enforcementCapable,
 			recordTelemetry:    recordTelemetry,
@@ -290,10 +291,9 @@ func promotedArtifactCandidates(facts actionfacts.Facts) []promotedArtifactCandi
 }
 
 // promotedArtifactCandidateEnforcementEligible reports whether a match in the
-// candidate script may block. A script call inside a compound command
-// (`a && b`, `a || b`, `a; b`, `a | b`, `(a)`) is judged as if it ran alone:
-// a block stops the whole tool call before any of it runs, so a rule that
-// blocks `bash run.sh` also blocks `bash run.sh && b`.
+// candidate script may block. The executed script call is judged with its
+// own static argv even when a shell assignment, redirect or compound command
+// surrounds it. A block stops the whole tool call before any of it runs.
 func promotedArtifactCandidateEnforcementEligible(
 	facts actionfacts.Facts,
 	candidate promotedArtifactCandidate,
@@ -316,16 +316,16 @@ func promotedArtifactCandidateEnforcementEligible(
 
 // promotedArtifactCandidateAlone returns the analysis of the candidate's own
 // simple command with the action's context, as if the tool call were only that
-// command. It is unavailable unless the command is part of a compound command,
-// and for a relative script path after a command of the action that may have
-// changed the directory that path resolves against.
+// command. It is unavailable for a relative script path after a command of
+// the action that may have changed the directory that path resolves against.
 func promotedArtifactCandidateAlone(
 	facts actionfacts.Facts,
 	candidate promotedArtifactCandidate,
 ) (actionfacts.Facts, bool) {
 	// Only uncertainty that the other commands of a compound command, or
 	// the script itself, may explain. The candidate's own is found again
-	// when it is analysed alone.
+	// when it is analysed alone. An incomparable raw command and argv source
+	// has its own issue and cannot be repaired by this standalone analysis.
 	if facts.Parse.Status != actionfacts.StatusPartial ||
 		slices.ContainsFunc(facts.Parse.Issues, func(issue actionfacts.IssueCode) bool {
 			return !promotedArtifactCompoundIssues[issue]
@@ -338,14 +338,10 @@ func promotedArtifactCandidateAlone(
 	if index < 0 {
 		return actionfacts.Facts{}, false
 	}
-	// A { } group adds no command and leaves the control flow certain, but
-	// sets the command's control flow operator.
 	command := facts.Commands[index]
-	compound := len(facts.Commands) > 1 || command.ControlFlowUncertain ||
-		command.ControlFlowOperator != actionfacts.ControlFlowOperatorNone ||
-		command.PipelineID != 0 || command.Background
-	if !compound || command.ParentCommandID != 0 || !command.ArgvComplete || len(command.Argv) == 0 ||
-		len(command.Redirects) != 0 ||
+	if command.ParentCommandID != 0 || len(command.Argv) == 0 ||
+		len(command.Argv) != len(command.Arguments) ||
+		len(command.Wrappers) != 0 ||
 		slices.ContainsFunc(command.Arguments, func(argument actionfacts.ArgumentFact) bool {
 			return argument.Expands
 		}) {

@@ -13,15 +13,14 @@ import (
 // A code-owned rule that recognizes one complete POSIX command retains its
 // finding and disposition when another statement makes the whole action
 // partial. The corpus supplies independent commands across owner families.
-func TestTrustedActionStatementLocalOwnersMatchCorpusCommandsAloneAndInLists(t *testing.T) {
+func TestTrustedActionOwnersMatchCorpusCommandsAloneAndInLists(t *testing.T) {
 	const connector = "statement-local-corpus-test"
 	installDefaultProfileConnector(t, connector)
 	seen := make(map[string]bool)
 	for _, test := range readJSONL[toolCallCorpusCase](t, "toolcall", "corpus.jsonl") {
 		if test.Command == "" || len(test.Args) != 0 || len(test.Argv) != 0 ||
 			(test.Tool != "" && test.Tool != "shell") ||
-			(test.Dialect != "" && test.Dialect != actionfacts.DialectPOSIX) ||
-			!semanticOwnerForRule(test.RuleID).statementLocal || seen[test.RuleID] {
+			(test.Dialect != "" && test.Dialect != actionfacts.DialectPOSIX) || seen[test.RuleID] {
 			continue
 		}
 		input := toolCallCorpusActionFactsInput(test)
@@ -51,11 +50,11 @@ func TestTrustedActionStatementLocalOwnersMatchCorpusCommandsAloneAndInLists(t *
 		seen[test.RuleID] = true
 	}
 	if len(seen) < 10 {
-		t.Fatalf("only %d statement-local owners exercised by the corpus", len(seen))
+		t.Fatalf("only %d owners exercised by the corpus", len(seen))
 	}
 	for _, ruleID := range []string{"PATH-SSH-KEY", "CMD-SYSTEMCTL", "source.git_config_exec"} {
 		if !seen[ruleID] {
-			t.Errorf("corpus did not exercise %s as a statement-local rule", ruleID)
+			t.Errorf("corpus did not exercise %s", ruleID)
 		}
 	}
 }

@@ -22,59 +22,49 @@ import (
 	"testing"
 )
 
-// GAP-0616: each statement of a compound command is analysed as if it ran
-// alone, with the redirects of the compound commands around it.
-func TestStatementsAlone(t *testing.T) {
+// GAP-0616: the shared full-parser flattening step exposes every simple
+// command with its shell-scoped directory, including stage and redirect forms.
+func TestSimpleCommands(t *testing.T) {
+	type location struct{ text, cwd string }
 	tests := []struct {
 		command string
-		// want is the argv of each view's commands, one statement per entry.
-		want []string
+		want    []location
 	}{
-		{"(echo m); echo $USER", []string{"echo m", "echo"}},
-		{"if true; then echo m; fi; echo $HOME", []string{"true", "echo m", "echo"}},
-		{"rm -rf /; echo $HOME", []string{"rm -rf /", "echo"}},
-		{"(rm -rf /) 2>&1", []string{"rm -rf /"}},
-		{"rm -rf / 2>&1", []string{"rm -rf /"}},
-		{"cd /tmp && rm -rf ~", []string{"cd /tmp", "rm -rf /home/alice"}},
-		{"X=1; rm -rf /", []string{"rm -rf /"}},
-		{"X=; rm -rf /", []string{"rm -rf /"}},
-		{"X=$HOME; rm -rf /", []string{"rm -rf /"}},
-		{"(rm -rf /) | cat", []string{"rm -rf /", "cat"}},
-		{"(cd /tmp && rm -rf /) > /tmp/log 2>&1", []string{"cd /tmp", "rm -rf /"}},
-		{"(exit 0); echo m", []string{"echo m"}},
-		// A relative path after a command that may change the directory.
-		{"cd /tmp; rm -rf x; echo $HOME", []string{"cd /tmp", "echo"}},
-		// What the other statements run may change.
-		{"cd $DIR; echo m", nil},
-		{"export PATH=$DIR; echo m $USER", nil},
-		{"$CMD; echo m", nil},
-		{"PATH=/tmp; echo m", nil},
-		{"IFS=:; echo m", nil},
-		{"HOME=/tmp; echo m", nil},
-		{"CDPATH=/tmp; echo m", nil},
-		{"ENV=/tmp/rc; echo m", nil},
-		{"BASH_ENV=/tmp/rc; echo m", nil},
-		{"LD_PRELOAD=/tmp/x; echo m", nil},
-		{"f() { echo m; }; f $X", nil},
-		{"for i in $(ls); do echo m; done", nil},
-		// One statement with nothing to leave out is the action.
+		{"rm -rf /; echo $HOME", []location{{"rm -rf /", "/home/alice/project"}, {"echo '/home/alice'", "/home/alice/project"}}},
+		{"X=1; rm -rf /", []location{{"rm -rf /", "/home/alice/project"}}},
+		{"X=1 cat ~/.ssh/id_rsa; true", []location{{"cat '/home/alice/.ssh/id_rsa'", "/home/alice/project"}, {"true", "/home/alice/project"}}},
+		{"(rm -rf /) | cat", []location{{"rm -rf /", "/home/alice/project"}, {"cat", "/home/alice/project"}}},
+		{"(exit 0); echo m", []location{{"echo m", "/home/alice/project"}}},
+		{"cd /home/alice && cat .ssh/id_rsa", []location{{"cd /home/alice", "/home/alice/project"}, {"cat .ssh/id_rsa", "/home/alice"}}},
+		{"cd \"$HOME\" && cat .ssh/id_rsa", []location{{"cd '/home/alice'", "/home/alice/project"}, {"cat .ssh/id_rsa", "/home/alice"}}},
+		{"DIR=/home/alice; cd \"$DIR\" && cat .ssh/id_rsa", []location{{"cd '/home/alice'", "/home/alice/project"}, {"cat .ssh/id_rsa", "/home/alice"}}},
+		{"cd \"$PWD/..\" && cat .ssh/id_rsa", []location{{"cd '/home/alice/project/..'", "/home/alice/project"}, {"cat .ssh/id_rsa", "/home/alice"}}},
+		{"cd /home/alice && cat \"$PWD/.ssh/id_rsa\"", []location{{"cd /home/alice", "/home/alice/project"}, {"cat '/home/alice/.ssh/id_rsa'", "/home/alice"}}},
+		{"cd /tmp; cd -; cat .ssh/id_rsa", []location{{"cd /tmp", "/home/alice/project"}, {"cd -", "/tmp"}, {"cat .ssh/id_rsa", "/home/alice/project"}}},
+		{"(cd /home/alice); cat .ssh/id_rsa", []location{{"cd /home/alice", "/home/alice/project"}, {"cat .ssh/id_rsa", "/home/alice/project"}}},
+		{"if true; then cd /home/alice; fi; cat .ssh/id_rsa", []location{{"true", "/home/alice/project"}, {"cd /home/alice", "/home/alice/project"}, {"cat .ssh/id_rsa", "/home/alice/project"}, {"cat .ssh/id_rsa", "/home/alice"}}},
+		{"while false; do cd /home/alice; done; cat .ssh/id_rsa", []location{{"false", "/home/alice/project"}, {"cd /home/alice", "/home/alice/project"}, {"cat .ssh/id_rsa", "/home/alice/project"}, {"cat .ssh/id_rsa", "/home/alice"}}},
+		{"rm -rf / 2>&1", []location{{"rm -rf / ", "/home/alice/project"}}},
+		{"PATH=/tmp; echo m", []location{{"echo m", "/home/alice/project"}}},
+		{"HOME=/tmp; cat ~/.ssh/id_rsa", []location{{"cat '/tmp/.ssh/id_rsa'", "/home/alice/project"}}},
+		{"echo $(rm -rf /)", []location{{"rm -rf /", "/home/alice/project"}, {"echo $(rm -rf /)", "/home/alice/project"}}},
+		{"X=$(rm -rf /); true", []location{{"rm -rf /", "/home/alice/project"}, {"true", "/home/alice/project"}}},
+		{"cat <(rm -rf /)", []location{{"rm -rf /", "/home/alice/project"}, {"cat <(rm -rf /)", "/home/alice/project"}}},
+		{"for i in $(ls); do echo m; done", []location{{"ls", "/home/alice/project"}, {"echo m", "/home/alice/project"}}},
+		{"f() { rm -rf /; }; f", []location{{"f", "/home/alice/project"}, {"rm -rf /", "/home/alice/project"}}},
+		{"f() { echo okay; }; f $(rm -rf /)", []location{{"rm -rf /", "/home/alice/project"}, {"f $(rm -rf /)", "/home/alice/project"}, {"echo okay", "/home/alice/project"}}},
+		{"f() { rm -rf /; }; echo done", []location{{"echo done", "/home/alice/project"}}},
+		{"cat <<'EOF'\nhello\nEOF\nrm -rf /", []location{{"cat <<'EOF'\nhello\nEOF", "/home/alice/project"}, {"rm -rf /", "/home/alice/project"}}},
 		{"echo m $USER", nil},
 	}
 	for _, test := range tests {
 		input := Input{Tool: "shell", Command: test.command, CWD: "/home/alice/project", ActiveHome: "/home/alice", DialectHint: DialectPOSIX}
-		var got []string
-		for _, statement := range StatementsAlone(input, Analyze(input)) {
-			if !statement.View.Authoritative() {
-				t.Errorf("%q: view is not complete: %+v", test.command, statement.View.Parse)
-			}
-			var argv []string
-			for _, command := range statement.View.Commands {
-				argv = append(argv, strings.Join(command.Argv, " "))
-			}
-			got = append(got, strings.Join(argv, " | "))
+		var got []location
+		for _, simple := range SimpleCommands(input, Analyze(input)) {
+			got = append(got, location{simple.Text, simple.CWD})
 		}
 		if !slices.Equal(got, test.want) {
-			t.Errorf("%q: statements alone = %q, want %q", test.command, got, test.want)
+			t.Errorf("%q: simple commands = %#v, want %#v", test.command, got, test.want)
 		}
 	}
 }
@@ -113,5 +103,21 @@ func TestCompoundCommandReductionMovesRedirectsAndSubshellExit(t *testing.T) {
 		if sequence, ok := shortCircuitListSequence(command, true); ok {
 			t.Errorf("plain pipeline %q was flattened to %q", command, sequence)
 		}
+	}
+}
+
+func TestSimpleCommandsFailsClosedAtEvaluationBound(t *testing.T) {
+	input := Input{Tool: "shell", Command: strings.Repeat("true; ", maxStatementsAlone) + "rm -rf /", CWD: "/repo", DialectHint: DialectPOSIX}
+	commands := SimpleCommands(input, Analyze(input))
+	if len(commands) != 1 || commands[0].EvaluationFailure != "limit" {
+		t.Fatalf("over-limit action = %#v", commands)
+	}
+}
+
+func TestSimpleCommandsFailsClosedOnRecursiveFunction(t *testing.T) {
+	input := Input{Tool: "shell", Command: "f() { f; }; f", CWD: "/repo", DialectHint: DialectPOSIX}
+	commands := SimpleCommands(input, Analyze(input))
+	if len(commands) != 1 || commands[0].EvaluationFailure != "parse" {
+		t.Fatalf("recursive function = %#v", commands)
 	}
 }
