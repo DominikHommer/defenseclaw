@@ -557,7 +557,8 @@ try {
     & icacls.exe $runtimeDirectory /grant '*S-1-5-32-545:(OI)(CI)M' | Out-Null
     if ($LASTEXITCODE -ne 0) { Fail "icacls could not drift $runtimeDirectory" }
     $run = Invoke-Lifecycle -Name '02-ensure-runtime-acl-repair' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
-    Assert-Result $run 'ensure-runtime-acl-repair' (@('--action', 'ensure', '--installed', '--version', $Version, '--ready') + $installedChecks)
+    Assert-Result $run 'ensure-runtime-acl-repair' (@('--action', 'ensure', '--installed', '--version', $Version, '--ready') +
+        $installedChecks + @('--allow-warning', 'ensure_repair'))
     Assert-ServicesRunning
     $writeMask = [int][Security.AccessControl.FileSystemRights]::Write
     foreach ($ace in (Get-Acl -LiteralPath $runtimeDirectory).Access) {
