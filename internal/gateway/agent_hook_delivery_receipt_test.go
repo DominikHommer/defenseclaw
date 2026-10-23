@@ -219,6 +219,46 @@ func TestManagedHookAuditWaitsForTheAnswerActuallyGiven(t *testing.T) {
 	}
 }
 
+// The release marker is sent before the gateway's answer. Once that answer
+// has been flushed, closing the HTTP response also cancels the request
+// context; that normal close does not mean the hook failed closed.
+func TestManagedHookReleasedAnswerClosedAfterDeliveryIsUnconfirmed(t *testing.T) {
+	f := newManagedHookAuditFixture(t, nil)
+	const session = "released-answer-taken"
+	body := managedHookBody(session, "PreToolUse")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook", strings.NewReader(body+hookexec.HookDeliveryReleased)).WithContext(ctx)
+	request.Header.Set(hookexec.HookDeliveryReceiptHeader, "1")
+	request.Header.Set(hookexec.HookDeliveryPayloadBytesHeader, strconv.Itoa(len(body)))
+	request.Header.Set("Content-Type", "application/json")
+	reply := &cancelOnHookAnswerFlushWriter{ResponseRecorder: httptest.NewRecorder(), cancel: cancel}
+	f.api.handleAgentHook("claudecode").ServeHTTP(reply, request)
+	if !strings.Contains(reply.Body.String(), `"action":"allow"`) {
+		t.Fatalf("answer sent to hook = %q, want allow", reply.Body.String())
+	}
+	if got := f.audited(t, session)[session]; got != "unconfirmed/no_answer" {
+		t.Fatalf("audited %s = %q, want unconfirmed/no_answer", session, got)
+	}
+	if got := f.decisions(t); strings.Join(got, ",") != "unconfirmed/ok" {
+		t.Fatalf("hook_decision records = %v, want [unconfirmed/ok]", got)
+	}
+}
+
+type cancelOnHookAnswerFlushWriter struct {
+	*httptest.ResponseRecorder
+	cancel context.CancelFunc
+}
+
+func (w *cancelOnHookAnswerFlushWriter) EnableFullDuplex() error { return nil }
+func (w *cancelOnHookAnswerFlushWriter) SetReadDeadline(time.Time) error {
+	return nil
+}
+func (w *cancelOnHookAnswerFlushWriter) Flush() {
+	w.ResponseRecorder.Flush()
+	w.cancel()
+}
+
 // The real managed hook and the real gateway: an answer given in time is
 // confirmed and audited as given, and an allow the gateway sends after the
 // hook's answer budget is audited as the block the agent got.
@@ -353,33 +393,31 @@ func (w *lateAnswerWriter) Unwrap() http.ResponseWriter { return w.ResponseWrite
 func TestUnreceiptedManagedHookDecisions(t *testing.T) {
 	cfg := &config.Config{DeploymentMode: "managed_enterprise", Enterprise: config.EnterpriseConfig{Profile: "standalone"}}
 	api := &APIServer{scannerCfg: cfg}
-	gone, hangUp := context.WithCancel(t.Context())
-	hangUp()
 	allow := agentHookResponse{Action: "allow"}
 	for _, tc := range []struct {
 		connector, event string
-		ctx              context.Context
+		hungUp           bool
 		want             string
 	}{
-		{"opencode", "tool.execute.before", t.Context(), "unconfirmed"},
-		{"amp", "tool.call", t.Context(), "allow"},
-		{"omnigent", "PreToolUse", t.Context(), "allow"},
-		{"claudecode", "UserPromptSubmit", t.Context(), "allow"},
-		{"claudecode", "Stop", gone, "allow"},
-		{"codex", "PreToolUse", t.Context(), "unconfirmed"},
-		{"copilot", "preToolUse", t.Context(), "unconfirmed"},
-		{"opencode", "tool.execute.before", gone, "block"},
-		{"claudecode", "UserPromptSubmit", gone, "block"},
+		{"opencode", "tool.execute.before", false, "unconfirmed"},
+		{"amp", "tool.call", false, "allow"},
+		{"omnigent", "PreToolUse", false, "allow"},
+		{"claudecode", "UserPromptSubmit", false, "allow"},
+		{"claudecode", "Stop", true, "allow"},
+		{"codex", "PreToolUse", false, "unconfirmed"},
+		{"copilot", "preToolUse", false, "unconfirmed"},
+		{"opencode", "tool.execute.before", true, "block"},
+		{"claudecode", "UserPromptSubmit", true, "block"},
 	} {
-		if got := api.unreceiptedHookDecision(tc.ctx, tc.connector, tc.event, allow).Action; got != tc.want {
-			t.Errorf("%s %s (hung up %v) = %q, want %q", tc.connector, tc.event, tc.ctx.Err() != nil, got, tc.want)
+		if got := api.unreceiptedHookDecision(tc.hungUp, tc.connector, tc.event, allow).Action; got != tc.want {
+			t.Errorf("%s %s (hung up %v) = %q, want %q", tc.connector, tc.event, tc.hungUp, got, tc.want)
 		}
 	}
-	if got := api.unreceiptedHookDecision(t.Context(), "codex", "PreToolUse", agentHookResponse{Action: "block", Reason: "policy"}); got.Action != "block" || got.Reason != "policy" {
+	if got := api.unreceiptedHookDecision(false, "codex", "PreToolUse", agentHookResponse{Action: "block", Reason: "policy"}); got.Action != "block" || got.Reason != "policy" {
 		t.Errorf("policy block = %+v, want it kept", got)
 	}
 	secureClient := &APIServer{scannerCfg: &config.Config{DeploymentMode: "managed_enterprise", Enterprise: config.EnterpriseConfig{Profile: "secure_client"}}}
-	if got := secureClient.unreceiptedHookDecision(gone, "codex", "PreToolUse", allow).Action; got != "allow" {
+	if got := secureClient.unreceiptedHookDecision(true, "codex", "PreToolUse", allow).Action; got != "allow" {
 		t.Errorf("Secure Client = %q, want its response contract unchanged", got)
 	}
 }
