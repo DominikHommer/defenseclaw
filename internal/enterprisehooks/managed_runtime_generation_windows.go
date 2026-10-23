@@ -1042,13 +1042,6 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 	if validated.DataDir == "" {
 		return 0, errors.New("enterprise hooks: managed runtime generation GC requires an exact data directory")
 	}
-	preserve := make(map[string]struct{}, len(opts.ProtectedPreserveGenerationIDs)+1)
-	for _, generationID := range opts.ProtectedPreserveGenerationIDs {
-		if !validWindowsManagedRuntimeGenerationID(generationID) {
-			return 0, errors.New("enterprise hooks: protected managed runtime GC pin is invalid")
-		}
-		preserve[generationID] = struct{}{}
-	}
 	if err := windowsManagedRuntimeSelectorMutationAuthorize(); err != nil {
 		return 0, err
 	}
@@ -1094,7 +1087,6 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 				}
 				selected = true
 				selectedGenerationID = current.GenerationID
-				preserve[current.GenerationID] = struct{}{}
 			}
 		}
 
@@ -1147,6 +1139,14 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 		if err != nil {
 			return err
 		}
+		// Classify every bundle of this target before deleting any. One
+		// refused bundle, the selected one included, leaves the folder as it
+		// was, whatever order the names sort in.
+		type collectable struct {
+			entry windowsManagedRuntimeSelectorTarget
+			data  []byte
+		}
+		var collect []collectable
 		candidates := 0
 		for _, directoryEntry := range entries {
 			connectorName, generationID, ok := parseWindowsManagedRuntimeBundleLeaf(
@@ -1159,21 +1159,11 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 			if candidates > windowsManagedRuntimeGenerationGCMaxCandidates {
 				return errors.New("enterprise hooks: managed runtime generation GC candidate limit exceeded")
 			}
-			if _, keep := preserve[generationID]; keep {
-				if generationID == selectedGenerationID {
-					// The current hook may still read this bundle, so leave it in
-					// place. Classify its contents now with the same rules that
-					// post-commit GC will apply once it is unselected. Otherwise
-					// retiring the old journal could admit a transaction whose
-					// later GC refuses this bundle.
-					if _, _, err := loadUnselectedWindowsManagedRuntimeBundle(
-						validated, target, generationID,
-					); err != nil {
-						return err
-					}
-				}
-				continue
-			}
+			// The selected bundle is classified with the rules this GC will
+			// apply once a later publication unselects it, so a retire before
+			// a transaction refuses what that transaction's retire would
+			// refuse after its commit. The hook may still read it, so it is
+			// never deleted here.
 			entry, data, err := loadUnselectedWindowsManagedRuntimeBundle(
 				validated,
 				target,
@@ -1182,7 +1172,13 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 			if err != nil {
 				return err
 			}
-			if err := deleteWindowsManagedRuntimeBundle(entry, target, data); err != nil {
+			if generationID == selectedGenerationID {
+				continue
+			}
+			collect = append(collect, collectable{entry: entry, data: data})
+		}
+		for _, bundle := range collect {
+			if err := deleteWindowsManagedRuntimeBundle(bundle.entry, target, bundle.data); err != nil {
 				return err
 			}
 			removed++
