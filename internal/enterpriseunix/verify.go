@@ -183,6 +183,9 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	if machinePolicyIncomplete(r) {
 		r.SecurityComplete = false
 	}
+	if strict && !env.policyViewsRestricted(record) {
+		l.warnOpenPolicyViews()
+	}
 	if strict {
 		// An agent the guardian or the enumerator could not protect for one
 		// account (an unverified hook contract, an agent it could not enroll)
@@ -867,6 +870,7 @@ func (e *Env) lastPackageInstallFailure() string {
 		Installed bool                       `json:"installed"`
 		Action    string                     `json:"action"`
 		Errors    []enterprisestatus.Message `json:"errors"`
+		Warnings  []enterprisestatus.Message `json:"warnings"`
 	}
 	if json.Unmarshal(raw, &last) != nil || last.OK || len(last.Errors) == 0 {
 		return ""
@@ -876,10 +880,14 @@ func (e *Env) lastPackageInstallFailure() string {
 	default:
 		return ""
 	}
-	if e.GOOS == "linux" && last.Installed {
+	if e.GOOS == "linux" && packageResultCommitted(last.Installed, last.Warnings) {
 		// The package applied, but a user namespace from before the host
 		// restriction can survive until reboot. Report that through status
 		// and verify without claiming the package itself was not applied.
+		// A run that rolled back (or failed to) did not commit: the previous
+		// deployment, which may not restrict anything, is what runs, so its
+		// namespace error is the package's failure (as the postinstall
+		// script reads it).
 		onlyReboot := true
 		for _, problem := range last.Errors {
 			if problem.Code != codeUserNamespaces {
@@ -900,6 +908,13 @@ func (e *Env) lastPackageInstallFailure() string {
 		}
 	}
 	return strings.TrimSpace(first.Code + ": " + first.Message)
+}
+
+// packageResultCommitted reports whether a failed package run still left
+// its own deployment in place: installed, with no rolled_back or
+// rollback_failed warning.
+func packageResultCommitted(installed bool, warnings []enterprisestatus.Message) bool {
+	return installed && !hasMessageCode(warnings, codeRolledBack) && !hasMessageCode(warnings, codeRollbackFailed)
 }
 
 // warnPackageInstallFailed adds the package_install_failed warning that
@@ -1139,7 +1154,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	}
 	r.CoverageComplete = r.Readiness.Gateway && r.Readiness.Guardian && r.Readiness.Enumerator
 	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0 && !machinePolicyIncomplete(r)
-	if record != nil {
+	if env.policyViewsRestricted(record) {
 		if problem := env.userNamespaceProblem(); problem != "" {
 			r.AddError(codeUserNamespaces, problem)
 			r.SecurityComplete = false

@@ -55,6 +55,14 @@ class RebootResultTest(unittest.TestCase):
         pending_without_coverage = result(["unprivileged_user_namespaces"], False)
         pending_without_coverage["coverage_complete"] = False
         self.assertEqual(self.check_result(result(["unprivileged_user_namespaces"], False), *flags).returncode, 0)
+        rolled_back = result(["unprivileged_user_namespaces"], False)
+        rolled_back["warnings"] = [{"code": "rolled_back", "message": "restored the previous deployment"}]
+        rollback_failed = result(["unprivileged_user_namespaces"], False)
+        rollback_failed["warnings"] = [{"code": "rollback_failed", "message": ""}]
+        for document in (rolled_back, rollback_failed):
+            # Rejected even when the step allows the warning.
+            allowed = ("--allow-warning", "rolled_back", "--allow-warning", "rollback_failed")
+            self.assertEqual(self.check_result(document, *flags, *allowed).returncode, 1)
         for document in (
             result(["unprivileged_user_namespaces", "lifecycle_test_fault"], False),
             result(["unprivileged_user_namespaces"], True),

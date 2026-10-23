@@ -2035,19 +2035,28 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		return failAndRollback(codeApply, err)
 	}
 	l.clearStaleHookSocket(account)
-	// Capture whether the host had a trusted, live restriction before this
-	// transaction wrote the sysctl file. A zero value alone cannot prove that
-	// a namespace created earlier in this boot has gone away.
-	uninstalledThisBoot, hasUninstallMarker := env.userNamespaceUninstallState()
-	priorUserNamespaceRestricted := env.userNamespaceBootProblem() == "" && env.ptraceBootProblem() == "" && env.ptraceProblem() == "" &&
-		(env.userNamespaceProblem() == "" || uninstalledThisBoot ||
-			record != nil && record.Files[userNamespacesConfigPath] == sha256Bytes(env.desiredPolicyViewConfig()) && !hasUninstallMarker)
+	// The host-wide kernel restriction is the administrator's choice
+	// (enterprise.machine_policy.linux.namespaces_and_ptrace: restrict); by
+	// default the host's settings are left alone. Capture whether the host
+	// had a trusted, live restriction before this transaction wrote the
+	// sysctl file. A zero value alone cannot prove that a namespace created
+	// earlier in this boot has gone away.
+	restrictViews := env.GOOS == "linux" && p.config.restrictsPolicyViews()
+	priorUserNamespaceRestricted := false
+	if restrictViews {
+		uninstalledThisBoot, hasUninstallMarker := env.userNamespaceUninstallState()
+		priorUserNamespaceRestricted = env.userNamespaceBootProblem() == "" && env.ptraceBootProblem() == "" && env.ptraceProblem() == "" &&
+			(env.userNamespaceProblem() == "" || uninstalledThisBoot ||
+				record != nil && record.Files[userNamespacesConfigPath] == sha256Bytes(env.desiredPolicyViewConfig()) && !hasUninstallMarker)
+	}
 	changed, err := l.applyFilesRecorded(ctx, p, account)
 	if err != nil {
 		return failAndRollback(errorCode(err, codeApply), err)
 	}
-	if err := env.restrictManagedPolicyViews(priorUserNamespaceRestricted); err != nil {
-		return failAndRollback(codeUserNamespaces, err)
+	if restrictViews {
+		if err := env.restrictManagedPolicyViews(priorUserNamespaceRestricted); err != nil {
+			return failAndRollback(codeUserNamespaces, err)
+		}
 	}
 	if record != nil {
 		// An edit made in place (the config-apply trigger) is never rewritten,
@@ -3187,7 +3196,8 @@ func (l *lifecycle) restoreUnchangedConfigMetadata(ctx context.Context, record *
 func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, string) {
 	env := l.env
 	l.noopPolicy, l.policyAssetsEdited, l.policyAssetRefusal = nil, false, ""
-	if env.userNamespaceProblem() != "" || env.ptraceProblem() != "" || env.userNamespaceBootProblem() != "" || env.ptraceBootProblem() != "" {
+	if env.policyViewsRestricted(record) &&
+		(env.userNamespaceProblem() != "" || env.ptraceProblem() != "" || env.userNamespaceBootProblem() != "" || env.ptraceBootProblem() != "") {
 		return false, ""
 	}
 	account, ok, err := env.Accounts.Lookup(ctx, env.Layout.ServiceUser)
@@ -3436,7 +3446,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	if removePerUser && l.refuseUnresolvedPerUserRows(ctx) {
 		return 0
 	}
-	if record != nil && env.GOOS == "linux" {
+	if env.policyViewsRestricted(record) {
 		if err := env.markUserNamespaceUninstall(); err != nil {
 			r.AddError(codeUninstall, err.Error())
 			return 0

@@ -15,18 +15,271 @@ package enterpriseunix
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// A private mount namespace can hide every managed connector's policy from
-// an agent. The Linux host setting must be applied before an agent can run,
-// and status must stop reporting a complete deployment if it is loosened.
-func TestLinuxManagedUserNamespacesAreDisabledAndDetected(t *testing.T) {
+// restrictPolicyViewsConfig is the default managed config with the
+// administrator's opt-in to the host-wide kernel restriction.
+func restrictPolicyViewsConfig(t *testing.T, h *testHost) string {
+	t.Helper()
+	const anchor = "enterprise:\n  profile: standalone\n"
+	defaults := string(DefaultConfig(h.env.Layout))
+	if !strings.Contains(defaults, anchor) {
+		t.Fatalf("default config has no %q block", anchor)
+	}
+	body := strings.Replace(defaults, anchor, anchor+"  machine_policy:\n    linux:\n      namespaces_and_ptrace: restrict\n", 1)
+	file := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(file, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return file
+}
+
+// writeKernelSetting writes one fake /proc/sys value (or other host file).
+func writeKernelSetting(t *testing.T, h *testHost, canonical, value string) {
+	t.Helper()
+	writeHostFile(t, h, canonical, value)
+}
+
+// restrictKernelBeforeThisBoot gives h the state DefenseClaw's restriction
+// leaves after a reboot: both live settings closed, the persistent file in
+// place, and both markers naming an earlier boot.
+func restrictKernelBeforeThisBoot(t *testing.T, h *testHost) {
+	t.Helper()
+	writeKernelSetting(t, h, sysctlMaxUserNamespaces, "0\n")
+	writeKernelSetting(t, h, sysctlPtraceScope, "2\n")
+	writeKernelSetting(t, h, userNamespaceBootIDPath, "boot-before\n")
+	writeKernelSetting(t, h, userNamespacesConfigPath, string(userNamespacesConfig))
+	for _, marker := range []string{userNamespaceBootMarker, ptraceBootMarker} {
+		if err := os.WriteFile(h.env.P(marker), []byte("boot-prior\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// restrictedHost is a Linux host restricted before this boot, with the
+// config that keeps it restricted for the first install (later runs reuse
+// the installed config).
+func restrictedHost(t *testing.T) (*testHost, string) {
+	t.Helper()
 	h := newTestHost(t, "linux")
-	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	restrictKernelBeforeThisBoot(t, h)
+	return h, restrictPolicyViewsConfig(t, h)
+}
+
+// openKernel leaves h as stock RHEL 9 ships: user namespaces and
+// same-user ptrace open, no DefenseClaw sysctl file and no markers.
+func openKernel(t *testing.T, h *testHost) {
+	t.Helper()
+	writeKernelSetting(t, h, sysctlMaxUserNamespaces, "63229\n")
+	writeKernelSetting(t, h, sysctlPtraceScope, "0\n")
+	writeKernelSetting(t, h, userNamespaceBootIDPath, "boot-before\n")
+}
+
+// requireKernelUntouched fails when a default (leave) deployment changed a
+// host-wide kernel setting or wrote any of the restriction's files: the
+// restriction stops required sandboxes and is the administrator's choice.
+func requireKernelUntouched(t *testing.T, h *testHost, label string) {
+	t.Helper()
+	if got := h.read(sysctlMaxUserNamespaces); got != "63229\n" {
+		t.Fatalf("%s changed user.max_user_namespaces to %q without the administrator's opt-in", label, got)
+	}
+	if got := h.read(sysctlPtraceScope); got != "0\n" {
+		t.Fatalf("%s changed kernel.yama.ptrace_scope to %q without the administrator's opt-in", label, got)
+	}
+	for _, path := range []string{userNamespacesConfigPath, userNamespaceBootMarker, ptraceBootMarker, userNamespaceUninstalled} {
+		if _, err := os.Stat(h.env.P(path)); !os.IsNotExist(err) {
+			t.Fatalf("%s wrote %s without the administrator's opt-in (err=%v)", label, path, err)
+		}
+	}
+	if record, err := h.env.loadDeployment(); err == nil && record != nil && record.Files[userNamespacesConfigPath] != "" {
+		t.Fatalf("%s tracks the managed sysctl file without the opt-in", label)
+	}
+}
+
+// By default a managed Linux install leaves user namespaces and ptrace as
+// the host has them: the restriction broke Codex's workspace sandbox,
+// RootlessKit and OpenShell Docker sandboxes on managed RHEL. verify names
+// the open routes and the opt-in instead, as the 1.0.3 release did for user
+// namespaces, and a later ensure stays a no-op.
+func TestLinuxDefaultConfigLeavesKernelSettingsAlone(t *testing.T) {
+	h := newTestHost(t, "linux")
+	openKernel(t, h)
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4")}))
+	requireKernelUntouched(t, h, "install")
+	status := h.run(Options{Action: ActionStatus})
+	if hasMessageCode(status.Errors, codeUserNamespaces) || hasMessageCode(status.Errors, codeUnprivilegedPtrace) {
+		t.Fatalf("status failed a default deployment on host kernel settings: %+v", status.Errors)
+	}
+	verify := h.run(Options{Action: ActionVerify})
+	if hasMessageCode(verify.Errors, codeUserNamespaces) || hasMessageCode(verify.Errors, codeUnprivilegedPtrace) {
+		t.Fatalf("verify failed a default deployment on host kernel settings: %+v", verify.Errors)
+	}
+	for _, code := range []string{codeUserNamespaces, codeUnprivilegedPtrace} {
+		if !hasWarning(verify, code) {
+			t.Fatalf("verify did not warn %s on an open host: %+v", code, verify.Warnings)
+		}
+	}
+	for _, warning := range verify.Warnings {
+		if (warning.Code == codeUserNamespaces || warning.Code == codeUnprivilegedPtrace) &&
+			!strings.Contains(warning.Message, "namespaces_and_ptrace: restrict") {
+			t.Fatalf("%s warning does not name the opt-in: %q", warning.Code, warning.Message)
+		}
+	}
+	again := h.run(Options{Action: ActionEnsure})
+	requireOK(t, again)
+	if !again.Noop {
+		t.Fatalf("ensure of an unchanged default deployment was not a no-op: %+v", again)
+	}
+	requireKernelUntouched(t, h, "ensure")
+	requireOK(t, h.run(Options{Action: ActionUninstall, Purge: true}))
+	requireKernelUntouched(t, h, "uninstall")
+
+	// A host whose administrator closed both routes gets no warning.
+	closed := newTestHost(t, "linux")
+	writeKernelSetting(t, closed, sysctlMaxUserNamespaces, "0\n")
+	writeKernelSetting(t, closed, sysctlPtraceScope, "3\n")
+	requireOK(t, closed.run(Options{Action: ActionInstall, PayloadDir: closed.payload("1.0.4")}))
+	verify = closed.run(Options{Action: ActionVerify})
+	if hasWarning(verify, codeUserNamespaces) || hasWarning(verify, codeUnprivilegedPtrace) {
+		t.Fatalf("verify warned on a host the administrator closed: %+v", verify.Warnings)
+	}
+	if got := closed.read(sysctlPtraceScope); got != "3\n" {
+		t.Fatalf("a default install changed the administrator's ptrace scope: %q", got)
+	}
+}
+
+// Upgrades from every released 1.0.x keep the host's kernel settings with
+// the default config. An administrator who later opts in gets the
+// restriction and the reboot requirement; opting out again removes the
+// managed sysctl file and stops failing status.
+func TestLinuxUpgradeFromReleasesLeavesKernelUntilOptIn(t *testing.T) {
+	for _, version := range []string{"1.0.0", "1.0.1", "1.0.2", "1.0.3"} {
+		t.Run(version, func(t *testing.T) {
+			h := newTestHost(t, "linux")
+			openKernel(t, h)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload(version)}))
+			h.env.ProductVersion = "1.0.4"
+			requireOK(t, h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.4")}))
+			requireKernelUntouched(t, h, "upgrade from "+version)
+			if status := h.run(Options{Action: ActionStatus}); hasMessageCode(status.Errors, codeUserNamespaces) || hasMessageCode(status.Errors, codeUnprivilegedPtrace) {
+				t.Fatalf("status failed the upgraded default deployment: %+v", status.Errors)
+			}
+
+			restrict := restrictPolicyViewsConfig(t, h)
+			opted := h.run(Options{Action: ActionEnsure, ConfigFile: restrict})
+			if !opted.Installed || opted.SecurityComplete || !hasMessageCode(opted.Errors, codeUserNamespaces) {
+				t.Fatalf("opt-in did not restrict the host and require a reboot: %+v", opted)
+			}
+			if h.read(sysctlMaxUserNamespaces) != "0\n" || h.read(sysctlPtraceScope) != "2\n" ||
+				h.read(userNamespacesConfigPath) != string(userNamespacesConfig) {
+				t.Fatal("opt-in did not apply and persist both restrictions")
+			}
+			writeKernelSetting(t, h, userNamespaceBootIDPath, "boot-after\n")
+			if status := h.run(Options{Action: ActionStatus}); hasMessageCode(status.Errors, codeUserNamespaces) {
+				t.Fatalf("opt-in stayed incomplete after reboot: %+v", status.Errors)
+			}
+
+			leave := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(leave, DefaultConfig(h.env.Layout), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: leave}))
+			if _, err := os.Stat(h.env.P(userNamespacesConfigPath)); !os.IsNotExist(err) {
+				t.Fatalf("opting out kept the managed sysctl file: %v", err)
+			}
+			if record, err := h.env.loadDeployment(); err != nil || record.Files[userNamespacesConfigPath] != "" {
+				t.Fatalf("opting out still tracks the managed sysctl file: err=%v", err)
+			}
+			for _, action := range []string{ActionStatus, ActionVerify} {
+				if r := h.run(Options{Action: action}); hasMessageCode(r.Errors, codeUserNamespaces) || hasMessageCode(r.Errors, codeUnprivilegedPtrace) {
+					t.Fatalf("%s failed after opting out: %+v", action, r.Errors)
+				}
+			}
+		})
+	}
+}
+
+// A package run whose restriction could not be applied rolled back to the
+// previous deployment, which restricts nothing. Status and verify must keep
+// naming that failure (GAP-0469) instead of reading the namespace error as
+// a reboot the committed package waits for.
+func TestLinuxRolledBackRestrictionStaysAPackageFailure(t *testing.T) {
+	h := packageHost(t, "1.0.3")
+	requireOK(t, h.run(Options{Action: ActionInstall, FromPackage: true, Reason: "package"}))
+	// No /proc/sys/user/max_user_namespaces: the opt-in cannot be applied.
+	failed := h.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package", ConfigFile: restrictPolicyViewsConfig(t, h)})
+	if failed.OK || !failed.Installed || !hasMessageCode(failed.Errors, codeUserNamespaces) || !hasWarning(failed, codeRolledBack) {
+		t.Fatalf("want a rolled-back namespace failure: %+v", failed)
+	}
+	raw, err := json.Marshal(failed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(h.env.P(h.env.Layout.LifecycleDir), lastPackageResultFile), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if failure := h.env.lastPackageInstallFailure(); !strings.HasPrefix(failure, codeUserNamespaces+": ") {
+		t.Fatalf("rolled-back package failure hidden as a pending reboot: %q", failure)
+	}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		if r := h.run(Options{Action: action}); !hasWarning(r, codePackageInstallFailed) {
+			t.Fatalf("%s hid the rolled-back package failure: %+v", action, r.Warnings)
+		}
+	}
+}
+
+// Only a committed run (installed, nothing rolled back) whose errors are all
+// the pending-reboot namespace errors is not a package failure.
+func TestLastPackageInstallFailureOnlyIgnoresCommittedReboot(t *testing.T) {
+	const (
+		userns   = `{"code":"unprivileged_user_namespaces","message":"reboot this host"}`
+		fault    = `{"code":"lifecycle_test_fault","message":"apply failed"}`
+		rollback = `{"code":"rollback_failed","message":"snapshot kept"}`
+	)
+	for name, tc := range map[string]struct {
+		installed bool
+		errors    string
+		warnings  string
+		want      string
+	}{
+		"committed pending reboot":     {true, userns, `{"code":"security_incomplete","message":"reboot pending"}`, ""},
+		"committed without warnings":   {true, userns, ``, ""},
+		"rolled back":                  {true, userns, `{"code":"rolled_back","message":"restored the previous deployment"}`, "unprivileged_user_namespaces: reboot this host"},
+		"rollback failed warning":      {true, userns, `{"code":"rollback_failed","message":""}`, "unprivileged_user_namespaces: reboot this host"},
+		"rollback failed error":        {true, userns + "," + rollback, ``, "rollback_failed: snapshot kept"},
+		"mixed errors":                 {true, userns + "," + fault, ``, "lifecycle_test_fault: apply failed"},
+		"rolled back mixed errors":     {true, userns + "," + fault, `{"code":"rolled_back","message":""}`, "lifecycle_test_fault: apply failed"},
+		"first install did not commit": {false, userns, ``, "unprivileged_user_namespaces: reboot this host"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newTestHost(t, "linux")
+			dir := h.env.P(h.env.Layout.LifecycleDir)
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			doc := fmt.Sprintf(`{"ok":false,"installed":%t,"action":"ensure","errors":[%s],"warnings":[%s]}`, tc.installed, tc.errors, tc.warnings)
+			if err := os.WriteFile(filepath.Join(dir, lastPackageResultFile), []byte(doc), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if got := h.env.lastPackageInstallFailure(); got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A private mount namespace can hide every managed connector's policy from
+// an agent. With the administrator's opt-in the Linux host setting must be
+// applied before an agent can run, and status must stop reporting a
+// complete deployment if it is loosened.
+func TestLinuxManagedUserNamespacesAreDisabledAndDetected(t *testing.T) {
+	h, cfg := restrictedHost(t)
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: cfg}))
 	if got := h.read(sysctlMaxUserNamespaces); got != "0\n" {
 		t.Fatalf("install left user namespaces enabled: %q", got)
 	}
@@ -82,9 +335,10 @@ func TestLinuxManagedUserNamespacesAreDisabledAndDetected(t *testing.T) {
 }
 
 // ptrace path translation can hide /etc/codex and /etc/claude-code without a
-// user namespace. The managed host must require administrator-only tracing.
+// user namespace. A host that opted in must require administrator-only
+// tracing.
 func TestLinuxManagedPtraceRestrictionIsEnforcedAndDetected(t *testing.T) {
-	h := newTestHost(t, "linux")
+	h, cfg := restrictedHost(t)
 	const ptrace = "/proc/sys/kernel/yama/ptrace_scope"
 	path := h.env.P(ptrace)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -93,7 +347,7 @@ func TestLinuxManagedPtraceRestrictionIsEnforcedAndDetected(t *testing.T) {
 	if err := os.WriteFile(path, []byte("0\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	installed := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4")})
+	installed := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: cfg})
 	if !installed.Installed || installed.SecurityComplete || !hasMessageCode(installed.Errors, codeUserNamespaces) {
 		t.Fatalf("install trusted a boot with user ptrace available: %+v", installed)
 	}
@@ -148,8 +402,8 @@ func TestLinuxManagedPtraceRestrictionIsEnforcedAndDetected(t *testing.T) {
 }
 
 func TestLinuxMissingPtraceAttestationRequiresReboot(t *testing.T) {
-	h := newTestHost(t, "linux")
-	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4")}))
+	h, cfg := restrictedHost(t)
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: cfg}))
 	if err := os.Remove(h.env.P(ptraceBootMarker)); err != nil {
 		t.Fatal(err)
 	}
@@ -166,11 +420,11 @@ func TestLinuxMissingPtraceAttestationRequiresReboot(t *testing.T) {
 }
 
 func TestLinuxStricterPtraceScopeIsPreserved(t *testing.T) {
-	h := newTestHost(t, "linux")
+	h, cfg := restrictedHost(t)
 	if err := os.WriteFile(h.env.P(sysctlPtraceScope), []byte("3\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	installed := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4")})
+	installed := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: cfg})
 	if !installed.Installed || installed.SecurityComplete || !hasMessageCode(installed.Errors, codeUserNamespaces) {
 		t.Fatalf("install trusted an unattested stricter setting: %+v", installed)
 	}
@@ -189,8 +443,8 @@ func TestLinuxStricterPtraceScopeIsPreserved(t *testing.T) {
 }
 
 func TestLinuxPtraceUpgradeRequiresRebootWithoutPriorPtraceAttestation(t *testing.T) {
-	h := newTestHost(t, "linux")
-	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4")}))
+	h, cfg := restrictedHost(t)
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: cfg}))
 	oldConfig := []byte("# DefenseClaw managed policy requires a single host view of machine policy.\nuser.max_user_namespaces = 0\n")
 	if err := os.WriteFile(h.env.P(userNamespacesConfigPath), oldConfig, 0o644); err != nil {
 		t.Fatal(err)
@@ -215,55 +469,8 @@ func TestLinuxPtraceUpgradeRequiresRebootWithoutPriorPtraceAttestation(t *testin
 	}
 }
 
-func TestLinuxUserNamespaceRestrictionUpgradesOlderDeployment(t *testing.T) {
-	for _, version := range []string{"1.0.0", "1.0.1", "1.0.2", "1.0.3"} {
-		t.Run(version, func(t *testing.T) {
-			h := newTestHost(t, "linux")
-			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload(version)}))
-			record, err := h.env.loadDeployment()
-			if err != nil {
-				t.Fatal(err)
-			}
-			delete(record.Files, userNamespacesConfigPath)
-			if err := h.env.saveDeployment(record); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Remove(h.env.P(userNamespacesConfigPath)); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(h.env.P(sysctlMaxUserNamespaces), []byte("63229\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			if status := h.run(Options{Action: ActionStatus}); status.SecurityComplete || !hasMessageCode(status.Errors, codeUserNamespaces) {
-				t.Fatalf("old record appeared protected before upgrade: %+v", status)
-			}
-			h.env.ProductVersion = "1.0.4"
-			upgraded := h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.4")})
-			if !upgraded.Installed || upgraded.SecurityComplete || !hasMessageCode(upgraded.Errors, codeUserNamespaces) {
-				t.Fatalf("upgrade did not require a reboot after re-closing namespaces: %+v", upgraded)
-			}
-			if got := h.read(sysctlMaxUserNamespaces); got != "0\n" {
-				t.Fatalf("upgrade left user namespaces enabled: %q", got)
-			}
-			if got := h.read(userNamespacesConfigPath); got != string(userNamespacesConfig) {
-				t.Fatalf("upgrade did not install persistent restriction: %q", got)
-			}
-			record, err = h.env.loadDeployment()
-			if err != nil || record.Files[userNamespacesConfigPath] == "" {
-				t.Fatalf("upgrade did not track persistent restriction: record=%+v err=%v", record, err)
-			}
-			if err := os.WriteFile(h.env.P(userNamespaceBootIDPath), []byte("boot-after\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			if status := h.run(Options{Action: ActionStatus}); hasMessageCode(status.Errors, codeUserNamespaces) {
-				t.Fatalf("upgrade remained incomplete after reboot: %+v", status.Errors)
-			}
-		})
-	}
-}
-
 func TestLinuxFreshInstallFromUnrestrictedHostRequiresReboot(t *testing.T) {
-	h := newTestHost(t, "linux")
+	h, cfg := restrictedHost(t)
 	if err := os.Remove(h.env.P(userNamespacesConfigPath)); err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +480,7 @@ func TestLinuxFreshInstallFromUnrestrictedHostRequiresReboot(t *testing.T) {
 	if err := os.WriteFile(h.env.P(sysctlMaxUserNamespaces), []byte("63229\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	installed := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")})
+	installed := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: cfg})
 	if !installed.Installed || installed.SecurityComplete || !hasMessageCode(installed.Errors, codeUserNamespaces) {
 		t.Fatalf("fresh install marked the current boot complete: %+v", installed)
 	}
@@ -301,14 +508,14 @@ func TestLinuxFreshInstallFromUnrestrictedHostRequiresReboot(t *testing.T) {
 }
 
 func TestLinuxFreshInstallWithZeroSettingStillRequiresReboot(t *testing.T) {
-	h := newTestHost(t, "linux")
+	h, cfg := restrictedHost(t)
 	if err := os.Remove(h.env.P(userNamespacesConfigPath)); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(h.env.P(userNamespaceBootMarker)); err != nil {
 		t.Fatal(err)
 	}
-	installed := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")})
+	installed := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: cfg})
 	if !installed.Installed || installed.SecurityComplete || !hasMessageCode(installed.Errors, codeUserNamespaces) {
 		t.Fatalf("fresh install trusted a zero setting without proof of a reboot: %+v", installed)
 	}
@@ -338,14 +545,16 @@ func TestLinuxFreshInstallWithZeroSettingStillRequiresReboot(t *testing.T) {
 	}
 }
 
+// The package's own install keeps the host's kernel settings; the
+// administrator config that opts in then closes both and waits for a reboot.
 func TestLinuxPackageInstallEnforcesUserNamespaceRestriction(t *testing.T) {
 	h := packageHost(t, "1.0.0")
-	if err := os.WriteFile(h.env.P(sysctlMaxUserNamespaces), []byte("63229\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	installed := h.run(Options{Action: ActionInstall, FromPackage: true, Reason: "package"})
+	openKernel(t, h)
+	requireOK(t, h.run(Options{Action: ActionInstall, FromPackage: true, Reason: "package"}))
+	requireKernelUntouched(t, h, "package install")
+	installed := h.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package", ConfigFile: restrictPolicyViewsConfig(t, h)})
 	if !installed.Installed || installed.SecurityComplete || !hasMessageCode(installed.Errors, codeUserNamespaces) {
-		t.Fatalf("package install did not close namespaces and require a reboot: %+v", installed)
+		t.Fatalf("the opted-in package config did not close namespaces and require a reboot: %+v", installed)
 	}
 	if h.read(sysctlMaxUserNamespaces) != "0\n" || h.read(userNamespacesConfigPath) != string(userNamespacesConfig) {
 		t.Fatal("package install did not enforce and persist the host restriction")
@@ -370,11 +579,11 @@ func TestLinuxPackageInstallEnforcesUserNamespaceRestriction(t *testing.T) {
 }
 
 func TestLinuxNamespaceRebootMarkerSurvivesUninstall(t *testing.T) {
-	h := newTestHost(t, "linux")
+	h, cfg := restrictedHost(t)
 	if err := os.WriteFile(h.env.P(sysctlMaxUserNamespaces), []byte("63229\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	installed := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")})
+	installed := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: cfg})
 	if !installed.Installed || !hasMessageCode(installed.Errors, codeUserNamespaces) {
 		t.Fatalf("first install did not mark the boot incomplete: %+v", installed)
 	}
@@ -391,27 +600,27 @@ func TestLinuxNamespaceRebootMarkerSurvivesUninstall(t *testing.T) {
 	if got := h.read(sysctlMaxUserNamespaces); got != "0\n" {
 		t.Fatalf("uninstall reopened user namespaces: %q", got)
 	}
-	reinstalled := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")})
+	reinstalled := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: cfg})
 	if !reinstalled.Installed || reinstalled.SecurityComplete || !hasMessageCode(reinstalled.Errors, codeUserNamespaces) {
 		t.Fatalf("reinstall in the same boot forgot prior namespaces: %+v", reinstalled)
 	}
 }
 
 func TestLinuxSafeSameBootReinstallAndUnrestrictedReboot(t *testing.T) {
-	h := newTestHost(t, "linux")
-	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h, cfg := restrictedHost(t)
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: cfg}))
 	requireOK(t, h.run(Options{Action: ActionUninstall, Purge: true}))
 	if marker := h.read(userNamespaceUninstalled); marker != "boot-before\n" {
 		t.Fatalf("uninstall did not record when the persistent restriction was removed: %q", marker)
 	}
-	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: cfg}))
 	requireOK(t, h.run(Options{Action: ActionUninstall, Purge: true}))
 	// The fake kernel stays at zero, but the managed sysctl file was absent
 	// across this reboot. The old boot marker no longer proves safety.
 	if err := os.WriteFile(h.env.P(userNamespaceBootIDPath), []byte("boot-after\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	reinstalled := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")})
+	reinstalled := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: cfg})
 	if !reinstalled.Installed || reinstalled.SecurityComplete || !hasMessageCode(reinstalled.Errors, codeUserNamespaces) {
 		t.Fatalf("reinstall trusted a boot without the persistent restriction: %+v", reinstalled)
 	}
@@ -421,8 +630,8 @@ func TestLinuxSafeSameBootReinstallAndUnrestrictedReboot(t *testing.T) {
 }
 
 func TestLinuxReinstallAfterUnprovenUninstallRequiresReboot(t *testing.T) {
-	h := newTestHost(t, "linux")
-	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h, cfg := restrictedHost(t)
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: cfg}))
 	if err := os.Remove(h.env.P(userNamespacesConfigPath)); err != nil {
 		t.Fatal(err)
 	}
@@ -430,18 +639,18 @@ func TestLinuxReinstallAfterUnprovenUninstallRequiresReboot(t *testing.T) {
 	if marker := h.read(userNamespaceUninstalled); marker != "unproven:boot-before\n" {
 		t.Fatalf("uninstall trusted a missing host restriction: %q", marker)
 	}
-	reinstalled := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")})
+	reinstalled := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: cfg})
 	if !reinstalled.Installed || reinstalled.SecurityComplete || !hasMessageCode(reinstalled.Errors, codeUserNamespaces) {
 		t.Fatalf("reinstall trusted an unproven boot: %+v", reinstalled)
 	}
 }
 
 func TestLinuxUserNamespaceRestrictionFailsWithoutKernelSetting(t *testing.T) {
-	h := newTestHost(t, "linux")
+	h, cfg := restrictedHost(t)
 	if err := os.Remove(h.env.P(sysctlMaxUserNamespaces)); err != nil {
 		t.Fatal(err)
 	}
-	r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")})
+	r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: cfg})
 	if r.OK || !hasMessageCode(r.Errors, codeUserNamespaces) {
 		t.Fatalf("install claimed protection without a kernel setting: %+v", r)
 	}
@@ -451,7 +660,7 @@ func TestLinuxUserNamespaceRestrictionFailsWithoutKernelSetting(t *testing.T) {
 }
 
 func TestLinuxUserNamespaceRestrictionRefusesUntrustedConfigDirectory(t *testing.T) {
-	h := newTestHost(t, "linux")
+	h, cfg := restrictedHost(t)
 	if err := os.Remove(h.env.P(userNamespacesConfigPath)); err != nil {
 		t.Fatal(err)
 	}
@@ -461,7 +670,7 @@ func TestLinuxUserNamespaceRestrictionRefusesUntrustedConfigDirectory(t *testing
 		}
 		return nil
 	}
-	r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")})
+	r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: cfg})
 	if r.OK || !hasMessageCode(r.Errors, codeApply) {
 		t.Fatalf("install wrote a host setting through an untrusted directory: %+v", r)
 	}
@@ -470,11 +679,14 @@ func TestLinuxUserNamespaceRestrictionRefusesUntrustedConfigDirectory(t *testing
 	}
 }
 
+// macOS ignores enterprise.machine_policy.linux: the opt-in writes no Linux
+// sysctl file there.
 func TestMacOSUserNamespaceSettingIsNotRequired(t *testing.T) {
 	h := newTestHost(t, "darwin")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.3")}))
 	h.env.ProductVersion = "1.0.4"
 	requireOK(t, h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.4")}))
+	requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: restrictPolicyViewsConfig(t, h)}))
 	if problem := h.env.userNamespaceProblem(); problem != "" {
 		t.Fatal(problem)
 	}

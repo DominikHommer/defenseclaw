@@ -9,7 +9,8 @@
 #   1. installs the package; its postinstall runs `ensure --from-package`
 #      (on Linux it then checks what this systemd reports loading the units)
 #   2. applies a config that enables two connectors (a real config change)
-#   3. runs ensure again (macOS no-op; Linux still awaits the first reboot)
+#   3. runs ensure again (a no-op; a Linux fresh install whose config opts in
+#      to the host-wide kernel restriction still awaits its first reboot)
 #   4. runs verify and status, checks the services and runs the MDM detect.sh
 #   5. uninstalls (dpkg -r / rpm -e run the lifecycle from preremove; macOS
 #      runs `enterprise macos uninstall`) and checks nothing is left running,
@@ -246,6 +247,31 @@ exit_status_matches() {
     reported=$("$python" -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8-sig")).get("exit_code"))' "$file")
     if [ "$rc" != "$reported" ] || { [ "$rc" != 0 ] && [ "$expected_failure" != 1 ]; }; then
         die "$label: the lifecycle process exited $rc, its result reports exit_code $reported"
+    fi
+}
+
+# A deployment without the administrator's opt-in
+# (enterprise.machine_policy.linux.namespaces_and_ptrace: restrict) must leave
+# the host's user namespace and ptrace settings as the preflight found them,
+# and write no restriction file: the restriction stops Codex's workspace
+# sandbox, rootless containers and OpenShell Docker sandboxes.
+assert_kernel_untouched() {
+    [ "$platform" = linux ] || return 0
+    [ "$(cat /proc/sys/user/max_user_namespaces)" = "$found_userns" ] ||
+        die "user.max_user_namespaces changed from $found_userns without the administrator's opt-in"
+    [ "$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo absent)" = "$found_ptrace" ] ||
+        die "kernel.yama.ptrace_scope changed from $found_ptrace without the administrator's opt-in"
+    [ ! -e /etc/sysctl.d/99-zz-defenseclaw-userns.conf ] ||
+        die "the managed sysctl file exists without the administrator's opt-in"
+}
+
+# assert_policy_views: the restriction when this lane opted in, else the
+# untouched kernel.
+assert_policy_views() {
+    if [ "$restrict_views" = 1 ]; then
+        assert_userns_restriction
+    else
+        assert_kernel_untouched
     fi
 }
 
@@ -577,6 +603,12 @@ upgrade_secret_kept() {
 }
 
 write_admin_config() {
+    local machine_policy=""
+    if [ "$restrict_views" = 1 ]; then
+        machine_policy='  machine_policy:
+    linux:
+      namespaces_and_ptrace: restrict'
+    fi
     cat >"$stage/config.yaml" <<EOF
 config_version: 9
 deployment_mode: managed_enterprise
@@ -584,6 +616,7 @@ data_dir: $data_dir
 policy_dir: $vendor_policy_dir
 enterprise:
   profile: standalone
+${machine_policy}
 gateway:
   api_bind: 127.0.0.1
   api_port: 18970
@@ -608,6 +641,11 @@ case "$kind" in
     pkg) ! pkgutil --pkg-info "$macos_package_id" >/dev/null 2>&1 || die "$macos_package_id is already installed" ;;
 esac
 [ -z "$(policy_entries)" ] || die "DefenseClaw machine-policy entries already exist: $(policy_entries)"
+if [ "$platform" = linux ]; then
+    found_userns=$(cat /proc/sys/user/max_user_namespaces)
+    found_ptrace=$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo absent)
+    echo "kernel as found: user.max_user_namespaces=$found_userns kernel.yama.ptrace_scope=$found_ptrace"
+fi
 echo "package: $package"
 echo "version: $version"
 
@@ -628,8 +666,6 @@ upgrade_lane() {
     step "apply the administrator config on the previous release"
     write_admin_config
     lifecycle 02-previous-config ensure --from-package --config "$stage/config.yaml" --reason ci-upgrade-lane
-    # The older binary may report open namespaces as a warning. The new
-    # release reports an error until reboot; these allowances are old-only.
     check "$results/02-previous-config.json" previous-config --action ensure --installed --version "$previous_version" --ready \
         --allow-warning unprivileged_user_namespaces "${policy_checks[@]}"
     cp "$stage/config.yaml" "$results/config-before.yaml"
@@ -663,11 +699,10 @@ upgrade_lane() {
     # it after it saved this result.
     held=()
     [ "$platform" != linux ] || held=(--held-service defenseclaw-enterprise-apply.path)
-    fault_errors=(--expect-error lifecycle_test_fault)
-    [ "$platform" != linux ] || fault_errors+=(--expect-error unprivileged_user_namespaces)
     "$python" "$checker" "$results/05-upgrade-fault.json" --label upgrade-fault --platform "$platform" \
-        --action ensure "${fault_errors[@]}" --ready ${held[@]+"${held[@]}"} \
-        --allow-warning lifecycle_test_fault --allow-warning rolled_back
+        --action ensure --expect-error lifecycle_test_fault --ready ${held[@]+"${held[@]}"} \
+        --allow-warning lifecycle_test_fault --allow-warning rolled_back --allow-warning unprivileged_user_namespaces
+    assert_kernel_untouched
     services_running
     if [ "$platform" = linux ]; then
         systemctl is-active --quiet defenseclaw-enterprise-apply.path ||
@@ -683,7 +718,7 @@ upgrade_lane() {
     # The version 9 config keeps its bytes, so its generation does not drop.
     check "$results/06-upgrade.json" upgrade --action ensure --changed --installed --version "$version" --ready "${complete_or_pending[@]}" \
         "${policy_checks[@]}" --policy-applied --config-generation-above "$((previous_generation - 1))"
-    assert_userns_restriction
+    assert_policy_views
     sandbox_files_present
     launcher_offers_only_sandbox
     cp "$config" "$results/config-upgraded.yaml"
@@ -697,13 +732,21 @@ upgrade_lane() {
 # Both connectors' machine policy is written, owned by DefenseClaw and locked.
 policy_checks=(--machine-policy claudecode --machine-policy codex
     --machine-policy-enforced claudecode --machine-policy-enforced codex)
+# The Linux fresh-install lane's administrator config opts in to the
+# host-wide kernel restriction and then awaits a reboot. The package's own
+# install, the upgrade lanes and macOS keep the default, which leaves the
+# host's kernel settings alone; there verify warns while the runner's kernel
+# leaves a user namespace or same-user ptrace open.
+restrict_views=0
+[ "$platform" != linux ] || [ -n "$upgrade_from" ] || restrict_views=1
 complete_or_pending=(--complete)
 converged=(--noop)
-initial_pending=()
-if [ "$platform" = linux ]; then
+open_views=()
+if [ "$restrict_views" = 1 ]; then
     complete_or_pending=(--reboot-pending)
     converged=(--changed)
-    initial_pending=(--reboot-pending)
+elif [ "$platform" = linux ]; then
+    open_views=(--allow-warning unprivileged_user_namespaces --allow-warning unprivileged_ptrace)
 fi
 if [ -n "$upgrade_from" ]; then
     upgrade_lane
@@ -722,8 +765,8 @@ else
     # host with eligible users is honestly security-incomplete (GAP-0266); the
     # step after this one applies the config and requires --complete.
     check "$results/01-package-install.json" package-install --action ensure --changed --installed --version "$version" --ready \
-        --coverage-complete "${initial_pending[@]}" --allow-warning no_connectors_enabled
-    assert_userns_restriction
+        --coverage-complete --allow-warning no_connectors_enabled
+    assert_kernel_untouched
     [ "$install_rc" -eq 0 ] || die "the package manager exited $install_rc"
     [ -x "$gateway" ] || die "$gateway was not installed"
     [ -f "$config" ] || die "the lifecycle did not write $config"
@@ -751,7 +794,7 @@ else
     lifecycle 02-ensure-config ensure --from-package --config "$stage/config.yaml" --reason ci-install-lane
     check "$results/02-ensure-config.json" ensure-config --action ensure --changed --installed --version "$version" --ready \
         "${complete_or_pending[@]}" "${policy_checks[@]}"
-    assert_userns_restriction
+    assert_policy_views
     [ "$(cksum <"$stage/config.yaml")" = "$(cksum <"$config")" ] || die "$config is not the applied administrator config"
     [ -n "$(policy_entries)" ] || die "no DefenseClaw machine-policy entry was written under ${policy_dirs[*]}"
     echo "machine policy entries: $(policy_entries | tr '\n' ' ')"
@@ -764,18 +807,18 @@ fi
 # ---- converge ----------------------------------------------------------------
 # The apply trigger runs ensure after the admin config lands; on a slow runner it can
 # still hold the lifecycle lock, so wait for it instead of failing with lifecycle_busy.
-step "ensure again (converged; Linux still awaits reboot)"
+step "ensure again (converged; an opted-in Linux host still awaits reboot)"
 lifecycle 03-ensure-noop ensure --from-package --reason ci-install-lane --lock-wait 2m
 check "$results/03-ensure-noop.json" ensure-noop --action ensure "${converged[@]}" --installed --version "$version" --ready \
     "${complete_or_pending[@]}"
-assert_userns_restriction
+assert_policy_views
 
 step "verify"
 lifecycle 04-verify verify
 retry_busy 04-verify verify
 check "$results/04-verify.json" verify --action verify --installed --version "$version" --ready \
-    "${complete_or_pending[@]}" "${policy_checks[@]}"
-assert_userns_restriction
+    "${complete_or_pending[@]}" "${policy_checks[@]}" ${open_views[@]+"${open_views[@]}"}
+assert_policy_views
 
 step "status"
 lifecycle 05-status status
@@ -787,7 +830,7 @@ services_running
 step "MDM detection (detect.sh --require-healthy)"
 detected=$(detect_value --require-healthy --min-version "$version" || true)
 expected_detection=$version
-[ "$platform" != linux ] || expected_detection=unhealthy
+[ "$restrict_views" != 1 ] || expected_detection=unhealthy
 [ "$detected" = "$expected_detection" ] || die "detect.sh printed '$detected', want '$expected_detection'"
 echo "detect.sh: $detected"
 

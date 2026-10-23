@@ -15,10 +15,12 @@ contract or a rejected config as a warning. Pass --allow-warning for each
 warning code the step may report, and --complete to require coverage_complete
 and security_complete. A step that must fail (the upgrade gate's rollback
 drill) passes --expect-error for each error code it must report instead.
-Linux install and upgrade steps before the required reboot use
---reboot-pending: the sole error code must be unprivileged_user_namespaces,
-with an installed deployment, coverage_complete=true and
-security_complete=false.
+Linux steps whose config opted in to the host-wide kernel restriction
+(enterprise.machine_policy.linux.namespaces_and_ptrace: restrict) use
+--reboot-pending before the required reboot: the sole error code must be
+unprivileged_user_namespaces, with a committed deployment (installed, and no
+rolled_back or rollback_failed warning, even an allowed one),
+coverage_complete=true and security_complete=false.
 --policy-applied and --config-generation-above check the effective policy the
 step reports (the result's optional policy object).
 
@@ -137,6 +139,12 @@ def check(document: Dict[str, Any], args: argparse.Namespace) -> List[str]:
         codes = [message["code"] for message in document["errors"]]
         if not codes or any(code != "unprivileged_user_namespaces" for code in codes):
             problems.append(f"pending reboot has unexpected errors: {codes}")
+        # A rolled-back run left the previous deployment running: its
+        # namespace error is the failure, not a reboot this one waits for.
+        rollback = [message["code"] for message in document.get("warnings") or []
+                    if message["code"] in ("rolled_back", "rollback_failed")]
+        if rollback:
+            problems.append(f"pending reboot did not commit: {rollback}")
     elif args.expect_error:
         if document["ok"] is not False:
             problems.append("ok is true, want a failed step")
@@ -296,7 +304,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--reboot-pending",
         action="store_true",
-        help="require an installed Linux deployment with only unprivileged_user_namespaces errors and security_complete false",
+        help="require a committed Linux deployment with only unprivileged_user_namespaces errors and security_complete false",
     )
     parser.add_argument(
         "--policy-applied",

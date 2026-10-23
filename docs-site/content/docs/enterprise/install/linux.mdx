@@ -160,9 +160,8 @@ and readiness check, and exits `1` when anything fails. A healthy `status`, trim
 - With no agent enabled, `status` warns `no_connectors_enabled` and `verify` fails.
 - A new user appears after the next enumerator cycle (up to five minutes). To
   reconcile at once: `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux reconcile --json`.
-- On Linux, managed install disables unprivileged user namespaces. A first
-  install or upgrade from an older deployment requires a reboot before
-  `security_complete` becomes true. See [User namespaces](#user-namespaces).
+- On most distributions `verify` also warns `unprivileged_user_namespaces` or
+  `unprivileged_ptrace`. See [User namespaces](#user-namespaces).
 
 ## Remove
 
@@ -194,8 +193,11 @@ per-user install. See [Per-user installs](/docs/enterprise/install/reference/lin
 
 ### User namespaces
 
-The managed install disables unprivileged user namespaces to prevent an agent
-from hiding machine-policy files. `status` and `verify` report an error if the
-restriction drifts, and require a reboot after first install or a reopened
-restriction. The impact on agent command sandboxes is in
+On most distributions `verify` warns `unprivileged_user_namespaces` or
+`unprivileged_ptrace`: a standard user can start an agent with its own view of
+the machine-policy files, and that agent never calls the hook. DefenseClaw
+leaves these host-wide kernel settings alone unless you set
+`enterprise.machine_policy.linux.namespaces_and_ptrace: restrict`. That closes
+both routes after a reboot, but also stops Codex's workspace sandbox, rootless
+containers and OpenShell Docker sandboxes. The trade-off is in
 [User namespaces](/docs/enterprise/install/reference/linux#user-namespaces).

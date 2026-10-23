@@ -19,11 +19,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
-// A user who can create a private user and mount namespace can mask every
-// vendor machine-policy file before starting an agent. This is a host-wide
-// prerequisite for all managed Linux connectors, not a connector setting.
+// A user who can create a private user and mount namespace, or trace their
+// own agent, can mask every vendor machine-policy file before starting it.
+// Closing that takes host-wide kernel settings that also stop rootless
+// containers, user-namespace command sandboxes (Codex's workspace sandbox),
+// OpenShell Docker sandboxes and standard-user gdb or strace. DefenseClaw
+// applies them only when the administrator chooses
+// enterprise.machine_policy.linux.namespaces_and_ptrace: restrict; by
+// default (leave) verify warns while either route is open.
 const (
 	codeUserNamespaces       = "unprivileged_user_namespaces"
 	codeUnprivilegedPtrace   = "unprivileged_ptrace"
@@ -35,6 +42,114 @@ const (
 	ptraceBootMarker         = "/etc/sysctl.d/.defenseclaw-ptrace-restricted-boot-id"
 	userNamespaceUninstalled = "/etc/sysctl.d/.defenseclaw-userns-uninstalled-boot-id"
 )
+
+// Kernel settings that, besides user.max_user_namespaces, decide whether a
+// standard user can create a user namespace on a host left as it is.
+const (
+	sysctlUnprivilegedUsernsClone = "/proc/sys/kernel/unprivileged_userns_clone"
+	sysctlAppArmorRestrictUserns  = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
+	// kernel.apparmor_restrict_unprivileged_unconfined decides whether an
+	// unconfined process may change to another AppArmor profile (aa-exec,
+	// change_profile). Ubuntu 24.04 ships it at 0, so without it a standard
+	// user can enter a profile that allows user namespaces and create one
+	// despite kernel.apparmor_restrict_unprivileged_userns=1.
+	sysctlAppArmorRestrictUnconfined = "/proc/sys/kernel/apparmor_restrict_unprivileged_unconfined"
+)
+
+// restrictPolicyViewsAdvice names the opt-in and its host-wide cost.
+const restrictPolicyViewsAdvice = "or set enterprise.machine_policy.linux.namespaces_and_ptrace: restrict, " +
+	"which sets user.max_user_namespaces=0 and kernel.yama.ptrace_scope=2 for the whole host and also stops " +
+	"user-namespace command sandboxes such as Codex's, rootless containers, OpenShell Docker sandboxes and " +
+	"standard-user gdb or strace"
+
+// restrictsPolicyViews reports whether the config chooses
+// enterprise.machine_policy.linux.namespaces_and_ptrace: restrict.
+func (c *validatedConfig) restrictsPolicyViews() bool {
+	return c != nil && c.Loaded != nil &&
+		c.Loaded.Enterprise.MachinePolicy.LinuxNamespacesAndPtrace() == config.LinuxNamespacesAndPtraceRestrict
+}
+
+// policyViewsRestricted reports whether the committed deployment applies
+// the restriction: its record then tracks the managed sysctl file. A
+// deployment without it leaves the host's kernel settings alone.
+func (e *Env) policyViewsRestricted(record *Deployment) bool {
+	return e.GOOS == "linux" && record != nil && record.Files[userNamespacesConfigPath] != ""
+}
+
+// warnOpenPolicyViews adds verify warnings on a Linux deployment that leaves
+// the kernel settings alone, while a standard user can still give an agent
+// a private view of machine policy through a user namespace or ptrace.
+func (l *lifecycle) warnOpenPolicyViews() {
+	if l.env.GOOS != "linux" {
+		return
+	}
+	read := func(path string) (string, bool) {
+		data, err := readBounded(l.env.P(path), 64)
+		if err != nil {
+			return "", false
+		}
+		return strings.TrimSpace(string(data)), true
+	}
+	if message := unprivilegedUserNamespaceWarning(read); message != "" {
+		l.result.AddWarning(codeUserNamespaces, message)
+	}
+	if message := unprivilegedPtraceWarning(read); message != "" {
+		l.result.AddWarning(codeUnprivilegedPtrace, message)
+	}
+}
+
+// unprivilegedUserNamespaceWarning returns the warning text, or "" when the
+// kernel has no user namespaces or already refuses them to standard users
+// (user.max_user_namespaces=0, the Debian kernel.unprivileged_userns_clone=0
+// switch, or AppArmor with both kernel.apparmor_restrict_unprivileged_userns=1
+// and kernel.apparmor_restrict_unprivileged_unconfined=1). AppArmor's userns
+// restriction alone applies only to unconfined processes: while the second
+// setting is 0 (the Ubuntu 24.04 default) or absent, a standard user can
+// change to a profile that allows user namespaces, so the warning names it.
+func unprivilegedUserNamespaceWarning(read func(path string) (string, bool)) string {
+	limit, ok := read(sysctlMaxUserNamespaces)
+	if !ok || limit == "0" {
+		return ""
+	}
+	if value, ok := read(sysctlUnprivilegedUsernsClone); ok && value == "0" {
+		return ""
+	}
+	if value, ok := read(sysctlAppArmorRestrictUserns); ok && value == "1" {
+		unconfined, ok := read(sysctlAppArmorRestrictUnconfined)
+		if ok && unconfined == "1" {
+			return ""
+		}
+		if !ok || unconfined == "" {
+			unconfined = "unavailable"
+		}
+		return fmt.Sprintf("standard users can create user namespaces (user.max_user_namespaces=%s): "+
+			"kernel.apparmor_restrict_unprivileged_userns=1 restricts only unconfined processes, and with "+
+			"kernel.apparmor_restrict_unprivileged_unconfined=%s an unconfined process can still change to an "+
+			"AppArmor profile that allows user namespaces (for example with aa-exec); an agent started in a "+
+			"private user and mount namespace can be given its own view of the machine policy, runtime "+
+			"descriptor and hook socket directory, outside the administrator's enforcement; set "+
+			"kernel.apparmor_restrict_unprivileged_unconfined=1 or user.max_user_namespaces=0 (for example "+
+			"in /etc/sysctl.d), %s", limit, unconfined, restrictPolicyViewsAdvice)
+	}
+	return fmt.Sprintf("standard users can create user namespaces (user.max_user_namespaces=%s): "+
+		"an agent started in a private user and mount namespace can be given its own view of the "+
+		"machine policy, runtime descriptor and hook socket directory, outside the administrator's "+
+		"enforcement; set user.max_user_namespaces=0 (for example in /etc/sysctl.d), restrict "+
+		"unprivileged user namespaces with SELinux or AppArmor, %s", limit, restrictPolicyViewsAdvice)
+}
+
+// unprivilegedPtraceWarning returns the warning text, or "" when Yama
+// restricts ptrace to administrators (scope 2 or 3) or is unavailable.
+func unprivilegedPtraceWarning(read func(path string) (string, bool)) string {
+	scope, ok := read(sysctlPtraceScope)
+	if !ok || ptraceRestricted([]byte(scope)) {
+		return ""
+	}
+	return fmt.Sprintf("standard users can trace their own processes (kernel.yama.ptrace_scope=%s): a tracer "+
+		"such as PRoot can rewrite the paths an agent opens and give it its own view of the machine policy, "+
+		"outside the administrator's enforcement; set kernel.yama.ptrace_scope=2 (for example in "+
+		"/etc/sysctl.d), %s", scope, restrictPolicyViewsAdvice)
+}
 
 var userNamespacesConfig = []byte("# DefenseClaw managed policy requires a single host view of machine policy.\nuser.max_user_namespaces = 0\nkernel.yama.ptrace_scope = 2\n")
 var userNamespacesConfigStrict = []byte("# DefenseClaw managed policy requires a single host view of machine policy.\nuser.max_user_namespaces = 0\nkernel.yama.ptrace_scope = 3\n")
