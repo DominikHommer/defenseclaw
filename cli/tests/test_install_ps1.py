@@ -3154,7 +3154,7 @@ Write-Output "ATOMIC=$script:atomic"
 
 
 @pytest.mark.skipif(sys.platform != "win32" or POWERSHELL is None, reason="requires a running Windows executable")
-def test_native_running_hook_is_replaced_at_its_canonical_path(tmp_path: Path) -> None:
+def test_native_running_hook_refusal_preserves_canonical_path_for_retry(tmp_path: Path) -> None:
     # Windows retains an executable image section while it runs. A refusal
     # leaves the canonical name and staged copy intact for the next retry.
     system32 = Path(os.environ["SystemRoot"]) / "System32"

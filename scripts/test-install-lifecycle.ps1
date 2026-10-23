@@ -713,11 +713,10 @@ function Test-FilesInUse {
     Check (-not @(Get-ChildItem -LiteralPath $Bin -Filter "*.old-*").Count) "stale .old-* files were not removed"
 }
 
-# A release whose gateway reports its version but does not start: the
-# install is undone. A start that exits 3 (a connector needs attention)
-# keeps the new version and exits 3. The drill gateway hands every other
-# command to the real one, so the staged check, which runs the staged
-# gateway's config validator (GAP-0158), passes and the swap happens.
+# A release whose gateway reports its version but does not start must be
+# undone. Exit 3 alone does not prove that a connector is guarded: a gateway
+# that reports 3 without running must also be undone. The drill gateway
+# hands every other command to the real one, so the staged config check passes.
 function Test-FailureDrill {
     Enter-Lane failure-drill
     Check ((Install-Candidate $Assets) -eq 0) "install of $Target failed"
@@ -755,17 +754,23 @@ public static class DrillGateway {
     Check ((Install-Candidate $drill) -eq 1) "an install whose gateway does not start must exit 1"
     Check ((Get-Sha256 $gateway) -eq $goodGateway) "the working gateway was not put back"
     Assert-Versions $Target
-    Assert-Healthy
+    Check (-not (Get-GatewayImage)) "the refused start should keep the restored gateway stopped"
     Assert-DataKept
     Check ((Get-Sha256 (Join-Path $DcHome "config.yaml")) -eq $config) "the failed install changed config.yaml"
     Check (@(Get-ChildItem -LiteralPath $DcHome -Directory -Force -Filter ".failed-*").Count -eq 1) "the failed install was not kept in .failed-*"
     Check (-not (Test-Path -LiteralPath (Join-Path $DcHome ".repair"))) "the repair slot was left behind"
+    Check ((Invoke-Exe $gateway @("start")) -eq 0) "the restored gateway did not start for the next upgrade"
+    Assert-Healthy
 
-    Write-Log "a gateway start that exits 3 keeps the new version and exits 3"
+    Write-Log "exit 3 without a running gateway cannot certify the new version"
     $env:DC_DRILL_START_EXIT = "3"
-    try { Check ((Install-Candidate $drill) -eq 3) "an install whose gateway start exits 3 must exit 3" } finally { Remove-Item Env:DC_DRILL_START_EXIT }
-    Check ((Get-Sha256 $gateway) -ne $goodGateway) "exit 3 must keep the new version"
+    try { Check ((Install-Candidate $drill) -eq 1) "an install whose gateway is down must refuse exit 3" } finally { Remove-Item Env:DC_DRILL_START_EXIT }
+    Check ((Get-Sha256 $gateway) -eq $goodGateway) "an unproven exit 3 changed the working gateway"
     Assert-DataKept
+    Check ((Invoke-Exe $gateway @("start")) -eq 0) "the restored gateway did not restart after exit 3"
+    Assert-Healthy
+    Check ((Install-Candidate $Assets) -eq 0) "a refused upgrade prevented the next valid upgrade"
+    Assert-Healthy
 }
 
 # HKLM\SOFTWARE\Policies\Cisco\DefenseClaw\DisableSelfUpdate stops install,

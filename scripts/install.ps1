@@ -1331,10 +1331,9 @@ function Publish-File([string]$New, [string]$Destination) {
 }
 
 function Invoke-AtomicReplace([string]$New, [string]$Destination) {
-    # FileRenameInfoEx replaces the name atomically even when the previous
-    # executable image is still running. That image stays mapped for existing
-    # calls; new calls resolve the new file. Ordinary MoveFileEx refuses an
-    # executing destination under normal hook traffic (GAP-0732).
+    # FileRenameInfoEx atomically replaces a name when existing open handles
+    # permit it. A mapped executable image can still refuse the replacement;
+    # Switch-InPlace retries for a short idle window (GAP-0732).
     if (-not ("DefenseClawInstall.Rename" -as [type])) {
         Add-Type -TypeDefinition @'
 using System;

@@ -26,6 +26,7 @@ $expected = [ordered]@{
     InstallFile = 'O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)'
     ServiceInstallDirectory = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;OICI;0x1200a9;;;$serviceSID)"
     ServiceInstallFile = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)(A;;0x1200a9;;;$serviceSID)"
+    SecureClientMarkerDirectory = 'O:SYG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)'
     StateDirectory = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;$serviceSID)"
     AdminDirectory = 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
     AdminFile = 'O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)'
@@ -52,6 +53,7 @@ $expected = [ordered]@{
 $directoryKinds = @(
     'InstallDirectory',
     'ServiceInstallDirectory',
+    'SecureClientMarkerDirectory',
     'StateDirectory',
     'AdminDirectory',
     'ConfigDirectory',
@@ -367,17 +369,22 @@ $ancestorCases = & $module {
         $security = [Security.AccessControl.DirectorySecurity]::new()
         $security.SetSecurityDescriptorSddlForm('O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a0;;;BU)')
         Microsoft.PowerShell.Security\Set-Acl -LiteralPath $path -AclObject $security
+        $native = Initialize-DefenseClawNativeSecurity
+        $snapshot = $native::GetDirectorySecuritySnapshotNoFollow($path)
         $before = [Security.AccessControl.RawSecurityDescriptor]::new(
-            (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $path).GetSecurityDescriptorBinaryForm(), 0)
+            [byte[]]$snapshot.SecurityDescriptor, 0)
         [void](Set-DefenseClawSharedDirectoryRawAce -Path $path -SID $GatewaySID -Action Replace -AccessMask 0x1200a9)
+        $snapshot = $native::GetDirectorySecuritySnapshotNoFollow($path)
         $granted = [Security.AccessControl.RawSecurityDescriptor]::new(
-            (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $path).GetSecurityDescriptorBinaryForm(), 0)
+            [byte[]]$snapshot.SecurityDescriptor, 0)
         [void](Set-DefenseClawSharedDirectoryRawAce -Path $path -SID $GatewaySID -Action Replace -AccessMask 0x1200a9)
+        $snapshot = $native::GetDirectorySecuritySnapshotNoFollow($path)
         $twice = [Security.AccessControl.RawSecurityDescriptor]::new(
-            (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $path).GetSecurityDescriptorBinaryForm(), 0)
+            [byte[]]$snapshot.SecurityDescriptor, 0)
         [void](Set-DefenseClawSharedDirectoryRawAce -Path $path -SID $GatewaySID -Action Remove)
+        $snapshot = $native::GetDirectorySecuritySnapshotNoFollow($path)
         $after = [Security.AccessControl.RawSecurityDescriptor]::new(
-            (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $path).GetSecurityDescriptorBinaryForm(), 0)
+            [byte[]]$snapshot.SecurityDescriptor, 0)
         [pscustomobject]@{
             foreign_vendor_ace_preserved = ($granted.DiscretionaryAcl | Microsoft.PowerShell.Core\Where-Object {
                 $_ -is [Security.AccessControl.KnownAce] -and $_.SecurityIdentifier.Value -ceq 'S-1-5-32-545' -and

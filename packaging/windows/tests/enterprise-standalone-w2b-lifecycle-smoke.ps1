@@ -770,8 +770,13 @@ $stream.Dispose()
                 (Get-DefenseClawVendorUsersReadGrant -Path $vendor) -ne 0x20) {
                 $failures.Add("Setup did not complete an administrator's partial Users entry, or did not record only what it added")
             }
+            # Get-Acl projects same-SID allow rules. Inspect the on-disk
+            # descriptor so this catches a widened foreign ACE, not a
+            # FileSystemSecurity projection of two separate raw ACEs.
+            $native = Initialize-DefenseClawNativeSecurity
+            $partialSnapshot = $native::GetDirectorySecuritySnapshotNoFollow($vendor)
             $partialRaw = [Security.AccessControl.RawSecurityDescriptor]::new(
-                (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).GetSecurityDescriptorBinaryForm(), 0)
+                [byte[]]$partialSnapshot.SecurityDescriptor, 0)
             $originalUsers = @($partialRaw.DiscretionaryAcl | Microsoft.PowerShell.Core\Where-Object {
                     $_ -is [Security.AccessControl.KnownAce] -and
                     $_.SecurityIdentifier.Value -ceq $script:UsersSID -and
