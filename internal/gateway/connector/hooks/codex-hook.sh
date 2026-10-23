@@ -153,11 +153,13 @@ DEFENSECLAW_HOOK_CONNECTOR="codex"
 DEFENSECLAW_HOOK_NAME="codex-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
-PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
-  [ "$FAIL_MODE" = "open" ] ||
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}# A standalone managed hook blocks input too large to inspect in every
+# fail mode: the agent chooses the size.
+{{end}}PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}")")" || {
+  [ "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}" = "open" ] ||
     defenseclaw_allow_failed_stop_event codex codex-hook "$BOUND_EVENT" "" "stdin body exceeded cap" transport
   echo "defenseclaw: codex hook refusing oversized payload" >&2
-  if [ "$FAIL_MODE" != "open" ]; then
+  if [ "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}" != "open" ]; then
     printf '{"decision":"block","reason":"DefenseClaw hook payload too large"}\n'
     exit 2
   fi
@@ -240,7 +242,11 @@ fail_unreachable() {
 # indicate misconfiguration — respect FAIL_MODE so an operator who
 # explicitly set FAIL_MODE=closed is told about a real problem.
 fail_response() {
-  local reason
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  # A standalone managed hook: the administrator's open covers a gateway
+  # outage only (the service not running, restarting or giving no answer
+  # in time). A refusal, an error status or an unusable answer blocks.
+  FAIL_MODE="closed"
+{{end}}  local reason
   reason="$(defenseclaw_response_failure_reason "$1")"
   [ "$FAIL_MODE" = "open" ] ||
     defenseclaw_allow_failed_stop_event codex codex-hook "$BOUND_EVENT" "" "$reason" response
@@ -367,8 +373,11 @@ if [ "$CURL_STATUS" -ne 0 ] && [ "$BOUND_EVENT" != "SessionEnd" ]; then
   fi
 fi
 if [ "$CURL_STATUS" -eq 0 ]; then
-  defenseclaw_retry_busy codex_gateway_post_response || CURL_STATUS=$?
-fi
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  # The gateway answered 429, so it is up: a resend that fails after it is
+  # no outage in a standalone managed hook.
+  defenseclaw_retry_busy codex_gateway_post_response || fail_response "gateway returned HTTP 429"
+{{else}}  defenseclaw_retry_busy codex_gateway_post_response || CURL_STATUS=$?
+{{end}}fi
 API_TOKEN=
 PAYLOAD=
 AUTH_HEADER_ARGS=()
@@ -386,7 +395,7 @@ RESULT=$(echo "$RESPONSE" | sed '$d')
 if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"
 elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/null; then
-  fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
+  {{if and .Managed (not .SecureClient) (not .Sandbox)}}fail_response{{else}}fail_unreachable{{end}} "gateway returned HTTP ${HTTP_CODE}"
 elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi
