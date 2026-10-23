@@ -40,7 +40,7 @@ const codeAgentSessionsRestart = "agent_sessions_restart_required"
 // registers hooks for.
 var agentCLINames = map[string]bool{
 	"claude": true, "codex": true, "cursor-agent": true, "copilot": true, "opencode": true, "amp": true,
-	"devin": true, "hermes": true, "agy": true, "antigravity": true, "kiro-cli": true,
+	"devin": true, "hermes": true, "agy": true, "kiro-cli": true,
 }
 
 // agentsReadingHooksLive pick up DefenseClaw's hooks without a restart: a
@@ -259,7 +259,7 @@ func (e *Env) darwinAgentSessions(ctx context.Context) []agentSession {
 
 func (e *Env) darwinAgentSessionsWithError(ctx context.Context) ([]agentSession, error) {
 	result, err := e.Runner.Run(ctx, "ps", "-axww", "-o", "pid=,uid=,etime=,args=")
-	if err != nil {
+	if err != nil && len(result.Stdout) == 0 {
 		return nil, err
 	}
 	now := e.Now()
@@ -293,7 +293,7 @@ func (e *Env) darwinAgentSessionsWithError(ctx context.Context) ([]agentSession,
 			out = append(out, agentSession{PID: pid, UID: uid, Agent: name, Started: now.Add(-elapsed), Unknown: true})
 		}
 	}
-	return out, nil
+	return out, err
 }
 
 // psArgv keeps a script host's command or module argument together when ps

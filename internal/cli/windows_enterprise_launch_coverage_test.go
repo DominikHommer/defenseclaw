@@ -89,17 +89,110 @@ func TestWindowsManagedLaunchCoverageNamesPureModeAndAuditsItsWarning(t *testing
 	}
 }
 
-func TestWindowsManagedKiroResumePlacementIsUnverified(t *testing.T) {
-	priorConnectors, priorProcesses, priorAudit := windowsEnterpriseEnrolledConnectors, windowsEnterpriseAgentProcesses, windowsManagedLaunchAudit
+func TestWindowsManagedLaunchCoverageNormalProfilesStayHealthy(t *testing.T) {
+	priorConnectors, priorProcesses := windowsEnterpriseEnrolledConnectors, windowsEnterpriseAgentProcesses
+	priorEnvironment, priorProfile, priorAudit := windowsManagedLaunchEnvironment, enterpriseHookSIDProfilePath, windowsManagedLaunchAudit
+	priorAccountSID := windowsEnterpriseAccountSID
 	t.Cleanup(func() {
 		windowsEnterpriseEnrolledConnectors, windowsEnterpriseAgentProcesses = priorConnectors, priorProcesses
-		windowsManagedLaunchAudit = priorAudit
+		windowsManagedLaunchEnvironment, enterpriseHookSIDProfilePath, windowsManagedLaunchAudit = priorEnvironment, priorProfile, priorAudit
+		windowsEnterpriseAccountSID = priorAccountSID
+	})
+	const sid = "S-1-5-21-111-222-333-1001"
+	const profile = `C:\Users\alice`
+	windowsEnterpriseEnrolledConnectors = func() ([]string, error) {
+		return []string{"opencode", "amp", "devin", "hermes", "antigravity"}, nil
+	}
+	windowsEnterpriseAgentProcesses = func() ([]inventory.AgentProcess, error) {
+		return []inventory.AgentProcess{
+			{PID: 7133, Connector: "opencode", User: `DCFC\alice`, OwnerSID: sid, Args: []string{"opencode.exe"}, ArgsKnown: true},
+			{PID: 7134, Connector: "amp", User: `DCFC\alice`, Args: []string{"amp.exe"}, ArgsKnown: true},
+			{PID: 7135, Connector: "devin", User: `DCFC\alice`, OwnerSID: sid, Args: []string{"devin.exe"}, ArgsKnown: true},
+			{PID: 7136, Connector: "hermes", User: `DCFC\alice`, OwnerSID: sid, Args: []string{"hermes.exe"}, ArgsKnown: true},
+			{PID: 7137, Connector: "antigravity", User: `DCFC\alice`, OwnerSID: sid, Args: []string{"agy.exe"}, ArgsKnown: true},
+		}, nil
+	}
+	windowsEnterpriseAccountSID = func(string) string { return sid }
+	enterpriseHookSIDProfilePath = func(string) (string, error) { return profile, nil }
+	windowsManagedLaunchEnvironment = func(int) (map[string]string, error) {
+		return map[string]string{"USERPROFILE": `c:\users\ALICE`,
+			"APPDATA": profile + `\AppData\Roaming`, "LOCALAPPDATA": profile + `\AppData\Local`}, nil
+	}
+	var audited []string
+	windowsManagedLaunchAudit = func(_ inventory.AgentProcess, connector, reason string) error {
+		audited = append(audited, connector+":"+reason)
+		return nil
+	}
+	verify := func(wantWarnings int) *enterprisestatus.Result {
+		result := enterprisestatus.New("verify", managed.ProfileStandalone, "windows", "1.0.4")
+		result.Installed, result.CoverageComplete, result.SecurityComplete = true, true, true
+		applyWindowsEnterpriseLaunchCoverage(result)
+		if len(result.Warnings) != wantWarnings || len(result.Errors) != wantWarnings ||
+			result.CoverageComplete != (wantWarnings == 0) || result.SecurityComplete != (wantWarnings == 0) {
+			t.Fatalf("Windows launch coverage (want %d warnings): %+v", wantWarnings, result)
+		}
+		return result
+	}
+	verify(0)
+	if len(audited) != 0 {
+		t.Fatalf("normal launches raised audit alerts: %v", audited)
+	}
+	windowsManagedLaunchEnvironment = func(int) (map[string]string, error) { return nil, errors.New("access denied") }
+	verify(5)
+	if len(audited) != 5 {
+		t.Fatalf("unreadable launches had no audit alerts: %v", audited)
+	}
+	windowsManagedLaunchEnvironment = func(int) (map[string]string, error) {
+		return map[string]string{"USERPROFILE": profile, "OPENCODE_PURE": "1"}, nil
+	}
+	result := verify(1)
+	if !strings.Contains(result.Warnings[0].Message, "opencode_pure") {
+		t.Fatalf("environment bypass was missed: %+v", result.Warnings)
+	}
+	windowsManagedLaunchEnvironment = func(int) (map[string]string, error) {
+		return map[string]string{"USERPROFILE": profile, "APPDATA": `C:\other\Roaming`,
+			"LOCALAPPDATA": profile + `\AppData\Local`}, nil
+	}
+	result = verify(1)
+	if !strings.Contains(result.Warnings[0].Message, "devin (pid 7135)") ||
+		!strings.Contains(result.Warnings[0].Message, "user_config_relocated") {
+		t.Fatalf("redirected Devin AppData was missed: %+v", result.Warnings)
+	}
+	windowsManagedLaunchEnvironment = func(int) (map[string]string, error) {
+		return map[string]string{"USERPROFILE": profile, "APPDATA": profile + `\AppData\Roaming`,
+			"LOCALAPPDATA": `C:\other\Local`}, nil
+	}
+	result = verify(1)
+	if !strings.Contains(result.Warnings[0].Message, "hermes (pid 7136)") ||
+		!strings.Contains(result.Warnings[0].Message, "hermes_config_relocated") {
+		t.Fatalf("redirected Hermes AppData was missed: %+v", result.Warnings)
+	}
+	windowsManagedLaunchEnvironment = func(int) (map[string]string, error) {
+		return map[string]string{"USERPROFILE": profile, "OPENCODE_PURE": "1"}, nil
+	}
+	enterpriseHookSIDProfilePath = func(string) (string, error) { return "", errors.New("profile unavailable") }
+	result = verify(5)
+	if !strings.Contains(result.Warnings[0].Message, "opencode_pure") {
+		t.Fatalf("specific bypass was masked by missing profile: %+v", result.Warnings)
+	}
+}
+
+func TestWindowsManagedKiroResumePlacementIsUnverified(t *testing.T) {
+	priorConnectors, priorProcesses, priorAudit := windowsEnterpriseEnrolledConnectors, windowsEnterpriseAgentProcesses, windowsManagedLaunchAudit
+	priorEnvironment := windowsManagedLaunchEnvironment
+	priorProfile := enterpriseHookSIDProfilePath
+	t.Cleanup(func() {
+		windowsEnterpriseEnrolledConnectors, windowsEnterpriseAgentProcesses = priorConnectors, priorProcesses
+		windowsManagedLaunchAudit, windowsManagedLaunchEnvironment = priorAudit, priorEnvironment
+		enterpriseHookSIDProfilePath = priorProfile
 	})
 	windowsEnterpriseEnrolledConnectors = func() ([]string, error) { return []string{"kiro"}, nil }
 	windowsEnterpriseAgentProcesses = func() ([]inventory.AgentProcess, error) {
-		return []inventory.AgentProcess{{PID: 7192, Connector: "kiro", User: `DCFC\alice`,
+		return []inventory.AgentProcess{{PID: 7192, Connector: "kiro", User: `DCFC\alice`, OwnerSID: "S-1-5-21-111-222-333-1001",
 			Args: []string{"kiro-cli.exe", "--resume-id", "cloud-session-id"}, ArgsKnown: true}}, nil
 	}
+	windowsManagedLaunchEnvironment = func(int) (map[string]string, error) { return map[string]string{}, nil }
+	enterpriseHookSIDProfilePath = func(string) (string, error) { return `C:\Users\alice`, nil }
 	var audited []string
 	windowsManagedLaunchAudit = func(_ inventory.AgentProcess, connector, reason string) error {
 		audited = append(audited, connector+":"+reason)
