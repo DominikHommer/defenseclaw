@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1678,14 +1679,6 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 	if err := validatePluginArtifactDestination(path); err != nil {
 		return fmt.Errorf("%s validate plugin destination: %w", c.name, err)
 	}
-	// The plugin carries its own fail mode and reads no shell hook runtime
-	// record. One an earlier release or reconcile left kept its old mode
-	// after a fail-mode change and misled every read of it (GAP-0635).
-	if !opts.ManagedEnterprise {
-		if err := clearHookConfigSidecarEntry(filepath.Join(opts.DataDir, "hooks"), c.name); err != nil {
-			return fmt.Errorf("%s remove the unused hook runtime record: %w", c.name, err)
-		}
-	}
 	if err := captureManagedFileBackup(opts.DataDir, c.name, "config", path); err != nil {
 		return rollback(fmt.Errorf("%s capture plugin backup: %w", c.name, err))
 	}
@@ -1710,6 +1703,16 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 	}
 	if err := openCodeWritePluginFile(path, renderedBody, 0o600); err != nil {
 		return rollback(fmt.Errorf("%s write plugin: %w", c.name, err))
+	}
+	// The plugin carries its own fail mode and reads no shell hook runtime
+	// record. An earlier release or reconcile may have left a stale mode in
+	// that record (GAP-0635). Clean it after publishing the plugin: damage to
+	// unused shared state must neither block Setup nor alter that state.
+	if !opts.ManagedEnterprise {
+		hookDir := filepath.Join(opts.DataDir, "hooks")
+		if err := clearHookConfigSidecarEntry(hookDir, c.name); err != nil {
+			log.Printf("[connector] %s setup: could not remove unused hook runtime record in %s: %v", c.name, hookDir, err)
+		}
 	}
 	return nil
 }
