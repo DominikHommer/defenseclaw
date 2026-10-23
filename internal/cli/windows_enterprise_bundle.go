@@ -1128,7 +1128,8 @@ func windowsBundleNotApplied(p *enterprisebundle.Prepared, message string, hasCu
 // finishWindowsEnterpriseBundle settles the bundle of a run once its ensure
 // ended, before the result is recorded and printed: the bundle is confirmed
 // when the transaction installed its config and the gateway enforces it;
-// otherwise the last good config goes back and the receipt fails. Every
+// a committed config whose gateway cannot answer stays applied and pending;
+// a rejected or uncommitted candidate is restored and failed. Every
 // standalone result then carries the bundle block.
 func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLifecycleOptions, result *enterprisestatus.Result) {
 	if opts == nil || opts.bundleRollback {
@@ -1181,12 +1182,17 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 			switch {
 			case windowsBundleHasCode(result.Errors, code):
 			case p.Receipt.State == enterprisebundle.StateApplied:
-				// Proven and enforcing; only its confirmation record failed
-				// (GAP-0485). The receipt stays applied for the next run.
+				// A proven live policy whose confirmation record failed, or a
+				// committed config whose gateway is down, stays applied for the
+				// next run. Neither is a failed delivery.
 				result.AddError(code, fmt.Sprintf("policy bundle %s version %d: %s", p.Receipt.BundleID, p.Receipt.Version, err.Error()))
 			default:
 				result.AddError(code, windowsBundleNotApplied(p, err.Error(), windowsBundleHasCurrent(run.driver.Store)))
 			}
+		}
+		if p.Receipt.State == enterprisebundle.StateApplied {
+			result.AddWarning(enterprisebundle.WarnBundlePending,
+				"the signed bundle config is installed but its receipt is not confirmed yet; retry ensure to finish confirmation")
 		}
 		// The delivered anchors are committed only once the bundle they
 		// verified is confirmed, so a run killed while Finish waits for the

@@ -274,6 +274,9 @@ type lifecycle struct {
 	osPlan *openshellPlan
 	// bundle is the signed policy bundle this run applies (nil for none).
 	bundle *bundleRun
+	// repeatGeneration attributes a repeat that repairs drift to the
+	// verified current bundle without creating a second receipt.
+	repeatGeneration *enterprisebundle.Receipt
 	// confirmedLate are the manifest SHA-256s of the bundles this run's
 	// settle confirmed late (bundle_confirmed_after_interrupt).
 	confirmedLate map[string]bool

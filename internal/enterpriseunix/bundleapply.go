@@ -165,6 +165,9 @@ func (l *lifecycle) configWriteOptions() configwrite.Options {
 			return opt
 		}
 	}
+	if opt, ok := enterprisebundle.GenerationOptions(l.repeatGeneration); ok {
+		return opt
+	}
 	return configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise " + l.opts.Action}
 }
 
@@ -521,6 +524,9 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 		// the one status reports, and ensure re-applies its config (a no-op
 		// on a healthy host).
 		repeat = true
+		receipt.Principal, receipt.ChangeSummary, receipt.SignerKeyID = res.Manifest.CreatedBy, res.Manifest.ChangeSummary, res.Signature.KeyID
+		l.repeatGeneration = receipt
+		defer func() { l.repeatGeneration = nil }()
 		if err := store.Discard(receipt); err != nil {
 			r.AddWarning(codeBundleStateUnreadable, "could not remove the receipt of the repeated delivery: "+err.Error())
 		}
@@ -537,10 +543,21 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 		// and restart the gateway without its policy ever converging. Do not
 		// report that cached confirmation as this delivery's outcome.
 		if code == 0 && len(r.Errors) == 0 {
-			current, err := store.CurrentSummary()
-			if err != nil || current == nil || r.Policy == nil || !r.Policy.Applied ||
-				r.Policy.EffectiveDigest != current.EffectivePolicyDigest ||
-				r.Policy.GatewayReportedDigest != current.EffectivePolicyDigest {
+			generation, generationErr := configwrite.ReadGenerationState(env.P(env.Layout.ConfigPath))
+			gateway, hasGateway := gatewayUnitOf(env.Services.Units())
+			var health bundleHealth
+			if hasGateway {
+				if body, healthErr := l.gatewayHealth(ctx, gateway, record.ServiceUID); healthErr == nil {
+					health = parseBundleHealth(body)
+				}
+			}
+			if generationErr != nil || r.Policy == nil || !r.Policy.Applied ||
+				r.Policy.EffectiveDigest != res.EffectivePolicyDigest ||
+				r.Policy.GatewayReportedDigest != res.EffectivePolicyDigest ||
+				generation.BundleID != id || generation.BundleVersion != version ||
+				health.digest != res.EffectivePolicyDigest || health.configGeneration != generation.Generation ||
+				health.bundleID != id || health.bundleVersion != version || health.reloadError != "" || health.configState == "error" ||
+				enterprisebundle.ConfirmPolicyDigests(res.ExpectedDigest, r.Policy.EffectiveDigest, health.digest, res.DigestVerified) != nil {
 				r.Noop, r.NoopReason = false, ""
 				// ensureInstalled describes the historical confirmed receipt.
 				// This repeated delivery has not earned that result block.

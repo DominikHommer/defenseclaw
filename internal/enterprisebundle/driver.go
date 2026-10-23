@@ -26,8 +26,9 @@ import (
 // then installs that config with its own ensure transaction, which rolls
 // back on its own failure. Finish confirms the bundle only once the running
 // gateway reports the effective policy of the installed config with no
-// reload error; anything else fails the receipt, and the caller installs
-// the last good config again. Until the confirm, bundle-state.json still
+// reload error. A committed config whose gateway cannot answer stays
+// applied and pending; a rejected candidate fails and the caller restores
+// the last good config. Until confirmation, bundle-state.json still
 // names the last good bundle, so a run that stops in between is settled by
 // SettleRun at the start of the next one.
 type Driver struct {
@@ -73,6 +74,10 @@ type Prepared struct {
 	// ConfigSHA256 its hex SHA-256.
 	Config       []byte
 	ConfigSHA256 string
+	// EffectivePolicyDigest is the policy verified from this build's staged
+	// bundle. A committed config keeps this digest while its gateway is down
+	// and the receipt waits in applied for a later live confirmation.
+	EffectivePolicyDigest string
 	// AlreadyApplied is a repeated delivery of the current bundle: its
 	// receipt was discarded and Config is the current bundle config.
 	AlreadyApplied bool
@@ -186,6 +191,7 @@ func (d *Driver) Prepare(ctx context.Context, b *Bundle, readErr error) (*Prepar
 		return refuse(err)
 	}
 	p.Manifest = res.Manifest
+	p.EffectivePolicyDigest = res.EffectivePolicyDigest
 	if res.AlreadyApplied {
 		raw, _, err := d.CurrentConfig()
 		if err != nil {
@@ -296,11 +302,12 @@ func (d *Driver) CurrentConfig() ([]byte, *Ref, error) {
 // cannot be read), failure the lifecycle error codes of a transaction that
 // failed (empty when it succeeded). The bundle is confirmed only when the
 // transaction installed its config and policy shows the gateway enforcing
-// it; otherwise the receipt fails (apply_failed, not_confirmed) and the
-// returned error carries the code. When the bundle config was installed but
-// not confirmed, rollback (when not nil) installs the last good config again
-// before the receipt fails; it returns the digest the gateway then enforces
-// and whether the rollback finished.
+// it. If its config was committed but the gateway cannot answer, the receipt
+// stays applied for later confirmation. A rejected or uncommitted candidate
+// fails (apply_failed, not_confirmed) and the returned error carries the
+// code. For a failed candidate, rollback (when not nil) installs the last
+// good config again; it returns the digest then enforced and whether the
+// rollback finished.
 func (d *Driver) Finish(p *Prepared, installed string, failure []string, policy GatewayPolicy, restart bool,
 	rollback func() (enforcing string, ok bool)) (State, error) {
 	rc := p.Receipt
@@ -331,6 +338,20 @@ func (d *Driver) Finish(p *Prepared, installed string, failure []string, policy 
 		return State{}, d.fail(rc, CodeApplyFailed, message)
 	}
 	rc.EffectivePolicyDigest = policy.EffectiveDigest
+	if policy.Unavailable() {
+		if generation, committed := d.committedGeneration(rc, installed); committed && digestPattern.MatchString(p.EffectivePolicyDigest) {
+			at := d.now().UTC().Format("2006-01-02T15:04:05.000Z07:00")
+			if err := d.Store.Advance(rc, StateApplied, func(r *Receipt) {
+				r.EffectivePolicyDigest, r.ConfigGeneration, r.ConfigSHA256 = p.EffectivePolicyDigest, generation.Generation, p.ConfigSHA256
+				r.AppliedAt, r.Restart, r.RestartRequired = at, restart, restart
+			}); err != nil {
+				return State{}, err
+			}
+			return State{}, &Error{Code: CodeNotConfirmed, Detail: "the bundle config is installed, but the gateway is unavailable; its receipt stays applied until the gateway reports the verified policy"}
+		}
+		return State{}, d.failAfterRollback(rc, CodeNotConfirmed,
+			"the gateway is unavailable and the bundle transaction was not committed", rollback)
+	}
 	if err := ConfirmPolicyDigests(rc.ExpectedDigest, policy.EffectiveDigest, policy.Digest, rc.DigestComparable); err != nil {
 		return State{}, d.failAfterRollback(rc, CodeDigestMismatch, err.Error(), rollback)
 	}
@@ -367,8 +388,9 @@ func (d *Driver) Finish(p *Prepared, installed string, failure []string, policy 
 
 // SettleRun finishes what an interrupted run left (Store.Settle) and then
 // each applied but unconfirmed receipt: confirmed when the deployment holds
-// its config and the gateway enforces its digest, failed(not_confirmed)
-// otherwise. An applied receipt bundle-state.json already names as current
+// its config and the gateway enforces its digest, pending while the gateway
+// cannot answer, and failed(not_confirmed) when live evidence disproves it.
+// An applied receipt bundle-state.json already names as current
 // (Store.Confirm stopped after its state write) completes from that proof in
 // Store.Settle: its apply was proven before the state write, so a gateway
 // that is down or not ready now neither fails it nor makes it a rollback
