@@ -20,7 +20,9 @@ package processutil
 
 import (
 	"fmt"
+	"os"
 	"runtime"
+	"strconv"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -44,20 +46,31 @@ const (
 
 func seccompArg(i uint32) uint32 { return 16 + 8*i }
 
-// guardCustodian keeps what the calling thread starts from ending the
-// custodian. A non-leader thread ID can signal its entire thread group, so
-// filtering only the custodian's process ID is insufficient (GAP-0631).
-// The filter refuses signals and I/O ownership aimed at any positive PID,
-// except kill(pid, 0), and refuses prlimit64 on any process other than self.
-// It also refuses signals to the custodian's group and to every process at
-// once. The runner starts a new session, so kill(0) cannot reach that group.
+// guardCustodian protects the custodian and its gateway parent while allowing
+// a scanner to signal itself and the children it starts by positive PID. A
+// non-leader thread ID can signal its entire group, so list every thread ID
+// before the command starts. The gateway is also a subreaper and sweeps any
+// orphan it adopts if the custodian nevertheless dies (GAP-0631).
 // tgkill and rt_tgsigqueueinfo expose the target's thread-group ID and are
-// refused for the custodian; tkill and pidfd_send_signal hide the group and
-// are refused outright (pidfd_send_signal reports ENOSYS so runtimes can
-// fall back to kill). The filter is installed with prctl, which applies to
-// this thread alone and which the gateway unit allows, unlike seccomp(2).
+// refused for both protected processes; tkill and pidfd_send_signal hide the
+// group and are refused outright (pidfd_send_signal reports ENOSYS so runtimes
+// can fall back to kill). Ptrace and cross-process memory/fd access cannot
+// inject a signal from an unfiltered thread. The filter is installed with
+// prctl, which applies to this thread alone and which the gateway unit allows.
 func guardCustodian(custodian int) error {
-	filter, err := custodianGuardFilter(uint32(custodian))
+	gateway, err := parentPID(custodian)
+	if err != nil {
+		return err
+	}
+	gatewayGroup, err := unix.Getpgid(gateway)
+	if err != nil {
+		return err
+	}
+	protected, err := protectedThreadIDs(custodian, gateway)
+	if err != nil {
+		return err
+	}
+	filter, err := custodianGuardFilter(uint32(custodian), uint32(gateway), uint32(-gatewayGroup), protected)
 	if err != nil {
 		return err
 	}
@@ -70,9 +83,30 @@ func guardCustodian(custodian int) error {
 	return err
 }
 
+func protectedThreadIDs(processes ...int) ([]uint32, error) {
+	var ids []uint32
+	for _, process := range processes {
+		entries, err := os.ReadDir("/proc/" + strconv.Itoa(process) + "/task")
+		if err != nil {
+			return nil, fmt.Errorf("processutil: cannot list protected threads of %d: %w", process, err)
+		}
+		if len(entries) == 0 {
+			return nil, fmt.Errorf("processutil: no protected threads of %d", process)
+		}
+		for _, entry := range entries {
+			id, err := strconv.ParseUint(entry.Name(), 10, 32)
+			if err != nil {
+				return nil, err
+			}
+			ids = append(ids, uint32(id))
+		}
+	}
+	return ids, nil
+}
+
 // custodianGuardFilter assembles guardCustodian's filter for the running
 // architecture.
-func custodianGuardFilter(custodian uint32) ([]unix.SockFilter, error) {
+func custodianGuardFilter(custodian, gateway, gatewayGroup uint32, protected []uint32) ([]unix.SockFilter, error) {
 	arch, ok := seccompArch[runtime.GOARCH]
 	if !ok {
 		return nil, fmt.Errorf("processutil: no seccomp architecture for %s", runtime.GOARCH)
@@ -88,29 +122,42 @@ func custodianGuardFilter(custodian uint32) ([]unix.SockFilter, error) {
 	}
 	a.jeq(unix.SYS_KILL, "kill", "")
 	a.jeq(unix.SYS_TGKILL, "process", "")
-	a.jeq(unix.SYS_RT_SIGQUEUEINFO, "eperm", "")
+	a.jeq(unix.SYS_RT_SIGQUEUEINFO, "signal", "")
 	a.jeq(unix.SYS_RT_TGSIGQUEUEINFO, "process", "")
 	a.jeq(unix.SYS_TKILL, "eperm", "")
 	a.jeq(unix.SYS_PIDFD_SEND_SIGNAL, "enosys", "")
 	a.jeq(unix.SYS_PRLIMIT64, "prlimit", "")
 	a.jeq(unix.SYS_FCNTL, "fcntl", "")
 	a.jeq(unix.SYS_IOCTL, "ioctl", "")
+	a.jeq(unix.SYS_PTRACE, "eperm", "")
+	a.jeq(unix.SYS_PROCESS_VM_READV, "eperm", "")
+	a.jeq(unix.SYS_PROCESS_VM_WRITEV, "eperm", "")
+	a.jeq(unix.SYS_PIDFD_GETFD, "eperm", "")
 	a.ret(unix.SECCOMP_RET_ALLOW)
 
 	a.label("kill")
 	a.load(seccompArg(1))
 	a.jeq(0, "allow", "") // a liveness probe sends no signal
 	a.load(seccompArg(0))
-	a.jeq(0, "allow", "")                   // only the caller's group; a different session
-	a.jge(0x80000000, "killgroup", "eperm") // every positive PID, including a custodian TID
+	a.jeq(0, "allow", "") // only the caller's group; a different session
+	a.jge(0x80000000, "killgroup", "signal")
 
 	a.label("killgroup")
 	a.jeq(group, "eperm", "")
+	a.jeq(gatewayGroup, "eperm", "")
 	a.jeq(0xffffffff, "eperm", "allow")
+
+	a.label("signal")
+	a.load(seccompArg(0))
+	for _, id := range protected {
+		a.denyIfEqual(id)
+	}
+	a.ret(unix.SECCOMP_RET_ALLOW)
 
 	a.label("process")
 	a.load(seccompArg(0))
-	a.jeq(custodian, "eperm", "allow")
+	a.jeq(custodian, "eperm", "")
+	a.jeq(gateway, "eperm", "allow")
 
 	a.label("prlimit")
 	a.load(seccompArg(0))
@@ -122,10 +169,16 @@ func custodianGuardFilter(custodian uint32) ([]unix.SockFilter, error) {
 	a.jeq(unix.F_SETOWN, "", "allow")
 	a.load(seccompArg(2))
 	a.jeq(0, "allow", "")
-	a.jge(0x80000000, "fcntlgroup", "eperm")
+	a.jge(0x80000000, "fcntlgroup", "signalOwner")
 
 	a.label("fcntlgroup")
-	a.jeq(group, "eperm", "allow")
+	a.jeq(group, "eperm", "")
+	a.jeq(gatewayGroup, "eperm", "allow")
+	a.label("signalOwner")
+	for _, id := range protected {
+		a.denyIfEqual(id)
+	}
+	a.ret(unix.SECCOMP_RET_ALLOW)
 
 	a.label("ioctl")
 	a.load(seccompArg(1))
@@ -141,12 +194,19 @@ func custodianGuardFilter(custodian uint32) ([]unix.SockFilter, error) {
 	return a.assemble()
 }
 
-// bpfAssembler builds a classic BPF program whose conditional jumps name
-// their targets; "" falls through to the next instruction.
+// bpfAssembler builds a classic BPF program whose jumps name their targets.
+// Conditional BPF branches have only eight-bit offsets. Two adjacent JA
+// trampolines give each branch the full 32-bit forward range, including when
+// a busy gateway has many protected threads.
 type bpfAssembler struct {
 	insns  []unix.SockFilter
-	jumps  map[int][2]string
+	jumps  map[int]bpfJumpTarget
 	labels map[string]int
+}
+
+type bpfJumpTarget struct {
+	label         string
+	fallthroughTo int
 }
 
 func (a *bpfAssembler) emit(code uint16, k uint32) {
@@ -161,12 +221,26 @@ func (a *bpfAssembler) jeq(k uint32, jt, jf string) { a.jump(unix.BPF_JEQ, k, jt
 
 func (a *bpfAssembler) jge(k uint32, jt, jf string) { a.jump(unix.BPF_JGE, k, jt, jf) }
 
+func (a *bpfAssembler) denyIfEqual(k uint32) {
+	deny := fmt.Sprintf("deny%d", len(a.insns))
+	next := fmt.Sprintf("next%d", len(a.insns))
+	a.jeq(k, deny, next)
+	a.label(deny)
+	a.ret(unix.SECCOMP_RET_ERRNO | uint32(unix.EPERM))
+	a.label(next)
+}
+
 func (a *bpfAssembler) jump(op uint16, k uint32, jt, jf string) {
 	if a.jumps == nil {
-		a.jumps = map[int][2]string{}
+		a.jumps = map[int]bpfJumpTarget{}
 	}
-	a.jumps[len(a.insns)] = [2]string{jt, jf}
+	at := len(a.insns)
 	a.emit(unix.BPF_JMP|op|unix.BPF_K, k)
+	a.insns[at].Jt, a.insns[at].Jf = 0, 1
+	a.jumps[at+1] = bpfJumpTarget{label: jt, fallthroughTo: at + 3}
+	a.jumps[at+2] = bpfJumpTarget{label: jf, fallthroughTo: at + 3}
+	a.emit(unix.BPF_JMP|unix.BPF_JA, 0)
+	a.emit(unix.BPF_JMP|unix.BPF_JA, 0)
 }
 
 func (a *bpfAssembler) label(name string) {
@@ -177,19 +251,18 @@ func (a *bpfAssembler) label(name string) {
 }
 
 func (a *bpfAssembler) assemble() ([]unix.SockFilter, error) {
-	for at, targets := range a.jumps {
-		var offsets [2]uint8
-		for i, name := range targets {
-			if name == "" {
-				continue
+	for at, target := range a.jumps {
+		to := target.fallthroughTo
+		if target.label == "" {
+			// Both arms fall through beyond the two JA instructions.
+		} else {
+			var ok bool
+			to, ok = a.labels[target.label]
+			if !ok || to <= at {
+				return nil, fmt.Errorf("processutil: bad seccomp jump to %q", target.label)
 			}
-			to, ok := a.labels[name]
-			if !ok || to <= at || to-at-1 > 255 {
-				return nil, fmt.Errorf("processutil: bad seccomp jump to %q", name)
-			}
-			offsets[i] = uint8(to - at - 1)
 		}
-		a.insns[at].Jt, a.insns[at].Jf = offsets[0], offsets[1]
+		a.insns[at].K = uint32(to - at - 1)
 	}
 	return a.insns, nil
 }

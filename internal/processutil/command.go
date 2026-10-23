@@ -101,12 +101,14 @@ func RunContained(cmd *exec.Cmd) error {
 // On Linux the kernel reparents every orphan of the tree to a
 // child-subreaper custodian, also one that left the group or session, and the
 // custodian kills and reaps them all; when it cannot, RunTracked returns
-// ErrNotContained. The command cannot signal or trace the custodian, so it
-// cannot end it and hand a child in a session of its own to init
-// (GAP-0631): its runner refuses positive signal targets and remote
-// prlimit, starts a separate session, and the custodian is not dumpable. A user
-// namespace like RunContained's would show root-owned files as owned by the
-// overflow user to the scanner. On macOS a supervisor, a short-lived copy of
+// ErrNotContained. The command can signal itself and its children by PID.
+// The runner refuses signals to the custodian and gateway's known thread IDs,
+// remote prlimit, ptrace and cross-process memory/fd access; it starts a
+// separate session, and both the runner and custodian are not dumpable. The
+// gateway is also a subreaper and kills scanner orphans if the custodian dies
+// unexpectedly (GAP-0631). A user namespace like RunContained's would show
+// root-owned files as owned by the overflow user to the scanner. On macOS a
+// supervisor, a short-lived copy of
 // this binary in a process group of its own, runs the command in a session of its own. It
 // follows every descendant with kqueue NOTE_FORK and NOTE_EXIT and the
 // process table, by parent, group and session, also once it starts a
@@ -123,9 +125,10 @@ func RunContained(cmd *exec.Cmd) error {
 // Object refuses breakaway. Other platforms never run cmd and return
 // ErrNotContained.
 //
-// cmd must not have been started. On macOS it must not set ExtraFiles and
-// gets a WaitDelay if it has none. On Linux and macOS, cmd.Cancel asks the
-// supervisor to end the tree; set cmd.WaitDelay to bound the wait for it.
+// cmd must not have been started. On macOS it must not set ExtraFiles.
+// Linux and macOS set a bounded WaitDelay when needed so a dead supervisor
+// cannot leave RunTracked waiting on a descendant's pipe. cmd.Cancel asks
+// the supervisor to end the tree.
 func RunTracked(cmd *exec.Cmd) error {
 	return runTracked(cmd)
 }

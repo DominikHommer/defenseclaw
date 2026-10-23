@@ -21,6 +21,7 @@ package processutil
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -221,7 +222,7 @@ func TestRunTrackedFailsWhenTheSupervisorIsKilled(t *testing.T) {
 	err := RunTracked(CommandContext(context.Background(), "/bin/sh", "-c",
 		"setsid "+containChild+" &\n"+containWaitPID+"\n"+
 			// Only ever the supervisor: never the test binary.
-			`case "$(tr '\0' ' ' < /proc/$PPID/cmdline)" in `+containSupervisorArg0+`*) kill -9 -$PPID ;; esac`+
+			`case "$(tr '\0' ' ' < /proc/$PPID/cmdline)" in `+containSupervisorArg0+`*) kill -9 $PPID ;; esac`+
 			"\nexit 0", "sh", pidFile))
 	pid := readContainPID(t, pidFile)
 	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
@@ -233,6 +234,96 @@ func TestRunTrackedFailsWhenTheSupervisorIsKilled(t *testing.T) {
 	}
 	if !helperRunning(unrelated.Process.Pid) {
 		t.Fatalf("RunContained killed unrelated gateway child %d", unrelated.Process.Pid)
+	}
+}
+
+// Scanner runtimes use positive PIDs to stop their own helpers. In particular,
+// Python's subprocess timeout kills by PID before it can return to the caller.
+func TestRunTrackedCanStopItsOwnChildByPID(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	cmd := CommandContext(context.Background(), "/bin/sh", "-c",
+		`sleep 60 & child=$!; echo "$child" > "$1"; kill -TERM "$child" || exit 11; wait "$child"; [ "$?" -eq 143 ]`,
+		"sh", pidFile)
+	if err := RunTracked(cmd); err != nil {
+		t.Fatalf("RunTracked could not stop its child by PID: %v", err)
+	}
+	pid := readContainPID(t, pidFile)
+	if helperRunning(pid) {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+		t.Fatalf("child %d still runs after a successful wait", pid)
+	}
+}
+
+func TestRunTrackedPythonSubprocessTimeout(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is not installed")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := CommandContext(ctx, python, "-c", `import subprocess
+try:
+    subprocess.run(["sleep", "60"], timeout=0.1, check=True)
+except subprocess.TimeoutExpired:
+    print("timeout handled")
+else:
+    raise AssertionError("sleep did not time out")`)
+	var out strings.Builder
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := RunTracked(cmd); err != nil {
+		t.Fatalf("Python could not handle the subprocess timeout: %v: %s", err, out.String())
+	}
+	if strings.TrimSpace(out.String()) != "timeout handled" {
+		t.Fatalf("Python timeout result = %q", out.String())
+	}
+}
+
+// If the custodian is unexpectedly killed, the gateway adopts the scanner's
+// orphan. An unrelated gateway child started during the scan must survive the
+// emergency sweep.
+func TestRunTrackedAdoptsOnlyTheDeadCustodiansChildren(t *testing.T) {
+	requireContainTools(t)
+	dir := t.TempDir()
+	childFile, custodianFile := filepath.Join(dir, "child.pid"), filepath.Join(dir, "custodian.pid")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := CommandContext(ctx, "/bin/sh", "-c",
+		// Keep stdout open in the detached child. Cmd.Wait must not wait for
+		// that pipe before the gateway can end the adopted child.
+		`setsid sh -c 'read -r p _ < /proc/self/stat; echo "$p" > "$0"; exec sleep 60' "$1" &`+
+			"\n"+containWaitPID+"\n"+
+			`read -r _ _ _ custodian _ < /proc/$PPID/stat; echo "$custodian" > "$2"; sleep 60`,
+		"sh", childFile, custodianFile)
+	cmd.Stdout = io.Discard
+	done := make(chan error, 1)
+	go func() { done <- RunTracked(cmd) }()
+	child := readContainPID(t, childFile)
+	t.Cleanup(func() { _ = syscall.Kill(child, syscall.SIGKILL) })
+	custodian := readContainPID(t, custodianFile)
+	unrelated := exec.Command("sleep", "60")
+	if err := unrelated.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = unrelated.Process.Kill()
+		_ = unrelated.Wait()
+	})
+	if err := syscall.Kill(custodian, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("RunTracked passed after its custodian was killed")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunTracked did not return after the custodian was killed")
+	}
+	if helperRunning(child) {
+		t.Fatalf("scanner child %d survived the custodian", child)
+	}
+	if !helperRunning(unrelated.Process.Pid) {
+		t.Fatalf("unrelated gateway child %d was killed", unrelated.Process.Pid)
 	}
 }
 
@@ -363,6 +454,89 @@ exit 7`)
 	}
 }
 
+func TestRunTrackedRunnerIsNotDumpable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root owns every /proc entry it has")
+	}
+	var out strings.Builder
+	cmd := CommandContext(context.Background(), "/bin/sh", "-c", `stat -c %u /proc/$PPID/status`)
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := RunTracked(cmd); err != nil {
+		t.Fatalf("RunTracked = %v: %s", err, out.String())
+	}
+	if got := strings.TrimSpace(out.String()); got != "0" {
+		t.Fatalf("the runner's /proc status belongs to %q, want root (not dumpable)", got)
+	}
+}
+
+const containInjectionHelperEnv = "DC_PROCESSUTIL_INJECTION_HELPER"
+
+func TestRunTrackedCannotInjectIntoRunnerHelper(t *testing.T) {
+	if os.Getenv(containInjectionHelperEnv) == "" {
+		t.Skip("helper process of TestRunTrackedCannotInjectIntoRunner")
+	}
+	parent := uintptr(os.Getppid())
+	// PTRACE_SEIZE does not stop the runner. If it succeeds, detach before
+	// reporting the failure so the test cannot strand its supervisor.
+	_, _, errno := unix.Syscall6(unix.SYS_PTRACE, 0x4206, parent, 0, 0, 0, 0)
+	if errno == 0 {
+		_, _, _ = unix.Syscall6(unix.SYS_PTRACE, 17, parent, 0, 0, 0, 0)
+		t.Fatal("scanner attached to its runner")
+	}
+	if errno != unix.EPERM {
+		t.Fatalf("ptrace runner = %v, want EPERM", errno)
+	}
+	for _, call := range []struct {
+		name string
+		nr   uintptr
+	}{
+		{"process_vm_readv", unix.SYS_PROCESS_VM_READV},
+		{"process_vm_writev", unix.SYS_PROCESS_VM_WRITEV},
+	} {
+		_, _, errno := unix.Syscall6(call.nr, parent, 0, 0, 0, 0, 0)
+		if errno != unix.EPERM {
+			t.Errorf("%s runner = %v, want EPERM", call.name, errno)
+		}
+	}
+	fd, err := unix.PidfdOpen(int(parent), 0)
+	if err != nil {
+		t.Fatalf("pidfd_open runner: %v", err)
+	}
+	defer unix.Close(fd)
+	if _, err := unix.PidfdGetfd(fd, 0, 0); err != unix.EPERM {
+		t.Errorf("pidfd_getfd runner = %v, want EPERM", err)
+	}
+}
+
+func TestRunTrackedCannotInjectIntoRunner(t *testing.T) {
+	raw, err := os.ReadFile("/proc/sys/kernel/yama/ptrace_scope")
+	if err != nil || strings.TrimSpace(string(raw)) != "0" {
+		t.Skip("requires Yama ptrace_scope=0")
+	}
+	cmd := CommandContext(context.Background(), os.Args[0], "-test.run=^TestRunTrackedCannotInjectIntoRunnerHelper$")
+	cmd.Env = append(os.Environ(), containInjectionHelperEnv+"=1")
+	var out strings.Builder
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := RunTracked(cmd); err != nil {
+		t.Fatalf("injection probe = %v: %s", err, out.String())
+	}
+}
+
+func TestCustodianGuardFilterHandlesManyProtectedThreads(t *testing.T) {
+	protected := make([]uint32, 128)
+	for i := range protected {
+		protected[i] = uint32(1000 + i)
+	}
+	group := int32(2000)
+	filter, err := custodianGuardFilter(1000, 2000, uint32(-group), protected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filter) > 4096 {
+		t.Fatalf("seccomp filter has %d instructions, kernel limit is 4096", len(filter))
+	}
+}
+
 const containDeathHelperEnv = "DC_PROCESSUTIL_CONTAIN_DEATH_HELPER"
 
 // TestRunContainedDeathHelper is the helper process of
@@ -408,7 +582,7 @@ func TestRunContainedKeepsTheCommandResult(t *testing.T) {
 	}{
 		{"exit 0", 0},
 		{"exit 3", 3},
-		{"kill -TERM 0", 128 + int(syscall.SIGTERM)},
+		{"kill -TERM $$", 128 + int(syscall.SIGTERM)},
 		{`[ -z "${` + containSupervisorEnv + `+x}" ] || exit 9`, 0},
 	} {
 		for name, run := range containRunners {

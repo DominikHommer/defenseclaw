@@ -29,6 +29,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -48,13 +49,14 @@ import (
 // runner. A command that kills its immediate parent kills the runner; its
 // descendants are then reparented to the custodian, which kills and reaps
 // them. The command cannot end the custodian instead: the runner's seccomp
-// filter refuses positive signal targets and remote prlimit, and the runner
-// starts a separate session so a command cannot join the custodian's group
-// and signal it with kill(0) (guardCustodian). The custodian is a
-// separate process so gateway children are never included in its sweep. Scanners keep it: without privilege the PID
-// namespace needs a user namespace mapping only this process's IDs, where
-// root-owned files read as owned by the overflow user, and DefenseClaw's own
-// plugin-scanner then refuses its root-owned runtime.
+// filter protects the custodian and gateway's thread IDs and refuses remote
+// prlimit. The runner starts a separate session so a command cannot join the
+// custodian's group and signal it with kill(0) (guardCustodian). The custodian
+// is a separate process so gateway children are never included in its sweep.
+// Scanners keep it: without privilege the PID namespace needs a user
+// namespace mapping only this process's IDs, where root-owned files read as
+// owned by the overflow user, and DefenseClaw's own plugin-scanner then
+// refuses its root-owned runtime.
 const (
 	containSupervisorArg0 = "defenseclaw-contained-run"
 	containSupervisorEnv  = "DEFENSECLAW_CONTAINED_RUN_SUPERVISOR"
@@ -82,11 +84,24 @@ const (
 // tests set it to zero to reach the fail-closed result.
 var containSweepBudget = 2 * time.Second
 
+// A dead custodian cannot close a pipe inherited by an orphan. Bound Cmd.Wait
+// so the gateway can reach its emergency sweep even when a scanner child
+// still holds stdout or stderr open.
+const containPipeWaitDelay = 2 * time.Second
+
 // containIDMap maps this process's IDs into the runner's user namespace;
 // tests map an ID this process does not have to reach the fail-closed result.
 var containIDMap = func(id int) []syscall.SysProcIDMap {
 	return []syscall.SysProcIDMap{{ContainerID: id, HostID: id, Size: 1}}
 }
+
+// A gateway that runs tracked scans is a backup subreaper. If a command finds
+// a way to end its custodian, the gateway adopts and ends its orphans. Keep
+// concurrent tracked custodians out of another scan's emergency sweep.
+var trackedChildren = struct {
+	sync.Mutex
+	active map[int]struct{}
+}{active: make(map[int]struct{})}
 
 func init() {
 	if len(os.Args) < 5 || os.Args[0] != containSupervisorArg0 || os.Args[3] != "--" ||
@@ -262,15 +277,116 @@ func runTracked(cmd *exec.Cmd) error {
 	if cmd.Cancel != nil {
 		cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
 	}
+	if cmd.WaitDelay == 0 || cmd.WaitDelay > containPipeWaitDelay {
+		cmd.WaitDelay = containPipeWaitDelay
+	}
 	// The parent-death signal follows the thread that started the child.
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	err := cmd.Run()
+	baseFilters, err := seccompFilterCount(os.Getpid())
+	if err != nil {
+		return fmt.Errorf("%w: cannot identify scanner children: %v", ErrNotContained, err)
+	}
+	trackedChildren.Lock()
+	if len(trackedChildren.active) == 0 {
+		if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
+			trackedChildren.Unlock()
+			return fmt.Errorf("%w: cannot adopt scanner orphans: %v", ErrNotContained, err)
+		}
+	}
+	known := make(map[int]struct{})
+	for _, pid := range childPIDs(os.Getpid()) {
+		known[pid] = struct{}{}
+	}
+	if err := cmd.Start(); err != nil {
+		if len(trackedChildren.active) == 0 {
+			_ = unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0)
+		}
+		trackedChildren.Unlock()
+		return err
+	}
+	trackedChildren.active[cmd.Process.Pid] = struct{}{}
+	trackedChildren.Unlock()
+	err = cmd.Wait()
+	trackedChildren.Lock()
+	delete(trackedChildren.active, cmd.Process.Pid)
 	var exitErr *exec.ExitError
+	cleaned := true
+	if errors.As(err, &exitErr) {
+		status, _ := exitErr.Sys().(syscall.WaitStatus)
+		if status.Signaled() || exitErr.ExitCode() == containExitNotContained {
+			cleaned = reapAdoptedChildren(containSweepBudget, known, baseFilters)
+		}
+	} else if err != nil {
+		cleaned = reapAdoptedChildren(containSweepBudget, known, baseFilters)
+	}
+	if len(trackedChildren.active) == 0 {
+		if disableErr := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0); disableErr != nil {
+			trackedChildren.Unlock()
+			return fmt.Errorf("%w: cannot release scanner subreaper: %v", ErrNotContained, disableErr)
+		}
+	}
+	trackedChildren.Unlock()
+	if !cleaned {
+		return fmt.Errorf("%w: could not end adopted scanner children", ErrNotContained)
+	}
 	if errors.As(err, &exitErr) && exitErr.ExitCode() == containExitNotContained {
 		return fmt.Errorf("%w: %s", ErrNotContained, target)
 	}
 	return err
+}
+
+// reapAdoptedChildren runs only after a custodian ended without proving that
+// it reaped its tree. Known direct children and other live custodians belong
+// to the gateway, not to this scan. The inherited seccomp filter is a
+// monotonic marker: the scanner can add filters but cannot remove this one.
+func reapAdoptedChildren(budget time.Duration, known map[int]struct{}, baseFilters int) bool {
+	deadline := time.Now().Add(budget)
+	for {
+		found := false
+		for _, pid := range childPIDs(os.Getpid()) {
+			if _, ok := known[pid]; ok {
+				continue
+			}
+			if _, ok := trackedChildren.active[pid]; ok {
+				continue
+			}
+			filters, err := seccompFilterCount(pid)
+			if errors.Is(err, os.ErrNotExist) {
+				continue // the process exited between the two /proc reads
+			}
+			if err != nil {
+				return false
+			}
+			if filters <= baseFilters {
+				continue
+			}
+			found = true
+			_ = unix.Kill(pid, unix.SIGKILL)
+			var status unix.WaitStatus
+			_, _ = unix.Wait4(pid, &status, unix.WNOHANG, nil)
+		}
+		if !found {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func seccompFilterCount(pid int) (int, error) {
+	raw, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/status")
+	if err != nil {
+		return 0, err
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if value, ok := strings.CutPrefix(line, "Seccomp_filters:"); ok {
+			return strconv.Atoi(strings.TrimSpace(value))
+		}
+	}
+	return 0, errors.New("processutil: /proc status has no Seccomp_filters")
 }
 
 // superviseContained owns the tree after the runner exits, including when a
@@ -352,8 +468,12 @@ func runContainedCommand(argv []string, asInit bool) int {
 	}
 	// Below the custodian, the command must not end it (GAP-0631). This
 	// thread starts the command, so the filter is the command's.
-	if !asInit && guardCustodian(os.Getppid()) != nil {
-		return containExitNotContained
+	if !asInit {
+		// A scanner can inspect the runner's PID but cannot inject a signal
+		// from one of its unfiltered Go runtime threads.
+		if unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0) != nil || guardCustodian(os.Getppid()) != nil {
+			return containExitNotContained
+		}
 	}
 	child := exec.Command(argv[0], argv[1:]...)
 	child.Env = withoutEnv(os.Environ(), containSupervisorEnv)
@@ -436,6 +556,22 @@ func childPIDs(parent int) []int {
 		}
 	}
 	return pids
+}
+
+func parentPID(pid int) (int, error) {
+	raw, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return 0, err
+	}
+	close := strings.LastIndexByte(string(raw), ')')
+	if close < 0 {
+		return 0, errors.New("processutil: malformed process status")
+	}
+	fields := strings.Fields(string(raw[close+1:]))
+	if len(fields) < 2 {
+		return 0, errors.New("processutil: missing parent process ID")
+	}
+	return strconv.Atoi(fields[1])
 }
 
 // releaseStdio points the supervisor's standard streams at /dev/null.
