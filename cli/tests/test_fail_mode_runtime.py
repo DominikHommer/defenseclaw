@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -32,6 +33,14 @@ _HOOK_FAIL_MODE_LINES = json.loads(
         Path(__file__).resolve().parents[2] / "internal/gateway/connector/testdata/unix_hook_fail_mode_lines.json"
     ).read_text(encoding="utf-8")
 )
+
+# The hooks/.hookcfg bodies the Go test TestReadHookSidecarSharedVectors runs
+# through the native hook's reader (readHookSidecar).
+_WINDOWS_SIDECAR_VECTORS = json.loads(
+    (Path(__file__).resolve().parents[2] / "internal/cli/testdata/windows_hook_sidecar_vectors.json").read_text(
+        encoding="utf-8"
+    )
+)["vectors"]
 
 _SHARED_HOOK_SCRIPTS = (
     "inspect-tool.sh",
@@ -1144,15 +1153,16 @@ def test_unix_resolver_reads_the_installed_mode_of_a_real_render(key: str, tmp_p
     # environment; reading it as missing made a refresh fail verification.
     script = tmp_path / "hook.sh"
     script.write_text("#!/bin/bash\n" + "\n".join(_HOOK_FAIL_MODE_LINES[key]) + "\n", encoding="utf-8")
-    assert fail_mode_runtime._read_baked_hook_mode(script) == key.rsplit("/", 1)[1]
+    assert fail_mode_runtime._read_baked_hook_state(script) == (key.rsplit("/", 1)[1], False)
 
 
 @pytest.mark.parametrize("mode", ["open", "closed"])
 def test_unix_resolver_still_reads_a_legacy_render(mode: str, tmp_path: Path) -> None:
-    # 1.0.3 and older renders keep the override until upgrade refreshes them.
+    # 1.0.3 and older renders (and Secure Client renders) keep the override,
+    # so the mode read is only their default.
     script = tmp_path / "hook.sh"
     script.write_text(f'#!/bin/bash\nFAIL_MODE="${{DEFENSECLAW_FAIL_MODE:-{mode}}}"\n', encoding="utf-8")
-    assert fail_mode_runtime._read_baked_hook_mode(script) == mode
+    assert fail_mode_runtime._read_baked_hook_state(script) == (mode, True)
 
 
 @pytest.mark.parametrize("windows", [False, True])
@@ -1215,10 +1225,18 @@ def test_no_environment_changes_the_reported_fail_mode(
     ):
         state = resolve_connector_fail_mode(cfg, "codex")
         report = connector_fail_mode_report(cfg, "codex")
-    assert state.runtime == installed and state.effective == installed
-    assert state.provenance == ("windows-sidecar" if windows else "hook-script")
-    assert state.current, state.drift
-    assert report["effective"] == installed and report["note"] == ""
+    if windows and standalone is not None:
+        # A managed native hook runs on the authenticated runtime generation,
+        # which status cannot verify: the administrator's mode, unverified.
+        assert state.runtime is None and state.effective == installed
+        assert "windows-managed-runtime-unverified" in state.drift
+        assert not state.runtime_verified and "guardian" in report["note"]
+    else:
+        assert state.runtime == installed and state.effective == installed
+        assert state.provenance == ("windows-sidecar" if windows else "hook-script")
+        assert state.current, state.drift
+        assert report["note"] == ""
+    assert report["effective"] == installed
     assert "caller_env" not in report
     assert not hasattr(fail_mode_runtime, "_inherited_fail_mode")
 
@@ -1300,20 +1318,171 @@ _SCOPED_CODEX_KEY = "DEFENSECLAW_FAIL_MODE" + "_CODEX"
     "text,want",
     [
         ("DEFENSECLAW_FAIL_MODE=open\n", "open"),
-        ("DEFENSECLAW_FAIL_MODE=open\nDEFENSECLAW_FAIL_MODE=closed\n", "closed"),
         ("DEFENSECLAW_FAIL_MODE=open\n" + _SCOPED_CODEX_KEY + "=closed\n", "closed"),
         ("export " + _SCOPED_CODEX_KEY + '="open"\nDEFENSECLAW_FAIL_MODE=closed\n', "open"),
-        ("DEFENSECLAW_FAIL_MODE=bogus\n", None),
+        ("DEFENSECLAW_FAIL_MODE=bogus\n", "closed"),
         ("DEFENSECLAW_GATEWAY_ADDR=127.0.0.1:18970\n", None),
     ],
 )
 def test_windows_flat_sidecar_report_matches_the_native_hook(tmp_path: Path, text: str, want: str | None) -> None:
-    # The 0.8.x KEY=value sidecar: the last value of a key wins and the
-    # connector's own key comes first, as readHookSidecar reads it. None (no
-    # mode) is reported closed by resolve_connector_fail_mode.
+    # The 0.8.x KEY=value sidecar: the connector's own key comes first, as
+    # readHookSidecar reads it. None (no mode) is reported closed by
+    # resolve_connector_fail_mode.
     path = tmp_path / ".hookcfg"
     path.write_text(text, encoding="utf-8")
     assert fail_mode_runtime._read_windows_hook_mode(path, "codex") == (want, True)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "DEFENSECLAW_FAIL_MODE=open\nDEFENSECLAW_FAIL_MODE=closed\n",
+        "DEFENSECLAW_FAIL_MODE=closed\nDEFENSECLAW_FAIL_MODE=open\n",
+        "\ufeff{broken\nDEFENSECLAW_FAIL_MODE=open\n",
+        "# note\n{broken\nDEFENSECLAW_FAIL_MODE=open\n",
+        "not a setting\nDEFENSECLAW_FAIL_MODE=open\n",
+    ],
+)
+def test_windows_sidecar_that_is_not_the_legacy_shape_is_closed(tmp_path: Path, text: str) -> None:
+    # 1.0.4 review (loop round 3 of G-hooks-upg): a byte-order mark or a
+    # comment hid the opening brace of broken JSON, and a following
+    # DEFENSECLAW_FAIL_MODE=open line then read open; a key given twice took
+    # its last value. Only a document with the KEY=value shape throughout,
+    # each key once, reads as one (connector.ParseLegacyHookSidecar).
+    path = tmp_path / ".hookcfg"
+    path.write_text(text, encoding="utf-8")
+    assert fail_mode_runtime._read_windows_hook_mode(path, "codex") == ("closed", False)
+
+
+@pytest.mark.parametrize("vector", _WINDOWS_SIDECAR_VECTORS, ids=lambda vector: vector["name"])
+def test_windows_sidecar_report_matches_the_native_hook_contract(tmp_path: Path, vector: dict) -> None:
+    # 1.0.4 review (loop round 2 of G-hooks-upg): a gateway_addr or peer entry
+    # that is not a string made the native hook run closed while status
+    # reported open, and a connector key in another case the other way round.
+    # Status reads every vector the Go test runs through readHookSidecar to
+    # the same mode.
+    path = tmp_path / ".hookcfg"
+    body = base64.b64decode(vector["body_b64"]) if "body_b64" in vector else vector.get("body", "").encode("utf-8")
+    kind = vector.get("kind", "")
+    if kind == "dir":
+        path.mkdir()
+    elif kind == "link":
+        target = tmp_path / "target"
+        target.write_bytes(body)
+        try:
+            path.symlink_to(target)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+    elif kind == "oversize":
+        path.write_bytes(body + b" " * (70 * 1024))
+    elif kind != "missing":
+        path.write_bytes(body)
+    mode, legacy = fail_mode_runtime._read_windows_hook_mode(path, vector["connector"])
+    assert (mode or "closed") == vector["mode"]
+    if "legacy" in vector:
+        assert legacy is vector["legacy"]
+
+
+@pytest.mark.parametrize("sidecar", ["missing", "closed", "malformed", "open"])
+@pytest.mark.parametrize("desired", ["open", "closed"])
+def test_managed_windows_status_does_not_report_the_sidecar_as_the_hook_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, desired: str, sidecar: str
+) -> None:
+    # 1.0.4 review (loop round 2 of G-hooks-upg): a managed native hook takes
+    # its mode from the authenticated runtime generation, never from
+    # hooks/.hookcfg, so a missing or stale sidecar made status and doctor
+    # report closed while the hook ran the administrator's open. Status
+    # cannot authenticate the generation: it reports the administrator's
+    # mode and says the runtime is unverified, whatever the sidecar holds.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"codex": desired})
+    _write_current_runtime(cfg, home, {"codex": desired})
+    cfg.deployment_mode = "managed_enterprise"
+    cfg.managed_outside_secure_client = lambda: True
+    path = Path(cfg.data_dir) / "hooks" / ".hookcfg"
+    if sidecar == "missing":
+        path.unlink()
+    elif sidecar == "malformed":
+        path.write_text("{not json", encoding="utf-8")
+    else:
+        path.write_text(json.dumps({"version": 2, "fail_modes": {"codex": sidecar}}), encoding="utf-8")
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=True),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
+        report = connector_fail_mode_report(cfg, "codex")
+    assert report["effective"] == desired and report["runtime"] is None
+    assert report["provenance"] == "windows-managed-runtime-unverified"
+    assert report["runtime_verified"] is False
+    assert "windows-managed-runtime-unverified" in report["drift"] and not report["current"]
+    assert {"name": "windows-managed-runtime", "mode": None} in report["sources"]
+    assert not [reason for reason in report["drift"] if reason.startswith("windows-sidecar")]
+    assert not [source for source in report["sources"] if source["name"].startswith("windows-sidecar")]
+
+
+@pytest.mark.parametrize("secure_client", [False, True])
+@pytest.mark.parametrize("sidecar", ["missing", "closed", "malformed", "open"])
+@pytest.mark.parametrize(("configured", "deployed"), [("closed", "open"), ("open", "closed"), ("closed", "closed")])
+def test_doctor_never_passes_an_unverified_managed_windows_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    configured: str,
+    deployed: str,
+    sidecar: str,
+    secure_client: bool,
+) -> None:
+    # 1.0.4 review (loop round 2 of G-hooks-upg, post round 4): the
+    # administrator changes the mode (open to closed, say) while the guardian's
+    # authenticated runtime generation still runs the old one. Status cannot
+    # read that generation, yet it reported the configured mode as verified
+    # and doctor's Mode row passed. Every state of the sidecar the managed
+    # hook does not read, every pair of modes: the runtime is unverified, the
+    # report says why, and doctor warns (it can never verify it) instead of
+    # passing.
+    from defenseclaw.commands import cmd_doctor
+
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"codex": configured})
+    _write_current_runtime(cfg, home, {"codex": configured})
+    cfg.deployment_mode = "managed_enterprise"
+    cfg.managed_outside_secure_client = lambda: not secure_client
+    cfg.guardrail.mode = "action"
+    cfg.guardrail._secure_client = secure_client
+    cfg.skill_dirs = lambda connector=None: []
+    cfg.plugin_dirs = lambda connector=None: []
+    cfg.mcp_servers = lambda connector=None, **_: []
+    path = Path(cfg.data_dir) / "hooks" / ".hookcfg"
+    if sidecar == "missing":
+        path.unlink()
+    elif sidecar == "malformed":
+        path.write_text("{not json", encoding="utf-8")
+    else:
+        mode = deployed if sidecar == "open" else sidecar
+        path.write_text(json.dumps({"version": 2, "fail_modes": {"codex": mode}}), encoding="utf-8")
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=True),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
+        state = resolve_connector_fail_mode(cfg, "codex")
+        report = connector_fail_mode_report(cfg, "codex")
+    assert not state.runtime_verified and not state.current
+    assert report["runtime_verified"] is False and report["current"] is False
+    assert report["provenance"] == "windows-managed-runtime-unverified"
+    assert "defenseclaw enterprise windows verify" in report["note"]
+    emitted: list[tuple[str, str, str, str]] = []
+    with (
+        patch("defenseclaw.fail_mode.connector_fail_mode_report", return_value=report),
+        patch.object(cmd_doctor, "_workspace_dir", return_value=""),
+        patch.object(
+            cmd_doctor,
+            "_emit",
+            side_effect=lambda tag, label, detail="", **kw: emitted.append(
+                (tag, label, detail, str(kw.get("remediation") or ""))
+            ),
+        ),
+    ):
+        cmd_doctor._check_connector_inventory(cfg, "codex", cmd_doctor._DoctorResult())
+    rows = [row for row in emitted if row[1] == "Mode"]
+    assert [row[0] for row in rows] == ["warn"], rows
+    assert "unverified" in rows[0][2] and "enterprise windows verify" in rows[0][3]
 
 
 @pytest.mark.parametrize(
@@ -1853,13 +2022,18 @@ def test_a_registration_the_agent_skips_is_drift_and_fails_doctor(
     [
         ({"version": 2, "fail_modes": {"copilot": "OPEN"}}, "open", False),
         ({"version": 2, "fail_modes": {"copilot": " Closed "}}, "closed", False),
-        ({"Version": 2, "Fail_Modes": {"Copilot": "open"}}, "open", False),
+        # A top-level key that names a field in another case is malformed
+        # (connector.HookSidecarJSONMalformed, the one contract of the hook,
+        # status and the writers): closed.
+        ({"Version": 2, "Fail_Modes": {"Copilot": "open"}}, "closed", False),
         ({"version": 2, "fail_modes": {"copilot": "bogus"}}, None, False),
-        ({"version": 2, "fail_modes": {"copilot": "open", "COPILOT": "closed"}}, None, False),
+        # Entries that normalize alike are open only when every one is.
+        ({"version": 2, "fail_modes": {"copilot": "open", "COPILOT": "closed"}}, "closed", False),
         ({"version": 2, "fail_modes": {}, "legacy_fail_mode": "Open"}, "open", True),
         # JSON that Go cannot decode as a v2 sidecar is closed (readHookSidecar).
         ({"version": "2", "fail_modes": {"copilot": "open"}}, "closed", False),
-        ("DEFENSECLAW_FAIL_MODE=closed\nDEFENSECLAW_FAIL_MODE=open\n", "open", True),
+        # A key given twice is malformed state (connector.ParseLegacyHookSidecar).
+        ("DEFENSECLAW_FAIL_MODE=closed\nDEFENSECLAW_FAIL_MODE=open\n", "closed", False),
         (f"export {fail_mode_runtime._native_hook_sidecar_key('copilot')}='OPEN'\n", "open", True),
         ('DEFENSECLAW_FAIL_MODE="closed"\n', "closed", True),
     ],
@@ -1915,3 +2089,172 @@ def test_doctor_mode_fails_a_windows_hook_rendered_open_or_without_a_mode(
     mode_rows = [row for row in emitted if row[1] == "Mode"]
     assert len(mode_rows) == 1 and mode_rows[0][0] == "fail", mode_rows
     assert phrase in mode_rows[0][2]
+
+
+# ── 1.0.4 review loop round 1 (G-hooks-upg): renders that read the agent env ─
+#
+# A 0.8.x or 1.0.3 render the upgrade's connector refresh has not replaced
+# yet, and a Secure Client render (#1163), take DEFENSECLAW_FAIL_MODE from the
+# agent's environment. Its default is not the mode it runs, so status and
+# doctor never report it closed and current, whatever the status shell says.
+
+_ENV_READING_RENDERS = {
+    # 0.8.10 and 1.0.3 per-user renders, and Secure Client renders.
+    "default": 'FAIL_MODE="${{DEFENSECLAW_FAIL_MODE:-{mode}}}"',
+    "export": 'export FAIL_MODE="${{DEFENSECLAW_FAIL_MODE:-{mode}}}"',
+    # A baked line the environment then overrides.
+    "baked-then-env": 'FAIL_MODE="{mode}"\n  FAIL_MODE="${{DEFENSECLAW_FAIL_MODE:-{mode}}}"',
+}
+
+
+def _install_render(cfg: SimpleNamespace, name: str, body: str) -> None:
+    """Write *name*'s hook render and keep the contract lock's digest of it current."""
+
+    script_name = "claude-code-hook.sh" if name == "claudecode" else f"{name}-hook.sh"
+    script_path = Path(cfg.data_dir) / "hooks" / script_name
+    script_path.write_text("#!/bin/bash\n" + body + "\n", encoding="utf-8")
+    lock_path = Path(cfg.data_dir) / "hook_contract_lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    entry = lock["connectors"][name]
+    entry["contract_id"] = f"{name}-hooks-v1"
+    entry["hook_script_digests"][script_name] = "sha256:" + hashlib.sha256(script_path.read_bytes()).hexdigest()
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+
+def _set_claude_settings_env(home: Path, value: str | None) -> None:
+    settings = home / ".claude" / "settings.json"
+    payload = json.loads(settings.read_text(encoding="utf-8"))
+    if value is None:
+        payload.pop("env", None)
+    else:
+        payload["env"] = {"DEFENSECLAW_FAIL_MODE": value}
+    settings.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _unix_report(monkeypatch: pytest.MonkeyPatch, cfg: SimpleNamespace, home: Path, name: str) -> tuple:
+    monkeypatch.setattr(fail_mode_runtime, "_codex_registration_current", lambda *_args: True)
+    monkeypatch.setattr(fail_mode_runtime, "_unix_registration_freshness", lambda *_args: None)
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=False),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
+        return resolve_connector_fail_mode(cfg, name), connector_fail_mode_report(cfg, name)
+
+
+@pytest.mark.parametrize("render", sorted(_ENV_READING_RENDERS))
+@pytest.mark.parametrize("shell_env", [None, "open", "closed"])
+@pytest.mark.parametrize(
+    ("name", "mode"),
+    # Claude Code with its settings env open is verified open (below).
+    [("claudecode", "closed"), ("codex", "open"), ("codex", "closed"), ("devin", "open"), ("devin", "closed")],
+)
+def test_a_render_that_reads_the_agent_env_is_never_reported_current(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str, mode: str, shell_env: str | None, render: str
+) -> None:
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {name: mode})
+    _write_current_runtime(cfg, home, {name: mode})
+    if shell_env is None:
+        monkeypatch.delenv("DEFENSECLAW_FAIL_MODE", raising=False)
+    else:
+        monkeypatch.setenv("DEFENSECLAW_FAIL_MODE", shell_env)
+
+    # The same install with the 1.0.4 render is current: only the render differs.
+    _install_render(cfg, name, "\n".join(_HOOK_FAIL_MODE_LINES[f"{_unix_script(name)}/{mode}"]))
+    baked, _ = _unix_report(monkeypatch, cfg, home, name)
+    assert baked.current and baked.runtime_verified, baked.drift
+
+    _install_render(cfg, name, _ENV_READING_RENDERS[render].format(mode=mode))
+    state, report = _unix_report(monkeypatch, cfg, home, name)
+    assert not state.runtime_verified and not state.current
+    assert "agent-env-unverified" in state.drift
+    assert ("hook-script-reads-agent-env" in state.drift) is (name != "devin")
+    assert state.provenance == "agent-env-unverified"
+    assert "DEFENSECLAW_FAIL_MODE" in state.note
+    assert report["current"] is False and report["runtime_verified"] is False
+    assert report["provenance"] == "agent-env-unverified"
+    # The status shell is not the agent: its value is never the runtime mode,
+    # which stays the render's default (none read from an exported line).
+    assert state.runtime == (None if render == "export" else mode)
+    assert all(source != "process-env" for source, _mode in state.sources)
+
+
+def _unix_script(name: str) -> str:
+    return "claude-code-hook.sh" if name == "claudecode" else f"{name}-hook.sh"
+
+
+@pytest.mark.parametrize("default", ["open", "closed"])
+def test_claude_settings_env_open_is_the_mode_of_a_render_that_reads_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, default: str
+) -> None:
+    # Claude Code applies its settings env over the environment it started
+    # in, so open there is what a 1.0.3 render runs: reported open, verified,
+    # and stale until the refresh re-renders it.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed"})
+    _write_current_runtime(cfg, home, {"claudecode": "closed"})
+    _set_claude_settings_env(home, "open")
+    _install_render(cfg, "claudecode", _ENV_READING_RENDERS["default"].format(mode=default))
+    state, report = _unix_report(monkeypatch, cfg, home, "claudecode")
+    assert state.runtime_verified and state.runtime == "open" and state.effective == "open"
+    assert state.provenance == "agent-env"
+    assert not state.current and "hook-script-reads-agent-env" in state.drift
+    assert report["effective"] == "open" and report["desired"] == "closed"
+
+
+def test_claude_settings_env_closed_does_not_verify_a_render_that_reads_the_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A project's or managed settings env can still set open over the user
+    # settings env, so closed there is no closed claim.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed"})
+    _write_current_runtime(cfg, home, {"claudecode": "closed"})
+    _set_claude_settings_env(home, "closed")
+    _install_render(cfg, "claudecode", _ENV_READING_RENDERS["default"].format(mode="closed"))
+    state, report = _unix_report(monkeypatch, cfg, home, "claudecode")
+    assert not state.runtime_verified and not state.current
+    assert report["provenance"] == "agent-env-unverified"
+
+
+@pytest.mark.parametrize(
+    ("name", "desired", "secure_client", "want"),
+    [
+        ("codex", "closed", False, "fail"),
+        ("codex", "open", False, "warn"),
+        ("devin", "closed", False, "fail"),
+        ("devin", "closed", True, "warn"),
+        ("devin", "open", True, "warn"),
+    ],
+)
+def test_doctor_never_passes_a_render_that_reads_the_agent_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str, desired: str, secure_client: bool, want: str
+) -> None:
+    from defenseclaw.commands import cmd_doctor
+
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {name: desired})
+    _write_current_runtime(cfg, home, {name: desired})
+    cfg.guardrail.mode = "action"
+    cfg.guardrail._secure_client = secure_client
+    cfg.skill_dirs = lambda connector=None: []
+    cfg.plugin_dirs = lambda connector=None: []
+    cfg.mcp_servers = lambda connector=None, **_: []
+
+    def mode_rows() -> list[tuple[str, str, str]]:
+        _state, report = _unix_report(monkeypatch, cfg, home, name)
+        emitted: list[tuple[str, str, str]] = []
+        with (
+            patch("defenseclaw.fail_mode.connector_fail_mode_report", return_value=report),
+            patch.object(cmd_doctor, "_workspace_dir", return_value=""),
+            patch.object(
+                cmd_doctor,
+                "_emit",
+                side_effect=lambda tag, label, detail="", **_: emitted.append((tag, label, detail)),
+            ),
+        ):
+            cmd_doctor._check_connector_inventory(cfg, name, cmd_doctor._DoctorResult())
+        return [row for row in emitted if row[1] == "Mode"]
+
+    _install_render(cfg, name, "\n".join(_HOOK_FAIL_MODE_LINES[f"{_unix_script(name)}/{desired}"]))
+    assert [row[0] for row in mode_rows()] == ["pass"]
+    _install_render(cfg, name, _ENV_READING_RENDERS["default"].format(mode=desired))
+    rows = mode_rows()
+    assert [row[0] for row in rows] == [want], rows
+    assert "unverified" in rows[0][2]

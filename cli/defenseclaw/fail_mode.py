@@ -43,6 +43,11 @@ _MAX_DIGEST_FILE = 1024 * 1024 * 1024
 _FAIL_MODE_PATTERN = re.compile(
     r"^FAIL_MODE=\"(?:(open|closed)|\$\{DEFENSECLAW_FAIL_MODE:-(open|closed)\})\"", re.MULTILINE
 )
+# A render whose fail mode takes DEFENSECLAW_FAIL_MODE from the agent's
+# environment: every 0.8.x and 1.0.3 per-user render, and a Secure Client
+# render (#1163). Such a hook runs open when the agent's environment says
+# open, whatever its default, so its default is not the mode it runs.
+_ENV_FAIL_MODE_PATTERN = re.compile(r"^[ \t]*(?:export[ \t]+)?FAIL_MODE=[^\n]*DEFENSECLAW_FAIL_MODE", re.MULTILINE)
 _OPENCODE_FAIL_MODE_PATTERN = re.compile(r'const\s+DC_FAIL_MODE\s*=\s*"(open|closed)"\s*;')
 _AMP_FAIL_MODE_PATTERN = re.compile(r'\bconst\s+DC_FAIL_MODE:\s*string\s*=\s*"(open|closed)"')
 _EXPECTED_CONTRACTS = {
@@ -139,10 +144,20 @@ class ConnectorFailModeState:
     # The vendor limit a closed hook of this connector keeps
     # (upstream_hook_limit), or "".
     limit: str = ""
+    # False when this process cannot read the mode the installed hook runs:
+    # a hook that takes it from the agent's environment when no verified copy
+    # of that environment names one (it can run open whatever ``runtime``,
+    # its default, says), or a managed native Windows hook, which runs the
+    # guardian's authenticated runtime generation.
+    runtime_verified: bool = True
+
+    @property
+    def _managed_windows_runtime(self) -> bool:
+        return any(source == "windows-managed-runtime" for source, _mode in self.sources)
 
     @property
     def current(self) -> bool:
-        return not self.drift and self.runtime == self.desired
+        return self.runtime_verified and not self.drift and self.runtime == self.desired
 
     @property
     def effective(self) -> str:
@@ -162,6 +177,10 @@ class ConnectorFailModeState:
         explicitly.
         """
 
+        if not self.runtime_verified:
+            if self._managed_windows_runtime:
+                return "windows-managed-runtime-unverified"
+            return "agent-env-unverified"
         if self.runtime is None:
             return "config"
         source = "config"
@@ -198,6 +217,18 @@ class ConnectorFailModeState:
                 f"observe mode keeps hooks fail-{self.desired}; "
                 f"guardrail.hook_fail_mode={self.configured} applies in action mode"
             )
+        if not self.runtime_verified and self._managed_windows_runtime:
+            notes.append(
+                "the managed native hook runs the mode of the runtime generation the guardian publishes, "
+                "which this command cannot verify: `defenseclaw enterprise windows verify` from an elevated "
+                "prompt checks it"
+            )
+        elif not self.runtime_verified:
+            default = f" (default {self.runtime})" if self.runtime else ""
+            notes.append(
+                "the installed hook reads DEFENSECLAW_FAIL_MODE from the agent's environment, which this "
+                f"command cannot see: it runs open when the agent sets open{default}"
+            )
         return "; ".join(notes)
 
     def to_report(self) -> dict[str, Any]:
@@ -211,6 +242,7 @@ class ConnectorFailModeState:
             "desired": self.desired,
             "runtime": self.runtime,
             "current": self.current,
+            "runtime_verified": self.runtime_verified,
             "drift": list(self.drift),
             "sources": [{"name": source, "mode": mode} for source, mode in self.sources],
         }
@@ -264,23 +296,28 @@ def resolve_connector_fail_mode(
     runtime = runtime_source[1]
     if runtime_source[0].endswith("-legacy"):
         drift.append("windows-sidecar-legacy")
+    if runtime_source[0] == "windows-managed-runtime":
+        drift.append("windows-managed-runtime-unverified")
     if runtime is None and runtime_source[0].startswith("windows-sidecar"):
         # The native Windows hook reads its mode from this sidecar alone and
         # fails closed when the file is missing or unreadable or names no mode
         # for the connector (readHookSidecar), so status reports that.
         runtime = "closed"
-    # The hooks read no fail mode from any environment (GAP-0315): not this
-    # shell's, which is not the agent's, and not the agent's either, so
-    # neither is an input here.
-
+    # A 1.0.4 render reads no fail mode from any environment (GAP-0315), so
+    # this shell's (which is not the agent's) is never an input here.
     workspace = _connector_workspace(cfg)
+    # The part of a hook's environment this process can read: only Claude
+    # Code's user settings env, which Claude Code applies over the
+    # environment it was started in.
+    agent_env: str | None = None
     if name == "claudecode":
         claude_env, registered = _claude_registration_state(workspace)
         # Setup still writes the mode into Claude Code's settings env, which
         # hook renders from 1.0.3 and older read until the upgrade's connector
         # refresh re-renders them: a stale value there is registration drift,
-        # never the runtime mode.
+        # and the runtime mode only of a render that reads it.
         sources.append(("claude-env", claude_env))
+        agent_env = claude_env
         if not registered:
             drift.append("registration-missing")
     # Windows Codex registration is a structured event matrix whose native
@@ -291,6 +328,32 @@ def resolve_connector_fail_mode(
 
     if registration_unguarded(cfg, name):
         drift.append(REGISTRATION_UNGUARDED)
+
+    # A managed native Windows hook runs the mode of the guardian's
+    # authenticated runtime generation, which this process cannot read: no
+    # mode here is verified, so an administrator's change from open to closed
+    # is not reported as applied before the guardian has published it.
+    runtime_verified = runtime_source[0] != "windows-managed-runtime"
+    if runtime_source[0] == "hook-script-env":
+        # The render takes its mode from the agent's environment (a 0.8.x or
+        # 1.0.3 render the upgrade's refresh has not replaced yet, or a Secure
+        # Client render): what it runs is the agent's value when it sets one.
+        if agent_env == "open":
+            # Open in Claude Code's settings env is open in the hook.
+            sources.append(("agent-env", "open"))
+            runtime = "open"
+        else:
+            # Nothing else here shows the agent's environment: the status
+            # shell's is not the agent's, and closed in Claude Code's user
+            # settings env can still be set open by a project's or managed
+            # settings env. So no closed or current claim.
+            runtime_verified = False
+            drift.append("agent-env-unverified")
+        if name in _SHARED_RUNTIME_CONNECTORS:
+            # 1.0.4 renders the Claude Code and Codex hooks with the mode
+            # baked in on every deployment, so this one is stale: a refresh
+            # replaces it.
+            drift.append("hook-script-reads-agent-env")
 
     lock_mode, lock_drift = _registration_lock_state(cfg, name)
     sources.append(("registration-lock", lock_mode))
@@ -324,6 +387,8 @@ def resolve_connector_fail_mode(
         if source == "config":
             continue
         if mode is None:
+            if source == "windows-managed-runtime":
+                continue
             if source not in {"claude-env"} or name == "claudecode":
                 drift.append(f"{source}-missing")
         elif mode != desired:
@@ -336,6 +401,7 @@ def resolve_connector_fail_mode(
         runtime=runtime,
         sources=tuple(sources),
         drift=tuple(dict.fromkeys(drift)),
+        runtime_verified=runtime_verified,
     )
 
 
@@ -361,6 +427,15 @@ def _resolve_native_deny_fail_mode(cfg: Any, name: str, configured: str, desired
         # As for every other connector: the native Windows hook fails closed
         # when its sidecar is missing or names no mode (readHookSidecar).
         runtime = "closed"
+    # As for every other connector: a managed native Windows hook runs the
+    # guardian's runtime generation, and a render that reads the agent's
+    # environment (Secure Client delivery, or a render left from 1.0.3) can
+    # run another mode than its default; neither is verified here.
+    runtime_verified = runtime_source[0] not in {"windows-managed-runtime", "hook-script-env"}
+    if runtime_source[0] == "windows-managed-runtime":
+        drift.append("windows-managed-runtime-unverified")
+    elif runtime_source[0] == "hook-script-env":
+        drift.append("agent-env-unverified")
     # No hook reads a fail mode from any environment (GAP-0315), so neither
     # this shell's DEFENSECLAW_FAIL_MODE nor the agent's is an input here.
     lock_mode, lock_drift = _registration_lock_state(cfg, name)
@@ -380,6 +455,8 @@ def _resolve_native_deny_fail_mode(cfg: Any, name: str, configured: str, desired
         drift.append(REGISTRATION_UNGUARDED)
     for source, mode in sources[1:]:
         if mode is None:
+            if source == "windows-managed-runtime":
+                continue
             drift.append(f"{source}-missing")
         elif mode != desired:
             drift.append(f"{source}-{mode}")
@@ -391,13 +468,14 @@ def _resolve_native_deny_fail_mode(cfg: Any, name: str, configured: str, desired
         sources=tuple(sources),
         drift=tuple(dict.fromkeys(drift)),
         limit=upstream_hook_limit(name),
+        runtime_verified=runtime_verified,
     )
 
 
 # The sources that record the mode a connector's installed hook or plugin was
 # rendered with (_platform_runtime_source).
 _RENDERED_SOURCES = frozenset(
-    {"hook-script", "windows-sidecar", "windows-sidecar-legacy", "amp-plugin", "opencode-plugin"}
+    {"hook-script", "hook-script-env", "windows-sidecar", "windows-sidecar-legacy", "amp-plugin", "opencode-plugin"}
 )
 
 
@@ -534,6 +612,7 @@ def connector_fail_mode_report(
             "desired": "open",
             "runtime": "open",
             "current": not unguarded,
+            "runtime_verified": True,
             "drift": unguarded,
             "sources": [
                 {"name": "config", "mode": configured},
@@ -556,6 +635,7 @@ def connector_fail_mode_report(
         "desired": configured,
         "runtime": None,
         "current": False if unguarded else None,
+        "runtime_verified": None,
         "drift": unguarded,
         "sources": [{"name": "config", "mode": configured}],
     }
@@ -567,12 +647,133 @@ def _platform_runtime_source(cfg: Any, connector: str) -> tuple[str, str | None]
     if connector == "opencode":
         return "opencode-plugin", _read_opencode_plugin_mode(cfg)
     if _is_windows():
+        if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
+            # A managed native hook takes its mode from the authenticated
+            # runtime generation the guardian publishes, never from
+            # hooks/.hookcfg (buildHookOptionsForRuntime). This process cannot
+            # authenticate that generation, so it names no mode: the report
+            # shows the administrator's mode with the unverified drift.
+            return "windows-managed-runtime", None
         mode, legacy = _read_windows_hook_mode(Path(cfg.data_dir) / "hooks" / ".hookcfg", connector)
         if legacy:
             return "windows-sidecar-legacy", mode
         return "windows-sidecar", mode
     script_name = "claude-code-hook.sh" if connector == "claudecode" else f"{connector}-hook.sh"
-    return "hook-script", _read_baked_hook_mode(Path(cfg.data_dir) / "hooks" / script_name)
+    mode, reads_env = _read_baked_hook_state(Path(cfg.data_dir) / "hooks" / script_name)
+    return ("hook-script-env" if reads_env else "hook-script"), mode
+
+
+# The white space Go's strings.TrimSpace strips (unicode.IsSpace), which the
+# native hook's sidecar reader applies (readHookSidecar).
+_GO_SPACE = (
+    "\t\n\v\f\r \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000"
+)
+# readHookSidecar's bounds: a larger or deeper sidecar is malformed state.
+_WINDOWS_SIDECAR_MAX_BYTES = 64 * 1024
+_WINDOWS_SIDECAR_MAX_DEPTH = 32
+_INT64 = (-(2**63), 2**63 - 1)
+# An integer token too long for Go's int: never a version.
+_NOT_AN_INT64 = object()
+
+
+def _reported_fail_mode(value: str) -> str | None:
+    """A recorded mode as status reports it: open or closed as the hook runs
+    it, blank as closed, and None for a value no installer writes (the hook
+    runs it closed)."""
+
+    trimmed = value.strip(_GO_SPACE)
+    if not trimmed:
+        return "closed"
+    lowered = trimmed.lower() if trimmed.isascii() else ""
+    return lowered if lowered in _VALID_MODES else None
+
+
+def _go_fail_mode(value: str) -> str:
+    """nativeHookFailMode: open only for open, any case, after Go's trim."""
+
+    trimmed = value.strip(_GO_SPACE)
+    return "open" if trimmed.isascii() and trimmed.lower() == "open" else "closed"
+
+
+# The only non-ASCII letters Go's strings.ToUpper turns into ASCII ones.
+_GO_UPPER_TO_ASCII = {"\u0131": "I", "\u017f": "S"}
+# The only non-ASCII letters strings.EqualFold matches to ASCII ones.
+_GO_FOLD_TO_ASCII = {"\u017f": "s", "\u212a": "k"}
+_WINDOWS_SIDECAR_FIELDS = (
+    "version",
+    "gateway_addr",
+    "fail_modes",
+    "legacy_fail_mode",
+    "fail_mode_sources",
+    "legacy_fail_mode_source",
+)
+
+
+def _windows_sidecar_key(connector: str) -> str:
+    """hookSidecarFailModeKey for a key compared with an ASCII connector key:
+    Go's trim, Go's upper-casing (no expansions such as ß to SS), then '-',
+    '_' and ' ' dropped. A non-ASCII letter Go would map to another non-ASCII
+    one is kept as it is: either way the key cannot equal an ASCII one."""
+
+    name = "".join(
+        _GO_UPPER_TO_ASCII.get(char, char.upper() if char.isascii() else char) for char in connector.strip(_GO_SPACE)
+    )
+    for dropped in "-_ ":
+        name = name.replace(dropped, "")
+    return "DEFENSECLAW_FAIL_MODE_" + name
+
+
+def _go_fold_equal(key: str, field: str) -> bool:
+    """strings.EqualFold against an ASCII lower-case field name."""
+
+    return len(key) == len(field) and all(
+        char == want or (char.isascii() and char.lower() == want) or _GO_FOLD_TO_ASCII.get(char) == want
+        for char, want in zip(key, field, strict=True)
+    )
+
+
+def _json_nesting_depth(text: str) -> int:
+    """jsonNestingDepth: the deepest object or array nesting."""
+
+    depth = deepest = 0
+    in_string = escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "{[":
+            depth += 1
+            deepest = max(deepest, depth)
+        elif char in "}]":
+            depth -= 1
+    return deepest
+
+
+def _reject_json_constant(name: str) -> None:
+    raise ValueError(f"{name} is not JSON")
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    # A key given twice reads differently to each reader (they take the
+    # last), so the native hook closes on it (HookSidecarJSONAmbiguous).
+    obj: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError(f"key {key!r} is given twice")
+        obj[key] = value
+    return obj
+
+
+# A shell variable name: the keys of the KEY=value sidecar of 0.8.x
+# (connector.ParseLegacyHookSidecar).
+_LEGACY_SIDECAR_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def _shared_hook_sidecar_drift(cfg: Any) -> str | None:
@@ -586,34 +787,94 @@ def _shared_hook_sidecar_drift(cfg: Any) -> str | None:
 
 
 def _read_windows_hook_mode(path: Path, connector: str) -> tuple[str | None, bool]:
-    """The mode the native Windows hook reads from .hookcfg for *connector*, and whether it is a legacy value.
+    """Read hooks/.hookcfg exactly as the native Windows hook does.
 
-    It is read as the hook reads it (readHookSidecar, hookSidecarFailMode in
-    internal/cli/hook.go): the connector's version 2 entry, then the legacy
-    mode, and KEY=value lines otherwise. The hook runs "open" in any case
-    open and anything else closed, so a value other than open or closed (in
-    any case) is None: no installer rendered it.
+    The contract is readHookSidecar's (internal/cli/hook.go), held to by the
+    shared vectors in internal/cli/testdata/windows_hook_sidecar_vectors.json.
+    Returns the mode and whether it came from the legacy (unscoped) value;
+    ``None`` names no mode, which the hook runs closed.
     """
 
-    data = _read_small_file(path)
+    data = _read_small_bytes(path)
     if data is None:
-        return None, False
-    values, current = _native_hook_sidecar_values(data)
-    if _MALFORMED_SIDECAR in values:
+        # Missing names no mode; a link, a directory or an oversized file is
+        # malformed state, closed.
+        return ("closed" if os.path.lexists(path) else None), False
+    if len(data) > _WINDOWS_SIDECAR_MAX_BYTES:
         return "closed", False
-    key = _native_hook_sidecar_key(connector)
-    if current and key in values:
-        # A version 2 connector entry never falls back to the legacy mode
-        # (hooks-upg loop 3); a value no installer writes is no readable mode.
-        mode = values[key].strip().lower()
-        return (mode if mode in _VALID_MODES else None), False
-    value = values.get(key, "")
-    legacy = not current
-    if not value:
-        value = values.get("DEFENSECLAW_FAIL_MODE", "")
-        legacy = legacy or bool(value)
-    mode = value.strip().lower()
-    return (mode if mode in _VALID_MODES else None), legacy
+    # encoding/json reads invalid UTF-8 in a string as U+FFFD and rejects it
+    # anywhere else, as a replacement decode and json.loads do.
+    text = data.decode("utf-8", errors="replace")
+    try:
+        payload = json.loads(
+            text,
+            object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_json_constant,
+            parse_int=lambda token: int(token) if len(token) <= 20 else _NOT_AN_INT64,
+        )
+        parsed = True
+    except (ValueError, RecursionError):
+        payload = None
+        parsed = False
+    if parsed and isinstance(payload, dict):
+        version = payload.get("version", 0)
+        if version is None:
+            version = 0
+        if type(version) is not int or not _INT64[0] <= version <= _INT64[1]:
+            version = 0
+        if version >= 2:
+            addr = payload.get("gateway_addr")
+            legacy = payload.get("legacy_fail_mode")
+            legacy_source = payload.get("legacy_fail_mode_source")
+            modes = payload.get("fail_modes", {})
+            sources = payload.get("fail_mode_sources", {})
+            if (
+                not all(value is None or isinstance(value, str) for value in (addr, legacy, legacy_source))
+                or not isinstance(modes, dict)
+                or not all(value is None or isinstance(value, str) for value in modes.values())
+                or not isinstance(sources, dict)
+                or not all(value is None or isinstance(value, str) for value in sources.values())
+                or any(
+                    key != field and _go_fold_equal(key, field) for key in payload for field in _WINDOWS_SIDECAR_FIELDS
+                )
+                or _json_nesting_depth(text) > _WINDOWS_SIDECAR_MAX_DEPTH
+            ):
+                return "closed", False
+            key = _windows_sidecar_key(normalize(connector))
+            entries = [value or "" for name, value in modes.items() if _windows_sidecar_key(name) == key]
+            if entries:
+                # A blank entry is closed, and entries that normalize alike
+                # are open only when every one is. An entry no installer
+                # writes is no readable mode (the hook runs it closed; doctor
+                # fails it), never the legacy open.
+                if all(_go_fail_mode(value) == "open" for value in entries):
+                    return "open", False
+                if any(_reported_fail_mode(value) is None for value in entries):
+                    return None, False
+                return "closed", False
+            if legacy:
+                return _go_fail_mode(legacy), True
+            return None, False
+    # The KEY=value sidecar of 0.8.x, read as readHookSidecar reads it
+    # (connector.ParseLegacyHookSidecar): only a document of blank lines, #
+    # comments and [export ]KEY=value lines with each key once is one, and a
+    # connector's own key comes before the unscoped one. Anything else (JSON
+    # that is not a v2 sidecar or does not parse, a byte-order mark or a
+    # comment in front of it, a line that is not KEY=value, a key given
+    # twice) is malformed state and closed.
+    values: dict[str, str] = {}
+    for line in text.split("\n"):
+        line = line.strip(_GO_SPACE)
+        if not line or line.startswith("#"):
+            continue
+        key, separator, value = line.removeprefix("export ").partition("=")
+        key = key.strip(_GO_SPACE)
+        if not separator or not _LEGACY_SIDECAR_KEY.fullmatch(key) or key in values:
+            return "closed", False
+        values[key] = value.strip(_GO_SPACE).strip("\"'")
+    scoped = _windows_sidecar_key(normalize(connector))
+    value = values.get(scoped) or values.get("DEFENSECLAW_FAIL_MODE") or ""
+    return (_go_fail_mode(value) if value else None), True
 
 
 _AMBIGUOUS_SIDECAR_VALUE = "\x00ambiguous"
@@ -625,10 +886,6 @@ def _native_hook_sidecar_key(connector: str) -> str:
     for char in "-_ ":
         name = name.replace(char, "")
     return "DEFENSECLAW_FAIL_MODE_" + name
-
-
-def _reject_json_constant(value: str) -> None:
-    raise ValueError(f"JSON constant {value} is not JSON")
 
 
 def _go_json_field(payload: dict[str, Any], name: str) -> Any:
@@ -653,7 +910,7 @@ def _native_hook_sidecar_values(data: str) -> tuple[dict[str, str], bool]:
     try:
         payload = json.loads(data, parse_constant=_reject_json_constant)
         parsed = True
-    except (TypeError, ValueError):
+    except (ValueError, RecursionError):
         payload = None
         parsed = False
     if isinstance(payload, dict):
@@ -718,12 +975,18 @@ def _go_unquote_or_trim(value: str) -> str:
     return value.strip("\"'")
 
 
-def _read_baked_hook_mode(path: Path) -> str | None:
+def _read_baked_hook_state(path: Path) -> tuple[str | None, bool]:
+    """Return a Unix hook render's installed mode and whether it reads the environment.
+
+    The mode of a render that reads DEFENSECLAW_FAIL_MODE is only its default.
+    """
+
     data = _read_small_file(path)
     if data is None:
-        return None
+        return None, False
     match = _FAIL_MODE_PATTERN.search(data)
-    return (match.group(1) or match.group(2)) if match else None
+    mode = (match.group(1) or match.group(2)) if match else None
+    return mode, _ENV_FAIL_MODE_PATTERN.search(data) is not None
 
 
 def _read_opencode_plugin_mode(cfg: Any) -> str | None:

@@ -1,6 +1,7 @@
 package connector
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -146,6 +147,11 @@ func TestInspectShellActionMatrixWithAndWithoutJQ(t *testing.T) {
 	}
 }
 
+// Without jq or python3 the shared inspect hooks cannot check a call. An
+// install with JSON state (hooks/.hookcfg, which setup always writes) cannot
+// have its mode read either, so it blocks even when installed open (1.0.4
+// review, loop round 2 of G-hooks-upg); only flat records alone, with no JSON
+// state, keep the explicit open answer and its notice.
 func TestInspectShellNoParserExplicitOpenNotice(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX hooks")
@@ -166,8 +172,15 @@ func TestInspectShellNoParserExplicitOpenNotice(t *testing.T) {
 			}
 		}
 	}
-	for _, name := range []string{"inspect-request.sh", "inspect-tool.sh", "inspect-response.sh", "inspect-tool-response.sh"} {
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		jsonState bool
+	}{
+		{"inspect-request.sh", true}, {"inspect-tool.sh", true}, {"inspect-response.sh", true}, {"inspect-tool-response.sh", true},
+		{"inspect-request.sh", false}, {"inspect-tool.sh", false}, {"inspect-response.sh", false}, {"inspect-tool-response.sh", false},
+	} {
+		name := tc.name
+		t.Run(fmt.Sprintf("%s/json-state=%t", name, tc.jsonState), func(t *testing.T) {
 			var calls atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				calls.Add(1)
@@ -179,17 +192,31 @@ func TestInspectShellNoParserExplicitOpenNotice(t *testing.T) {
 				t.Fatal(err)
 			}
 			bakeHookPathForTest(t, filepath.Join(dir, name), path)
+			if _, err := os.Stat(filepath.Join(dir, ".hookcfg")); err != nil {
+				t.Fatalf("setup wrote no JSON state: %v", err)
+			}
+			if !tc.jsonState {
+				if err := os.Remove(filepath.Join(dir, ".hookcfg")); err != nil {
+					t.Fatal(err)
+				}
+			}
 			hookHome := t.TempDir()
 			cmd := exec.Command("bash", filepath.Join(dir, name))
 			cmd.Env = append(os.Environ(), "PATH="+path, "DEFENSECLAW_HOME="+hookHome, "DEFENSECLAW_FAIL_MODE=open")
 			cmd.Stdin = strings.NewReader(`{"tool":"Bash","content":"marker"}`)
 			output, err := cmd.CombinedOutput()
-			if err != nil || !strings.Contains(string(output), "DefenseClaw needs jq or python3 to check this call") || !strings.Contains(string(output), "allowing") {
+			wantMode := "open"
+			if tc.jsonState {
+				wantMode = "closed"
+				if err == nil || !strings.Contains(string(output), "DefenseClaw needs jq or python3 to check this call") || !strings.Contains(string(output), "blocking") {
+					t.Fatalf("closed notice missing: err=%v output=%q", err, output)
+				}
+			} else if err != nil || !strings.Contains(string(output), "DefenseClaw needs jq or python3 to check this call") || !strings.Contains(string(output), "allowing") {
 				t.Fatalf("open notice missing: err=%v output=%q", err, output)
 			}
 			failure, err := os.ReadFile(filepath.Join(hookHome, "logs", "hook-failures.jsonl"))
-			if err != nil || !strings.Contains(string(failure), `"fail_mode":"open"`) {
-				t.Fatalf("missing open failure record: %v %q", err, failure)
+			if err != nil || !strings.Contains(string(failure), `"fail_mode":"`+wantMode+`"`) {
+				t.Fatalf("missing %s failure record: %v %q", wantMode, err, failure)
 			}
 			if calls.Load() != 0 {
 				t.Fatalf("hook sent %d requests without a verdict parser", calls.Load())

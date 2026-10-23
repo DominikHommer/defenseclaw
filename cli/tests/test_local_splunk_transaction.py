@@ -971,7 +971,9 @@ def test_logs_disable_keeps_local_splunk_while_an_unrecorded_destination_is_enab
     # An upgraded older local sink has no record. --disable --logs does not
     # disable it, so it must not stop the stack that sink may still send to.
     app = _app(tmp_path)
-    (tmp_path / "splunk-bridge").mkdir()
+    # A configured stack: its runtime credentials (a seeded bundle alone is not one).
+    (tmp_path / "splunk-bridge" / "env").mkdir(parents=True)
+    (tmp_path / "splunk-bridge" / "env" / ".env").write_text("DEFENSECLAW_INTEGRATION_ENABLED=true\n")
     authored = [older, _hec("remote", _REMOTE_HEC, f"{_SHARED}_REMOTE")]
     _write_state(tmp_path, authored, {"KEEP_ME": "unchanged"})
     status = [
@@ -1152,6 +1154,48 @@ def test_native_disable_remote_only_skips_local_runtime_preflight(tmp_path: Path
     assert disabled == ["remote-splunk"]
     native_preflight.assert_not_called()
     stop_bridge.assert_not_called()
+
+
+@pytest.mark.parametrize("logs_only", [False, True])
+def test_native_disable_seeded_assets_without_stack_is_a_noop(tmp_path: Path, logs_only: bool) -> None:
+    app = _app(tmp_path)
+    # Install seeds the bundle before Local Splunk has ever been configured.
+    seeded = tmp_path / "splunk-bridge"
+    (seeded / "env").mkdir(parents=True)
+    (seeded / "env" / ".env.example").write_text("SPLUNK_IMAGE=example\n")
+    before = (tmp_path / "config.yaml").read_bytes()
+    with (
+        patch.object(cmd_setup.platform_support, "host_os", return_value="windows"),
+        patch("defenseclaw.commands.cmd_setup_observability._require_v8_operator_status",
+              return_value=SimpleNamespace(destinations=())),
+        patch("defenseclaw.observability.local_splunk.prepare_native_local_splunk_stop",
+              side_effect=LocalStackError("Docker CLI was not found on PATH")) as preflight,
+        patch.object(cmd_setup, "_stop_bridge") as stop_bridge,
+        patch.object(cmd_setup, "_reload_cfg_from_data_dir"),
+    ):
+        cmd_setup._disable_splunk(app, False, logs_only, False, True)
+    preflight.assert_not_called()
+    stop_bridge.assert_not_called()
+    assert (tmp_path / "config.yaml").read_bytes() == before
+
+
+def test_native_disable_runtime_credentials_still_require_ownership_proof(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    runtime_env = tmp_path / "splunk-bridge" / "env" / ".env"
+    runtime_env.parent.mkdir(parents=True)
+    runtime_env.write_text("DEFENSECLAW_INTEGRATION_ENABLED=true\n")
+    before = (tmp_path / "config.yaml").read_bytes()
+    with (
+        patch.object(cmd_setup.platform_support, "host_os", return_value="windows"),
+        patch("defenseclaw.commands.cmd_setup_observability._require_v8_operator_status",
+              return_value=SimpleNamespace(destinations=())),
+        patch("defenseclaw.observability.local_splunk.prepare_native_local_splunk_stop",
+              side_effect=LocalStackError("ownership is unproven")) as preflight,
+        pytest.raises(ClickException, match="ownership is unproven"),
+    ):
+        cmd_setup._disable_splunk(app, False, True, False, True)
+    preflight.assert_called_once()
+    assert (tmp_path / "config.yaml").read_bytes() == before
 
 
 def test_native_disable_failure_restores_config_and_running_stack(tmp_path: Path) -> None:

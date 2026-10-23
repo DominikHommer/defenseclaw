@@ -18631,7 +18631,13 @@ def _disable_splunk(
     native_disable = (
         native_disable_requested
         and not keep_local_stack
-        and (any(destination.name in recorded_local for destination in dests) or os.path.lexists(managed_assets_path))
+        and (
+            any(destination.name in recorded_local for destination in dests)
+            # Installation seeds the bundle, including .env.example, before a
+            # stack exists. Only the runtime credentials indicate a configured
+            # stack. lexists also sends unsafe links through the strict preflight.
+            or os.path.lexists(os.path.join(managed_assets_path, "env", ".env"))
+        )
     )
     if native_disable:
         # Prove Docker, assets, volumes, ports, and exact Compose ownership

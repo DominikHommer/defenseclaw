@@ -54,7 +54,7 @@ const DC_HOOK_SOCKET = "";
 const DC_FOREIGN_GUARD = "";
 const DC_INSTALL_MARKER = "";
 {{else}}const DC_TOKEN_FILE = "{{.TokenFileJS}}";
-const DC_FAIL_MODE = "{{if and .Managed (not .SecureClient)}}closed{{else}}{{.FailMode}}{{end}}"; // "open" or "closed"
+const DC_FAIL_MODE = "{{if .ManagedOutageClosed}}closed{{else}}{{.FailMode}}{{end}}"; // "open" or "closed"
 // The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the process
 // environment is not read (GAP-0315). As in the shell hooks,
 // DEFENSECLAW_STRICT_AVAILABILITY closes a gateway outage (GAP-0035); it can

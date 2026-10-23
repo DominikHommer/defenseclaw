@@ -311,7 +311,7 @@ func renderBridgeHostTemplate(asset string, managed bool) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	data := map[string]any{"Sandbox": false, "Managed": managed, "SecureClient": false}
+	data := map[string]any{"Sandbox": false, "Managed": managed, "SecureClient": false, "ManagedOutageClosed": managed}
 	for _, field := range bridgeHostTemplateFields {
 		data[field] = "{{." + field + "}}"
 	}

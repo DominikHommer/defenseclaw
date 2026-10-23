@@ -228,8 +228,8 @@ func TestRefreshHookFailModesRendersAnEarlierReleasesSidecar(t *testing.T) {
 	}
 	for name, want := range modes {
 		flat := readFlatHookRecordForTest(t, hookDir, name)
-		if legacyHookConfigValue([]byte(flat), "DEFENSECLAW_FAIL_MODE") != want ||
-			legacyHookConfigValue([]byte(flat), "FAIL_MODE_SOURCE") != HookFailModeSourceConfig {
+		if flatRecordValueForTest([]byte(flat), "DEFENSECLAW_FAIL_MODE") != want ||
+			flatRecordValueForTest([]byte(flat), "FAIL_MODE_SOURCE") != HookFailModeSourceConfig {
 			t.Fatalf("%s flat record %q, want %s from the config", name, flat, want)
 		}
 	}
@@ -329,10 +329,10 @@ func TestRefreshHookFailModesClosesAnEarlierReleasesHooks(t *testing.T) {
 		state.LegacySource != HookFailModeSourceConfig || state.FailModes["kiro"] != "closed" {
 		t.Fatalf("sidecar after refresh: %+v", state)
 	}
-	if got := readFlatHookRecordForTest(t, hookDir, "kiro"); legacyHookConfigValue([]byte(got), "DEFENSECLAW_FAIL_MODE") != "closed" {
+	if got := readFlatHookRecordForTest(t, hookDir, "kiro"); flatRecordValueForTest([]byte(got), "DEFENSECLAW_FAIL_MODE") != "closed" {
 		t.Fatalf("kiro flat record %q", got)
 	}
-	if got := readFlatHookRecordForTest(t, hookDir, "legacy"); legacyHookConfigValue([]byte(got), "DEFENSECLAW_FAIL_MODE") != "closed" {
+	if got := readFlatHookRecordForTest(t, hookDir, "legacy"); flatRecordValueForTest([]byte(got), "DEFENSECLAW_FAIL_MODE") != "closed" {
 		t.Fatalf("legacy flat record %q", got)
 	}
 	for _, name := range []string{"codex-hook.sh", "claude-code-hook.sh", "cursor-hook.sh"} {
@@ -536,6 +536,9 @@ func TestSharedShellReaderFollowsAManagedSidecarsOpen(t *testing.T) {
 					t.Fatal(err)
 				}
 				test.setup(t, hookDir)
+				if noParserReadsJSONClosed(t, hookDir, tools.json) {
+					want = "closed"
+				}
 				cmd := exec.Command(bash, "-c", `. "$1/_hardening.sh"; defenseclaw_shared_runtime_fail_mode "$1" "$2"`, "test", hookDir, test.connector)
 				cmd.Env = []string{"PATH=" + tools.path, "HOME=" + t.TempDir()}
 				if test.managed {
@@ -626,6 +629,9 @@ func TestManagedSharedHookCombinesSeveralConnectorRecordsToTheStrictest(t *testi
 							t.Fatal(err)
 						}
 					}
+				}
+				if noParserReadsJSONClosed(t, hookDir, tools.json) {
+					want = "closed"
 				}
 				run := func(env ...string) (connector, mode string) {
 					t.Helper()
@@ -804,4 +810,24 @@ func readerToolSets(t *testing.T) []struct {
 		}{name: "python3 only", path: bin, json: true})
 	}
 	return sets
+}
+
+// flatRecordValueForTest is one key of a well-formed connector record
+// (flatHookRecordValue), or "".
+func flatRecordValueForTest(data []byte, key string) string {
+	value, _ := flatHookRecordValue(data, key)
+	return value
+}
+
+// noParserReadsJSONClosed reports a reader without jq or python3 beside a
+// hooks/.hookcfg JSON: it cannot read the JSON, which may record a connector
+// no flat record names, so the shared hooks run closed (G-hooks-upg R2-1;
+// only Secure Client delivery keeps its flat-record reading).
+func noParserReadsJSONClosed(t *testing.T, hookDir string, parser bool) bool {
+	t.Helper()
+	if parser {
+		return false
+	}
+	_, err := os.Lstat(filepath.Join(hookDir, hookConfigSidecarName))
+	return err == nil
 }

@@ -89,6 +89,16 @@ for current behavior.
 
 - **Rule-pack switches preserve existing pins.** Selecting a directory keeps its registered identity and refuses a stale digest through any alias. Pins used by application protection survive a global pack switch.
 
+||||||| 16d085f75a
+- **Managed macOS policy repair removes writable directory modes.** Repair strips group and other write permission even when the directory already has enough read and search permission, including after ACL repair.
+- **Administrator code scans use the verified deployment's existing redaction key.** Root scans accept the proven service account's key without changing its bytes, owner or permissions. Path aliases cannot select a different key; missing or untrusted custody still refuses with the installed repair command.
+- **RPM storage failures preserve the last complete package result.** The scriptlet reports a storage problem and the ensure retry command, and does not infer that no deployment is active from a missing result.
+- **Windows trust-anchor refusals are audited during profile preflight.** Elevated callers on verified installed standalone hosts get the refused change event even when incompatible arguments stop the command before bundle preparation.
+- **Ordinary Claude Code settings edits keep exporter custody verified.** Doctor compares the managed exporter environment and credential helper with Setup's exact snapshot; changed endpoints, headers, helpers or intentional absences still report drift.
+- **Disabling an unused Local Splunk integration needs no Docker installation.** On Windows, the bundle seeded during installation does not count as a configured stack. Existing runtime credentials and configured destinations still require ownership verification before stopping anything.
+- **Rejected reloads appear in local audit history.** Schema and policy generation refusals emit the mandatory `config.reload.rejected` event through the active configuration, without recording rejected values.
+- **Validation errors name a profile selector once.** Structured errors carry the selector path separately from the correction text.
+- **Disconnected closed hooks retain a truthful denial audit.** A client that disconnects before finalization gets the fail-mode decision in its audit row; stop events and Secure Client retain their existing behavior. A gateway decision still does not prove that the agent received it.
 - **MicroVM disks of OpenShell 0.1.4 and later are found again.** From 0.1.4 OpenShell names each prepared MicroVM disk by a hash of the image ID (NVIDIA/OpenShell#4342), and `sandbox image rm`, `image prune`, teardown and the first-start disk check did not recognize those names, so the disks (about 5 GB each) stayed behind. Both naming forms are recognized now.
 
 ### Removed

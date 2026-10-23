@@ -50,6 +50,52 @@ The component renders from `docs-site/data/capability-matrix.json`. Go tests in 
 
 One with **Block**, **Native ask** and **Fail-closed** all yes, and a managed-tier sandbox verified end to end. Of the current connectors that is [Claude Code](/docs/connectors/claudecode): it asks inside the agent, and in a sandbox its hooks sit in a root-owned policy file.
 
+## Gateway outage
+
+What each connector's hooks do with a call they can't check because the
+gateway is not running, is still restarting or gives no answer in time. This
+table is the only place the docs give it per connector, and it is checked
+against the hook code on every change.
+
+<OutageMatrix />
+
+- **Per-user** is an install without a managed deployment: the fail mode is
+  the one `defenseclaw guardrail fail-mode` installed with the hooks.
+- **Managed standalone** is an enterprise host outside Secure Client. Its fail
+  mode is the administrator's `hook_fail_mode`: `closed`, the default, blocks
+  the outage on every connector, and the two managed columns give `open`. A
+  managed connector runs either through vendor
+  [machine policy](/docs/enterprise/configure/machine-policy) (the
+  administrator-owned `defenseclaw-hook --enterprise-managed`) or through a
+  hook or plugin the guardian writes into the user's home (the per-user route,
+  for the connectors without machine policy and for one whose machine policy
+  is off).
+- **Default foreign-hook guard**: with `foreign_hooks: remove`, the machine
+  policy default, the
+  [foreign-hook guard](/docs/enterprise/configure/foreign-hook-guard) checks
+  each call of a connector it covers against the agent session's hook record,
+  which only the gateway holds. While the gateway cannot answer, the guard
+  blocks that call in every fail mode, before the hook's own fail mode
+  applies. With `foreign_hooks: report` or `allow` the guard does not ask the
+  gateway, and the next column applies.
+- **Secure Client** hooks let an outage run in `open`, which is also their
+  default when no fail mode is set.
+- **`DEFENSECLAW_STRICT_AVAILABILITY=1`** makes an outage block on a hook that
+  reads it, whatever the fail mode.
+- **`DEFENSECLAW_FAIL_MODE`** is not read by any 1.0.4 hook: the installed
+  mode is the fail mode
+  ([Fail modes](/docs/reference/configuration/fail-modes#the-environment-does-not-set-the-fail-mode)).
+- A proxy-backed connector has no hooks: its requests are blocked while the
+  gateway is down.
+- `status --json` reports the administrator's resolved value as
+  `effective_hook_fail_mode`, also for a hook that blocks the outage anyway.
+
+Refusals that are not an outage block in every fail mode: an unapproved hook
+the [foreign-hook guard](/docs/enterprise/configure/foreign-hook-guard) finds,
+an invalid managed runtime, a refused credential, and, on a managed standalone
+host, input over the size limit and an answer DefenseClaw cannot use. See
+[Fail modes](/docs/reference/configuration/fail-modes).
+
 ### Which connectors enforce through the agent's own hooks?
 
 [Claude Code](/docs/connectors/claudecode), [Codex](/docs/connectors/codex), [Cursor](/docs/connectors/cursor), [Hermes](/docs/connectors/hermes), [Devin](/docs/connectors/devin), [Copilot CLI](/docs/connectors/copilot), [Antigravity](/docs/connectors/antigravity), [OpenCode](/docs/connectors/opencode) and [Kiro](/docs/connectors/kiro). [Amp](/docs/connectors/amp) uses a policy plugin. None of them can block a request the agent has not yet shown to its hook or plugin surface.
