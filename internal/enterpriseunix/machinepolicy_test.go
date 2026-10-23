@@ -784,6 +784,20 @@ func TestVerifyFailsWhileTheCopilotLocalHookFileIsMissing(t *testing.T) {
 	}
 }
 
+func TestCopilotAccountScopeIgnoresInvalidEligibleRecordWhenInactive(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	record := enterprisehooks.UnixEligibleAccountsPath(h.env.Layout.ManifestPath)
+	writeHostFile(t, h, record, "state\n")
+	cfg := &config.Config{}
+	if _, _, err := (&policyManager{env: h.env}).copilotAccountHomes(cfg); err != nil {
+		t.Fatalf("inactive Copilot must not block lifecycle repair: %v", err)
+	}
+	cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"copilot": {}}
+	if _, _, err := (&policyManager{env: h.env}).copilotAccountHomes(cfg); err == nil {
+		t.Fatal("managed Copilot accepted an unreadable enrollment record")
+	}
+}
+
 func TestCopilotLocalStatusUsesCurrentAccountScope(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
@@ -793,6 +807,7 @@ func TestCopilotLocalStatusUsesCurrentAccountScope(t *testing.T) {
 			writeHostFile(t, h, h.env.Layout.ManifestPath,
 				"version: 1\ntargets:\n  - user: alice\n    uid: 501\n    user_home: /home/alice\n    connector: copilot\n  - user: bob\n    uid: 502\n    user_home: /home/bob\n    connector: copilot\n")
 			cfg := &config.Config{}
+			cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"copilot": {}}
 			cfg.Enterprise.Enrollment.Mode = config.EnterpriseEnrollmentManifest
 			cfg.Enterprise.Enrollment.ExcludeUsers = []string{"bob"}
 			scoped, out, err := (&policyManager{env: h.env}).copilotAccountHomes(cfg)

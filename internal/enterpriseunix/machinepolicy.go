@@ -109,6 +109,9 @@ func (m *policyManager) options(cfg *config.Config) (enterprisepolicy.Options, e
 // or exclude_users edit. The guardian's own record also names old homes that
 // need removal, so verify can report a still-active hook outside scope.
 func (m *policyManager) copilotAccountHomes(cfg *config.Config) ([]string, []string, error) {
+	if _, managed := cfg.Enterprise.MachinePolicy.Connectors[enterprisepolicy.ConnectorCopilot]; !managed {
+		return nil, nil, nil
+	}
 	env := m.env
 	data, err := readBounded(env.P(enterprisehooks.UnixEligibleAccountsPath(env.Layout.ManifestPath)), maxInputBytes)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
