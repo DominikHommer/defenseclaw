@@ -858,7 +858,9 @@ class TestStatusJson(unittest.TestCase):
             "native_otlp_delivery",
         ):
             self.assertIn(key, doc)
-        self.assertIsNone(doc["sidecar"]["running"])
+        self.assertFalse(doc["sidecar"]["running"])
+        self.assertIs(doc["sidecar"]["running"], False)
+        self.assertIn("no gateway process or API listener", doc["sidecar"]["reason"])
         self.assertEqual(doc["application_protection"]["guardrail_mode"], "observe")
         self.assertFalse(doc["application_protection"]["require_trusted_binary_paths"])
         self.assertEqual(doc["deployment_mode"], "managed_enterprise")
@@ -941,6 +943,23 @@ class TestStatusJson(unittest.TestCase):
         self.assertIsNone(sidecar["running"])
         self.assertIn("token was rejected", sidecar["reason"])
 
+    def test_json_does_not_report_stopped_when_listener_probe_fails(self):
+        with (
+            patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=None),
+            patch.object(cmd_status, "_live_gateway_pid", return_value=0),
+            patch("defenseclaw.commands.cmd_doctor._foreign_gateway_port_holder", return_value=""),
+            patch(
+                "defenseclaw.commands.cmd_doctor._managed_gateway_listener_evidence",
+                return_value=MagicMock(status="unavailable", pid=0, reason="listener probe failed"),
+            ),
+        ):
+            result = CliRunner().invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        sidecar = json.loads(result.output)["sidecar"]
+        self.assertIsNone(sidecar["running"])
+        self.assertIn("listener probe failed", sidecar["reason"])
+
     def test_json_db_error_is_explicit_null_not_dropped(self):
         self.app.store.get_counts = MagicMock(side_effect=RuntimeError("locked"))
         result = self._invoke_json()
@@ -1003,7 +1022,8 @@ class TestStatusProfileIdentity(unittest.TestCase):
                 self.assertNotIn(str(ambient_home), human.output)
                 doc = json.loads(result.output)
                 rendered = json.dumps(doc)
-                self.assertIsNone(doc["sidecar"]["running"])
+                self.assertFalse(doc["sidecar"]["running"])
+                self.assertIs(doc["sidecar"]["running"], False)
                 self.assertNotIn(foreign_marker, rendered)
                 self.assertNotIn(str(ambient_home), rendered)
                 self.assertEqual(

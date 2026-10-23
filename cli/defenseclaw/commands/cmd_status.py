@@ -1961,23 +1961,44 @@ def _status_payload(app) -> dict:
     elif health is not None:
         payload["sidecar"] = {"running": True}
     else:
-        from defenseclaw.commands.cmd_doctor import _foreign_gateway_port_holder
+        from defenseclaw.commands.cmd_doctor import (
+            _foreign_gateway_port_holder,
+            _managed_gateway_listener_evidence,
+        )
 
         try:
             holder = _foreign_gateway_port_holder(cfg)
         except Exception:  # noqa: BLE001 - a failed probe cannot prove the gateway stopped
-            holder = ""
-        pid = 0 if holder else _live_gateway_pid(cfg)
-        if holder:
-            reason = f"port {cfg.gateway.api_port} is held by {holder}; this gateway's state is unconfirmed"
-        elif pid:
-            reason = (
-                _status_refused_detail(cfg, client, OrchestratorClient(host=bind, port=cfg.gateway.api_port))
-                or f"PID file names a live process ({pid}), but authenticated gateway status is unreadable"
-            )
+            payload["sidecar"] = {"running": None, "reason": "API listener inspection failed"}
         else:
-            reason = "authenticated gateway status is unreadable; process and listener state are unconfirmed"
-        payload["sidecar"] = {"running": None, "reason": reason}
+            pid = 0 if holder else _live_gateway_pid(cfg)
+            if holder:
+                reason = f"port {cfg.gateway.api_port} is held by {holder}; this gateway's state is unconfirmed"
+                payload["sidecar"] = {"running": None, "reason": reason}
+            elif pid:
+                reason = (
+                    _status_refused_detail(cfg, client, OrchestratorClient(host=bind, port=cfg.gateway.api_port))
+                    or f"PID file names a live process ({pid}), but authenticated gateway status is unreadable"
+                )
+                payload["sidecar"] = {"running": None, "reason": reason}
+            else:
+                try:
+                    listener = _managed_gateway_listener_evidence(cfg.gateway.api_port, host=bind)
+                except Exception:  # noqa: BLE001 - failed inspection leaves state unknown
+                    payload["sidecar"] = {"running": None, "reason": "API listener inspection failed"}
+                else:
+                    if listener.status == "missing":
+                        payload["sidecar"] = {
+                            "running": False,
+                            "reason": "no gateway process or API listener; start it: defenseclaw-gateway start",
+                        }
+                    else:
+                        reason = listener.reason or (
+                            f"API listener PID {listener.pid} has no live gateway PID file"
+                            if listener.status == "ok"
+                            else "API listener state is unconfirmed"
+                        )
+                        payload["sidecar"] = {"running": None, "reason": reason}
     if (policy := _policy_status(health)) is not None:
         payload["policy"] = policy
     payload["connectors"] = _connector_roster(cfg, health=health)
