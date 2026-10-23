@@ -63,13 +63,22 @@ func TestLinuxPurgeReportsAnEnrolledOSSInstallItLeavesBehind(t *testing.T) {
 	home := "/home/alice"
 	writeHostFile(t, h, enterprisehooks.UnixEligibleAccountsPath(h.env.Layout.ManifestPath), fmt.Sprintf(
 		`{"accounts":[{"user":"alice","uid":%d,"home":"%s"}]}`, os.Getuid(), home))
+	record := h.env.P(enterprisehooks.UnixEligibleAccountsPath(h.env.Layout.ManifestPath))
 	config := filepath.Join(home, ".defenseclaw", "config.yaml")
 	writeHostFile(t, h, config, "guardrail: {}\n")
 	h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+		// The real remove-all worker removes this record before lifecycle
+		// reports what survived. Its pre-removal snapshot must suffice.
+		if err := os.Remove(record); err != nil {
+			t.Fatal(err)
+		}
 		return CommandResult{Stdout: []byte(`{"ok":true,"removed":0}`)}, nil
 	}}
 	done := h.run(Options{Action: ActionUninstall, Purge: true})
 	requireOK(t, done)
+	if _, err := os.Lstat(record); !os.IsNotExist(err) {
+		t.Fatalf("worker did not remove enrollment record: %v", err)
+	}
 	if got := h.read(config); got != "guardrail: {}\n" {
 		t.Fatalf("purge changed the account's OSS data: %q", got)
 	}
