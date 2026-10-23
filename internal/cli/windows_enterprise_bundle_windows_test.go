@@ -1425,6 +1425,9 @@ func windowsKilledApplyReceipt(t *testing.T, driver *enterprisebundle.Driver, bu
 	if until == enterprisebundle.StateVerified {
 		return rc
 	}
+	// Prepare records the rendered config hash before promoting a receipt,
+	// so a killed run can leave a staged receipt with a committed config.
+	rc.ConfigSHA256 = configwrite.SHA256Hex(config)
 	if _, err := driver.Store.Promote(rc); err != nil {
 		t.Fatal(err)
 	}

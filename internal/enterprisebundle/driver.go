@@ -495,6 +495,31 @@ func (d *Driver) committedGeneration(rc *Receipt, installed string) (configwrite
 		generation.SignerKeyID == rc.SignerKeyID && generation.Actor == rc.Principal
 }
 
+// CommittedPendingConfig reports an unfinished receipt whose signed config
+// is still installed with its lifecycle generation. A staged receipt can
+// have that commit when a run stopped before Finish advanced it to applied.
+// Callers must not replace those bytes while gateway evidence is unavailable:
+// SettleRun can still confirm the receipt when the gateway returns.
+func (d *Driver) CommittedPendingConfig(installedConfig []byte) (*Receipt, error) {
+	if installedConfig == nil {
+		return nil, nil
+	}
+	receipts, err := d.Store.Unsettled()
+	if err != nil {
+		return nil, err
+	}
+	installed := sha256Hex(installedConfig)
+	for _, rc := range receipts {
+		if rc.State != StateStaged && rc.State != StateApplied {
+			continue
+		}
+		if _, committed := d.committedGeneration(rc, installed); committed {
+			return rc, nil
+		}
+	}
+	return nil, nil
+}
+
 // settleCommitted settles the staged receipts whose rendered config is the
 // installed one (see SettleRun). Only a receipt the lifecycle installed can
 // need a rollback: its bundle generation was committed, or the receipt's
