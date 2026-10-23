@@ -76,8 +76,13 @@ func PluginLaunchCoverage(connector string, argv []string, env map[string]string
 		if hermesSafeModeEnabled(env["HERMES_SAFE_MODE"]) {
 			return "hermes_safe_mode"
 		}
-		if env["HERMES_MANAGED_DIR"] != "" || env["HERMES_HOME"] != "" &&
-			(accountHome == "" || !sameLaunchPath(env["HERMES_HOME"], filepath.Join(accountHome, ".hermes"))) {
+		// Hermes uses /etc/hermes when this selector is unset or names that
+		// same directory; the guard treats it as the default too.
+		if managed := env["HERMES_MANAGED_DIR"]; managed != "" && !sameLaunchPath(managed, "/etc/hermes") {
+			return "hermes_config_relocated"
+		}
+		if home := env["HERMES_HOME"]; home != "" &&
+			(accountHome == "" || !sameLaunchPath(home, filepath.Join(accountHome, ".hermes"))) {
 			return "hermes_config_relocated"
 		}
 		if launchWindowsAppDataRelocated(env, accountHome, "LOCALAPPDATA", "Local") {
@@ -113,7 +118,11 @@ func PluginLaunchCoverage(connector string, argv []string, env map[string]string
 		if !envKnown {
 			return "launch_environment_unverified"
 		}
-		if env["KIRO_HOME"] != "" || env["KIRO_AGENT_CONFIG_DIR"] != "" || env["KIRO_TEST_AGENTS_DIR"] != "" {
+		if home := env["KIRO_HOME"]; home != "" &&
+			(accountHome == "" || !sameLaunchPath(home, filepath.Join(accountHome, ".kiro"))) {
+			return "kiro_hook_config_relocated"
+		}
+		if env["KIRO_AGENT_CONFIG_DIR"] != "" || env["KIRO_TEST_AGENTS_DIR"] != "" {
 			return "kiro_hook_config_relocated"
 		}
 	}
