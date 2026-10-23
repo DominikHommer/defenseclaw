@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -4844,7 +4845,7 @@ func copilotUnexpectedEventOwnsHook(raw interface{}, hookScript string) bool {
 		return copilotCommandContainsScript(raw, hookScript)
 	}
 	adapter := strings.ToLower(strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(hookScript), "& '"), "'"))
-	return copilotPowerShellCommandContainsAdapter(raw, adapter)
+	return copilotPowerShellCommandClaimsHandler(raw, adapter)
 }
 
 // copilotCommandContainsScript matches the POSIX doctor's command-key search.
@@ -4877,21 +4878,32 @@ func copilotCommandContainsScript(raw interface{}, hookScript string) bool {
 	return false
 }
 
-func copilotPowerShellCommandContainsAdapter(raw interface{}, adapter string) bool {
+// Match the Windows doctor's adapter binding and legacy launcher forms on
+// unexpected events. These handlers must be claimed by Setup and teardown
+// even when an older install used a different data directory or binary.
+var copilotPowerShellAdapterBinding = regexp.MustCompile(`(?i)^& '((?:[^']|'')+copilot-hook\.ps1)' -Event '([^']+)'$`)
+
+func copilotPowerShellCommandClaimsHandler(raw interface{}, adapter string) bool {
 	switch value := raw.(type) {
 	case []interface{}:
 		for _, item := range value {
-			if copilotPowerShellCommandContainsAdapter(item, adapter) {
+			if copilotPowerShellCommandClaimsHandler(item, adapter) {
 				return true
 			}
 		}
 	case map[string]interface{}:
 		for key, item := range value {
 			if key == "powershell" {
-				if command, ok := item.(string); ok && strings.Contains(strings.ToLower(command), adapter) {
-					return true
+				if command, ok := item.(string); ok {
+					lowered := strings.ToLower(command)
+					if strings.Contains(lowered, adapter) || copilotPowerShellAdapterBinding.MatchString(strings.TrimSpace(command)) ||
+						((strings.Contains(lowered, "hook --connector copilot") || strings.Contains(lowered, "'hook','--connector','copilot'")) &&
+							(strings.Contains(lowered, "defenseclaw-hook") || strings.Contains(lowered, "$hookprocess") || strings.HasPrefix(lowered, "& "))) {
+						return true
+					}
 				}
-			} else if copilotPowerShellCommandContainsAdapter(item, adapter) {
+			}
+			if copilotPowerShellCommandClaimsHandler(item, adapter) {
 				return true
 			}
 		}

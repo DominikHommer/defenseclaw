@@ -533,6 +533,42 @@ def test_windows_copilot_doctor_rejects_wrapped_adapter_on_unexpected_event(tmp_
     assert "unexpected Copilot event" in check.detail
 
 
+@pytest.mark.parametrize("entry_shape", ["list", "mapping", "nested", "nested-powershell"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        r"& 'C:\Old\hooks\copilot-hook.ps1' -Event 'myEvent'",
+        r"& 'C:\Old\DefenseClaw\defenseclaw-hook.exe' hook --connector copilot",
+        r"Start-Process -FilePath 'C:\Old\DefenseClaw\defenseclaw-hook.exe' -ArgumentList 'hook --connector copilot' -Wait",
+        r"Start-Process -FilePath 'C:\Old\DefenseClaw\defenseclaw-hook.exe' -ArgumentList 'hook','--connector','copilot' -Wait",
+    ],
+    ids=["old-adapter", "old-direct", "old-process", "old-argv"],
+)
+def test_windows_copilot_doctor_rejects_legacy_handlers_until_setup(
+    tmp_path: Path, entry_shape: str, command: str
+) -> None:
+    install, data, config = _fixture(tmp_path)
+    document = json.loads(config.read_text(encoding="utf-8"))
+    handler = {"type": "command", "powershell": command, "timeoutSec": 30}
+    document["hooks"]["extraEvent"] = {
+        "list": [handler],
+        "mapping": handler,
+        "nested": {"handlers": [handler]},
+        "nested-powershell": {"powershell": {"handlers": [handler]}},
+    }[entry_shape]
+    config.write_text(json.dumps(document), encoding="utf-8")
+
+    check = _validate(install, data, config)
+
+    assert check.state == "stale", check
+    assert "extraEvent" in check.detail or "legacy" in check.detail
+
+    # Go Setup removes the owned unexpected-event handler in each shape.
+    document["hooks"].pop("extraEvent")
+    config.write_text(json.dumps(document), encoding="utf-8")
+    assert _validate(install, data, config).state == "healthy"
+
+
 def test_windows_copilot_doctor_accepts_cleaned_data_dir(tmp_path: Path) -> None:
     install, data, config = _fixture(tmp_path)
     (data / "detour").mkdir()
