@@ -35,6 +35,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 from defenseclaw import hook_integrity
 from defenseclaw.hook_integrity import hook_command_problems, hook_registration_problems
 
@@ -57,6 +58,23 @@ _REMOVABLE = ["claudecode", "codex", "copilot", "hermes"]
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX hook layouts")
 
 
+def approve_hermes_hooks(config: Path) -> None:
+    """Approve every hook of the Hermes *config* in its shell-hooks-allowlist.json, as Setup does.
+
+    Hermes skips a shell hook it has not approved (rel-1-0-4 GAP-0339).
+    """
+
+    hooks = (yaml.safe_load(config.read_text(encoding="utf-8")) or {}).get("hooks") or {}
+    approvals = [
+        {"event": event, "command": entry["command"].strip(), "defenseclaw_managed": True}
+        for event, entries in hooks.items()
+        for entry in entries or ()
+        if isinstance(entry, dict) and isinstance(entry.get("command"), str)
+    ]
+    allowlist = config.parent / hook_integrity.HERMES_ALLOWLIST_FILE
+    allowlist.write_text(json.dumps({"approvals": approvals}), encoding="utf-8")
+
+
 def _install(tmp_path: Path, connector: str, document: str, *, data_dir: Path | None = None, extra: list[Path] = ()):
     home = tmp_path / "home"
     data_dir = data_dir or home / ".defenseclaw"
@@ -64,6 +82,8 @@ def _install(tmp_path: Path, connector: str, document: str, *, data_dir: Path | 
     config = home / _LAYOUTS[connector]["file"]
     config.parent.mkdir(parents=True, exist_ok=True)
     config.write_text(document.replace("{data_dir}", str(data_dir)).replace("{home}", str(home)), encoding="utf-8")
+    if connector == "hermes":
+        approve_hermes_hooks(config)
     paths = [str(config), *map(str, extra)]
     lock = {"version": 2, "connectors": {connector: {"locations": {"hook_config_paths": paths}}}}
     (data_dir / "hook_contract_lock.json").write_text(json.dumps(lock), encoding="utf-8")
