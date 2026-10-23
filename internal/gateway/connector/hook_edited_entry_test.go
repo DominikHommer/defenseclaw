@@ -1075,3 +1075,70 @@ func TestCopilotUnexpectedHandlerSetupAndTeardownAgree(t *testing.T) {
 		}
 	}
 }
+
+func TestCopilotWindowsUnexpectedLegacyHandlersConverge(t *testing.T) {
+	commands := map[string]string{
+		"old-adapter": `& 'C:\Old\hooks\copilot-hook.ps1' -Event 'myEvent'`,
+		"old-direct":  `& 'C:\Old\DefenseClaw\defenseclaw-hook.exe' hook --connector copilot`,
+		"old-process": `Start-Process -FilePath 'C:\Old\DefenseClaw\defenseclaw-hook.exe' -ArgumentList 'hook --connector copilot' -Wait`,
+		"old-argv":    `Start-Process -FilePath 'C:\Old\DefenseClaw\defenseclaw-hook.exe' -ArgumentList 'hook','--connector','copilot' -Wait`,
+	}
+	for name, command := range commands {
+		for _, shape := range []string{"list", "mapping", "nested", "nested-powershell"} {
+			t.Run(name+"/"+shape, func(t *testing.T) {
+				root := t.TempDir()
+				path := filepath.Join(root, "defenseclaw.json")
+				script := windowsCopilotPowerShellAdapterCommand(filepath.Join(root, "hooks", "copilot-hook.sh"))
+				operator := map[string]interface{}{"type": "command", "powershell": "Write-Output operator"}
+				inject := func() {
+					t.Helper()
+					if err := patchCopilotHooksForOS(path, script, copilotCurrentHookEvents, "windows"); err != nil {
+						t.Fatal(err)
+					}
+					cfg := decodeHookFileForTest(t, path)
+					hooks := cfg["hooks"].(map[string]interface{})
+					owned := map[string]interface{}{"type": "command", "powershell": command}
+					switch shape {
+					case "list":
+						hooks["extraEvent"] = []interface{}{owned, operator}
+					case "mapping":
+						hooks["extraEvent"] = owned
+					case "nested":
+						hooks["extraEvent"] = map[string]interface{}{"handlers": []interface{}{owned}}
+					case "nested-powershell":
+						hooks["extraEvent"] = map[string]interface{}{"powershell": map[string]interface{}{"handlers": []interface{}{owned}}}
+					}
+					hooks["operatorEvent"] = []interface{}{operator}
+					if err := writeJSONObject(path, cfg); err != nil {
+						t.Fatal(err)
+					}
+				}
+				inject()
+				if !copilotUnexpectedEventOwnsHook(decodeHookFileForTest(t, path)["hooks"].(map[string]interface{})["extraEvent"], script) {
+					t.Fatal("Doctor's stale PowerShell handler is not claimed by Setup")
+				}
+				if err := patchCopilotHooksForOS(path, script, copilotCurrentHookEvents, "windows"); err != nil {
+					t.Fatal(err)
+				}
+				got := decodeHookFileForTest(t, path)["hooks"].(map[string]interface{})
+				if copilotUnexpectedEventOwnsHook(got["extraEvent"], script) || !sameHookJSON(got["operatorEvent"], []interface{}{operator}) {
+					t.Fatalf("Setup did not repair the stale handler and keep the operator: %v", got)
+				}
+				if shape == "list" && !sameHookJSON(got["extraEvent"], []interface{}{operator}) {
+					t.Fatalf("Setup removed the neighboring operator handler: %v", got)
+				}
+				inject()
+				if err := removeCopilotHookReferencesProfile(path, false, script); err != nil {
+					t.Fatal(err)
+				}
+				got = decodeHookFileForTest(t, path)["hooks"].(map[string]interface{})
+				if copilotUnexpectedEventOwnsHook(got["extraEvent"], script) || !sameHookJSON(got["operatorEvent"], []interface{}{operator}) {
+					t.Fatalf("teardown left the stale handler or changed the operator: %v", got)
+				}
+				if shape == "list" && !sameHookJSON(got["extraEvent"], []interface{}{operator}) {
+					t.Fatalf("teardown removed the neighboring operator handler: %v", got)
+				}
+			})
+		}
+	}
+}
