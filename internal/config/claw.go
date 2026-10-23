@@ -136,7 +136,8 @@ func readOpenclawConfig(configFile string) (*openclawConfig, error) {
 }
 
 // activeConnector returns the resolved connector name for this config.
-// Precedence: explicit guardrail.connector → configured claw.mode → roster.
+// Precedence: explicit guardrail.connector → roster (favoring claw.mode when
+// present) → claw.mode without a roster.
 // An unconfigured install has no active connector.
 //
 // This is the single decision point for "which agent framework is this
@@ -197,18 +198,17 @@ func (c *Config) rosterConnectorNames() []string {
 	return names
 }
 
-// HasConnectorConfigured reports whether this config explicitly selects at
-// least one connector — i.e. the operator has actually run setup. It is the
-// Go mirror of Python's Config.has_connector_configured() (mcp.md M1, the
-// phantom-openclaw root) and lets callers distinguish a genuinely
-// unconfigured install from an explicit openclaw one.
+// HasConnectorConfigured reports whether this config selects at least one
+// connector. It is the Go mirror of Python's Config.has_connector_configured()
+// (mcp.md M1, the phantom-openclaw root) and distinguishes an unconfigured
+// install from a configured connector or a legacy remote OpenClaw fleet.
 //
 // Both connector resolvers use this helper so a zero-config install selects
 // neither an agent nor its on-disk paths.
 //
-// A claw.mode that only implies OpenClaw, loaded where no OpenClaw is
-// installed (openClawNotInstalled), counts as unconfigured, as
-// init --connector none does.
+// A claw.mode that only implies OpenClaw, loaded with a loopback gateway
+// and no local OpenClaw (openClawNotInstalled), counts as unconfigured, as
+// init --connector none does. A remote fleet host keeps the legacy connector.
 func (c *Config) HasConnectorConfigured() bool {
 	if c == nil {
 		return false

@@ -80,7 +80,7 @@ from defenseclaw.file_permissions import (
     dotenv_key_is_valid,
     read_regular_file_no_follow,
 )
-from defenseclaw.openclaw_presence import openclaw_installed, openclaw_only_implied
+from defenseclaw.openclaw_presence import _is_loopback_gateway_host, openclaw_installed, openclaw_only_implied
 
 # libyaml parses a 150 KB policy config in tens of milliseconds where the
 # pure-Python SafeLoader takes 2 s, and every command parses config.yaml more
@@ -4105,20 +4105,19 @@ class Config:
         return self.observability.effective_webhooks(connector, self.webhooks)
 
     def has_connector_configured(self) -> bool:
-        """Return True when the operator has explicitly configured a connector.
+        """Return True when the config selects a connector.
 
         Distinguishes a genuinely unconfigured install — every connector
         marker empty, e.g. after ``setup remove`` clears the last one
-        (which persists ``claw.mode: ''``) — from a real single-connector
-        openclaw install, which pins ``claw.mode``/``guardrail.connector``
-        to ``openclaw`` (see ``cmd_setup``). :meth:`active_connectors` and
-        the shared list/scan resolver use this to avoid fabricating a
-        phantom ``openclaw`` when nothing is set up.
+        (which persists ``claw.mode: ''``) — from a single-connector
+        OpenClaw install or a legacy remote OpenClaw fleet. The shared
+        list/scan resolver uses this to avoid fabricating a phantom agent
+        when nothing is set up.
 
         A *missing* config file or claw block loads ``claw.mode`` as the
-        ``"openclaw"`` default (``config.load``). That reports True only
-        where OpenClaw is installed: a claw.mode that only implies an
-        OpenClaw the machine does not have configures nothing (GAP-0568,
+        ``"openclaw"`` default (``config.load``). With a loopback gateway,
+        that reports True only where OpenClaw is installed. A remote fleet
+        host also keeps the legacy connector (GAP-0568,
         :func:`_mark_openclaw_not_installed`).
         """
         if any(name.strip() for name in self.guardrail.connectors) or self.guardrail.connector.strip():
@@ -6326,14 +6325,14 @@ def _mark_openclaw_not_installed(cfg: Config) -> None:
     """Record that a claw.mode which only implies OpenClaw has no OpenClaw behind it.
 
     A config.yaml without a claw block loads ``claw.mode: openclaw``, and init
-    wrote that default before 1.0.4. On a machine without OpenClaw
-    :meth:`Config.has_connector_configured` then reports no connector, so
-    status and the TUI name none (GAP-0568). Mirrors the Go loader, which
+    wrote that default before 1.0.4. With a loopback gateway and no local
+    OpenClaw, :meth:`Config.has_connector_configured` reports no connector,
+    so status and the TUI name none (GAP-0568). Mirrors the Go loader, which
     leaves a managed enterprise service as it was.
     """
     if _is_managed_enterprise_mode(cfg.deployment_mode):
         return
-    if openclaw_only_implied(cfg) and not openclaw_installed(cfg):
+    if openclaw_only_implied(cfg) and _is_loopback_gateway_host(cfg.gateway.host) and not openclaw_installed(cfg):
         object.__setattr__(cfg, "_openclaw_not_installed", True)
 
 
