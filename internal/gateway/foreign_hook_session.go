@@ -169,19 +169,26 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		unlock()
 		a.auditForeignHookSessionDenial(r.Context(), connector, exchange, decision, revocation)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(decision)
+		if err := json.NewEncoder(w).Encode(decision); err == nil {
+			noteForeignHookSessionDecision(r.Context())
+		}
 		return
 	}
-	if refusal := writeFencedForeignHookAllow(w, decision, answerBy); refusal != "" {
+	refusal, delivered := writeFencedForeignHookAllow(w, decision, answerBy)
+	if refusal != "" {
 		release()
 		unlock()
 		writeManagedHookRefusal(w, http.StatusServiceUnavailable, refusal)
 		return
 	}
+	if !delivered {
+		return
+	}
+	noteForeignHookSessionDecision(r.Context())
 	if publishErr == nil && !recordKey.IsZero() && places.recordRoot != "" {
 		// Answered allow with the account's key: the proof is renewed while
 		// the session stays allowed (foreign_hook_session_proof.go).
-		a.keepForeignHookSessionProof(identity, exchange.Key)
+		a.keepForeignHookSessionProof(r.Context(), identity, exchange.Key)
 	}
 }
 
@@ -210,38 +217,40 @@ var (
 // connection within foreignHookFencedWriteTimeout, and never past answerBy.
 // It returns a refusal reason, having written nothing, when the connection
 // cannot bound the write or answerBy has passed: the caller then refuses the
-// call instead of answering an allow that a removal no longer waits for. A
-// write cut at the deadline leaves the expired deadline in place, so the
-// server's own finishing writes fail at once too.
-func writeFencedForeignHookAllow(w http.ResponseWriter, decision enterprisepolicy.GuardDecision, answerBy time.Time) string {
+// call instead of answering an allow that a removal no longer waits for.
+// delivered is false if a started write or flush failed, so no such response
+// counts as an answered exchange or keeps an outage proof. A write cut at
+// the deadline leaves the expired deadline in place, so the server's own
+// finishing writes fail at once too.
+func writeFencedForeignHookAllow(w http.ResponseWriter, decision enterprisepolicy.GuardDecision, answerBy time.Time) (refusal string, delivered bool) {
 	var body bytes.Buffer
 	if err := json.NewEncoder(&body).Encode(decision); err != nil {
-		return "foreign_hook_response_unbounded"
+		return "foreign_hook_response_unbounded", false
 	}
 	deadline := time.Now().Add(foreignHookFencedWriteTimeout)
 	if answerBy.Before(deadline) {
 		deadline = answerBy
 	}
 	if !time.Now().Before(deadline) {
-		return "foreign_hook_removal_fence_expired"
+		return "foreign_hook_removal_fence_expired", false
 	}
 	controller := http.NewResponseController(w)
 	if err := controller.SetWriteDeadline(deadline); err != nil {
-		return "foreign_hook_response_unbounded"
+		return "foreign_hook_response_unbounded", false
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Length", strconv.Itoa(body.Len()))
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write(body.Bytes()); err != nil {
-		return ""
+		return "", false
 	}
 	if err := controller.Flush(); err != nil {
-		return ""
+		return "", false
 	}
 	// A keep-alive connection serves the caller's next request: clear the
 	// deadline only after the whole allow has reached it.
 	_ = controller.SetWriteDeadline(time.Time{})
-	return ""
+	return "", true
 }
 
 // foreignHookSessionRootForDataDir is the folder of the protected session

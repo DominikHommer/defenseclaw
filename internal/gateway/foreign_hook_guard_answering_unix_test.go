@@ -232,3 +232,92 @@ func TestForeignHookSessionProofIsNotRenewedAfterAnExchangeWentUnanswered(t *tes
 		})
 	}
 }
+
+// A refusal and a decision for another session cannot answer the guarded
+// session whose call the gateway dropped. The account's missed-call mark
+// applies to each proof until that session itself gets a timely decision.
+func TestForeignHookSessionProofNeedsItsOwnDecidedAnswerAfterAMissedCall(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		try  func(*testing.T, *foreignHookPublishTestServer)
+	}{
+		{name: "invalid update", try: func(t *testing.T, server *foreignHookPublishTestServer) {
+			code, _ := server.exchange(server.aliceToken, map[string]any{"key": "invalid"})
+			if code != http.StatusBadRequest {
+				t.Fatalf("invalid update: status %d, want 400", code)
+			}
+		}},
+		{name: "scope mismatch", try: func(t *testing.T, server *foreignHookPublishTestServer) {
+			update := foreignHookTestCall("s-1", runtime.GOOS+":b:1:500", false)
+			update["key"].(map[string]any)["connector"] = "codex"
+			code, _ := server.exchange(server.aliceToken, update)
+			if code != http.StatusForbidden {
+				t.Fatalf("scope mismatch: status %d, want 403", code)
+			}
+		}},
+		{name: "rate limit refusal", try: func(t *testing.T, server *foreignHookPublishTestServer) {
+			server.api.hookCallerLimits.inFlight = 1
+			release, _, refusal, _ := server.api.hookCallerLimits.acquire(server.alice)
+			if refusal != "" {
+				t.Fatalf("holding alice's request budget: %s", refusal)
+			}
+			defer release()
+			code, _ := server.exchange(server.aliceToken, foreignHookTestCall("s-1", runtime.GOOS+":b:1:500", false))
+			if code != http.StatusTooManyRequests {
+				t.Fatalf("rate limit refusal: status %d, want 429", code)
+			}
+		}},
+		{name: "another session is allowed", try: func(t *testing.T, server *foreignHookPublishTestServer) {
+			if got := server.call(server.aliceToken, foreignHookTestCall("s-2", runtime.GOOS+":b:2:600", true)); got.Deny {
+				t.Fatalf("s-2's decision: %+v", got)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newForeignHookRealPublishTestServer(t)
+			server.api.hookCallerLimits.running = 1
+			previousWithin, previousHold := foreignHookAnswerWithin, foreignHookExchangeHold
+			foreignHookAnswerWithin, foreignHookExchangeHold = foreignHookTestAnswerWithin, 2*foreignHookTestAnswerWithin
+			t.Cleanup(func() { foreignHookAnswerWithin, foreignHookExchangeHold = previousWithin, previousHold })
+			writes := countForeignHookAllowWrites(t)
+			key := enterprisepolicy.SessionKey{Connector: "claudecode", Session: "s-1", Process: runtime.GOOS + ":b:1:500"}
+			if got := server.call(server.aliceToken, foreignHookTestCall(key.Session, key.Process, true)); got.Deny {
+				t.Fatalf("s-1's clean start: %+v", got)
+			}
+
+			release, run, refusal, _ := server.api.hookCallerLimits.acquire(server.alice)
+			if refusal != "" {
+				t.Fatalf("holding alice's run slot: %s", refusal)
+			}
+			run <- struct{}{}
+			ctx, cancel := context.WithTimeout(context.Background(), foreignHookAnswerWithin)
+			defer cancel()
+			if _, body := server.exchangeCtx(ctx, server.aliceToken, foreignHookTestCall(key.Session, key.Process, false)); len(body) != 0 {
+				t.Fatalf("dropped s-1 exchange was answered: %s", body)
+			}
+			<-run
+			release()
+
+			tc.try(t, server)
+			s1 := writes.ofSession(server.alice, key)
+			for range 3 {
+				server.api.renewForeignHookSessionProofsOnce()
+			}
+			if got := writes.ofSession(server.alice, key); got != s1 {
+				t.Fatalf("s-1 renewed after %s: %d writes, want %d", tc.name, got, s1)
+			}
+			if err := foreignHookOutageAfter(server, server.alice, key, foreignHookProofExpired); !errors.Is(err, enterprisepolicy.ErrPublishedSessionUnavailable) {
+				t.Fatalf("s-1 at 92 seconds: %v, want ErrPublishedSessionUnavailable", err)
+			}
+
+			if got := server.call(server.aliceToken, foreignHookTestCall(key.Session, key.Process, false)); got.Deny {
+				t.Fatalf("s-1's next decision: %+v", got)
+			}
+			answered := writes.ofSession(server.alice, key)
+			server.api.renewForeignHookSessionProofsOnce()
+			if got := writes.ofSession(server.alice, key); got != answered+1 {
+				t.Fatalf("s-1 did not resume after its own decision: %d writes, want %d", got, answered+1)
+			}
+		})
+	}
+}

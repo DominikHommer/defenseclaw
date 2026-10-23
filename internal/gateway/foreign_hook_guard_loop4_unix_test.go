@@ -54,19 +54,21 @@ func foreignHookOutageAfter(server *foreignHookPublishTestServer, identity strin
 type foreignHookAllowWrites struct {
 	mu          sync.Mutex
 	allows      map[string]int
+	sessions    map[string]int
 	refuseDeny  bool
 	refuseAllow bool
 }
 
 func countForeignHookAllowWrites(t *testing.T) *foreignHookAllowWrites {
 	t.Helper()
-	writes := &foreignHookAllowWrites{allows: map[string]int{}}
+	writes := &foreignHookAllowWrites{allows: map[string]int{}, sessions: map[string]int{}}
 	previous := foreignHookSessionPublish
 	foreignHookSessionPublish = func(root, identity string, key enterprisepolicy.SessionKey, decision enterprisepolicy.GuardDecision, recordKey enterprisepolicy.SessionRecordKey, now time.Time) error {
 		writes.mu.Lock()
 		refuse := (decision.Deny && writes.refuseDeny) || (!decision.Deny && writes.refuseAllow)
 		if !decision.Deny {
 			writes.allows[identity]++
+			writes.sessions[foreignHookSessionProofID(identity, key)]++
 		}
 		writes.mu.Unlock()
 		if refuse {
@@ -82,6 +84,12 @@ func (w *foreignHookAllowWrites) of(identity string) int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.allows[identity]
+}
+
+func (w *foreignHookAllowWrites) ofSession(identity string, key enterprisepolicy.SessionKey) int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.sessions[foreignHookSessionProofID(identity, key)]
 }
 
 func (w *foreignHookAllowWrites) refuse(deny, allow bool) {

@@ -43,9 +43,9 @@ import (
 //     within foreignHookAnswerWithin. Every exchange is timed from its
 //     arrival at the listener (answerForeignHooks): an account with one
 //     waiting longer than that, or with one that went unanswered (answered
-//     late, or its hook gave up first, also while it waited for the
-//     caller's run slot), has its proofs renewed again only once a later
-//     exchange of it is answered in time. A gateway that stops, crashes,
+//     late, refused, or its hook gave up first, also while it waited for the
+//     caller's run slot), has each proof renewed again only once that
+//     session has a later, in-time guard decision. A gateway that stops, crashes,
 //     hangs, is wedged or has run out of connections therefore renews
 //     nothing, whether or not its process still runs.
 //
@@ -79,14 +79,17 @@ type foreignHookServing struct {
 	pending   map[uint64]*foreignHookExchangeTiming
 	// unanswered is, per account, when an exchange of it last went
 	// unanswered ("" for one that ended late before its account was known).
+	// It is an epoch: each session needs its own later decided answer.
 	unanswered map[string]time.Time
 }
 
 // foreignHookExchangeTiming is one session exchange from its arrival at the
 // listener: the account it came from, once known.
 type foreignHookExchangeTiming struct {
-	arrived  time.Time
-	identity string
+	arrived       time.Time
+	identity      string
+	answer        *foreignHookAnswerWriter
+	decidedInTime bool // handleForeignHookSession completed a 200 guard decision in time
 }
 
 type foreignHookExchangeTimingContextKey struct{}
@@ -102,10 +105,9 @@ func (a *APIServer) serveForeignHooks(ln net.Listener) {
 
 // answerForeignHooks times every session exchange next serves from the
 // moment it arrives, before admission, authentication and the body: one
-// whose answer was not written within foreignHookAnswerWithin of its
-// arrival, while its hook still waited, went unanswered, and its account's
-// proofs are renewed again only once a later exchange of the account is
-// answered in time (foreignHookAccountAnswered).
+// whose 200 guard decision was not written within foreignHookAnswerWithin
+// of its arrival, while its hook still waited, went unanswered. Each
+// session's proof is renewed again only after its own later decided answer.
 func (a *APIServer) answerForeignHooks(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, enterprisepolicy.ForeignHookSessionPathPrefix) {
@@ -123,20 +125,15 @@ func (a *APIServer) answerForeignHooks(next http.Handler) http.Handler {
 		s.pending[id] = timing
 		s.mu.Unlock()
 		answer := &foreignHookAnswerWriter{ResponseWriter: w, ctx: r.Context(), within: timing.arrived.Add(foreignHookAnswerWithin)}
+		timing.answer = answer
 		defer func() {
 			late := time.Since(timing.arrived) > foreignHookAnswerWithin
 			s.mu.Lock()
 			defer s.mu.Unlock()
 			delete(s.pending, id)
 			switch {
-			case answer.inTime:
-				// It clears what went unanswered before it arrived, for its
-				// account and before any account was known.
-				for _, identity := range []string{timing.identity, ""} {
-					if at, ok := s.unanswered[identity]; ok && timing.arrived.After(at) {
-						delete(s.unanswered, identity)
-					}
-				}
+			case timing.decidedInTime:
+				// A decision for one session never clears another session's miss.
 			case timing.identity != "" || late:
 				if s.unanswered == nil {
 					s.unanswered = map[string]time.Time{}
@@ -158,28 +155,50 @@ type foreignHookAnswerWriter struct {
 	within  time.Time
 	written bool
 	inTime  bool
+	code    int
 }
 
-func (w *foreignHookAnswerWriter) answer() {
+func (w *foreignHookAnswerWriter) answer(code int) {
 	if !w.written {
 		w.written = true
+		w.code = code
 		w.inTime = w.ctx.Err() == nil && !time.Now().After(w.within)
 	}
 }
 
 func (w *foreignHookAnswerWriter) WriteHeader(code int) {
-	w.answer()
+	w.answer(code)
 	w.ResponseWriter.WriteHeader(code)
 }
 
 func (w *foreignHookAnswerWriter) Write(data []byte) (int, error) {
-	w.answer()
+	w.answer(http.StatusOK)
 	return w.ResponseWriter.Write(data)
 }
 
 // Unwrap lets http.ResponseController reach the connection (the fenced
 // allow bounds and flushes its write).
 func (w *foreignHookAnswerWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// noteForeignHookSessionDecision is called only after the handler wrote a
+// complete 200 guard decision. Refusals and middleware answers do not count.
+func noteForeignHookSessionDecision(ctx context.Context) {
+	if timing, ok := ctx.Value(foreignHookExchangeTimingContextKey{}).(*foreignHookExchangeTiming); ok {
+		answer := timing.answer
+		timing.decidedInTime = answer != nil && answer.inTime && answer.code == http.StatusOK &&
+			ctx.Err() == nil && !time.Now().After(answer.within)
+	}
+}
+
+// foreignHookDecidedInTime returns the arrival of this session's own
+// decided exchange, or zero if it was late, refused or not fully written.
+func foreignHookDecidedInTime(ctx context.Context) time.Time {
+	timing, ok := ctx.Value(foreignHookExchangeTimingContextKey{}).(*foreignHookExchangeTiming)
+	if !ok || !timing.decidedInTime {
+		return time.Time{}
+	}
+	return timing.arrived
+}
 
 // noteForeignHookExchangeAccount names the account of the session exchange
 // on ctx, if any, as soon as the caller is verified.
@@ -196,21 +215,17 @@ func (a *APIServer) noteForeignHookExchangeAccount(ctx context.Context, identity
 
 // foreignHookGatewayAnswering is nil only while this gateway answers the
 // hooks: it serves at least one listener, no exchange whose account is not
-// known yet has waited longer than foreignHookAnswerWithin or went
-// unanswered since the last answered in time, and every listener answers
-// /health within it.
+// known yet has waited longer than foreignHookAnswerWithin, and every
+// listener answers /health within it. Completed misses are checked for
+// each session by foreignHookAccountAnswered.
 func (a *APIServer) foreignHookGatewayAnswering() error {
 	s := &a.foreignHookServing
 	s.mu.Lock()
 	listeners := append([]net.Addr(nil), s.listeners...)
 	waited := s.waitedLongest("")
-	_, unanswered := s.unanswered[""]
 	s.mu.Unlock()
 	if len(listeners) == 0 {
 		return errors.New("no listener serves the hooks")
-	}
-	if unanswered {
-		return errors.New("an exchange went unanswered before its account was known")
 	}
 	if waited > foreignHookAnswerWithin {
 		return fmt.Errorf("an exchange has waited %s for its answer", waited.Round(time.Second))
@@ -226,18 +241,19 @@ func (a *APIServer) foreignHookGatewayAnswering() error {
 	return nil
 }
 
-// foreignHookAccountAnswered is nil only while the gateway answers
-// identity's hooks: no exchange of the account has waited longer than
-// foreignHookAnswerWithin, and none went unanswered since the last one
-// answered in time.
-func (a *APIServer) foreignHookAccountAnswered(identity string) error {
+// foreignHookAccountAnswered is nil only while the gateway answers the
+// account's hooks and this session itself has a timely decision after the
+// account's (or unknown account's) latest unanswered exchange.
+func (a *APIServer) foreignHookAccountAnswered(proof foreignHookSessionProof) error {
 	s := &a.foreignHookServing
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.unanswered[identity]; ok {
-		return errors.New("an exchange of the account went unanswered since its last answer in time")
+	for _, identity := range []string{"", proof.identity} {
+		if at, ok := s.unanswered[identity]; ok && !proof.lastDecided.After(at) {
+			return errors.New("the session has no in-time guard decision after an exchange went unanswered")
+		}
 	}
-	if waited := s.waitedLongest(identity); waited > foreignHookAnswerWithin {
+	if waited := s.waitedLongest(proof.identity); waited > foreignHookAnswerWithin {
 		return fmt.Errorf("an exchange of the account has waited %s for its answer", waited.Round(time.Second))
 	}
 	return nil
@@ -284,9 +300,10 @@ func probeForeignHookListener(ctx context.Context, addr net.Addr) error {
 // foreignHookSessionProof is one session whose proof this gateway renews:
 // the account, the session key and when an exchange last allowed it.
 type foreignHookSessionProof struct {
-	identity string
-	key      enterprisepolicy.SessionKey
-	seen     time.Time
+	identity    string
+	key         enterprisepolicy.SessionKey
+	seen        time.Time
+	lastDecided time.Time
 }
 
 // foreignHookSessionProofs are the proofs this gateway process renews.
@@ -301,14 +318,14 @@ func foreignHookSessionProofID(identity string, key enterprisepolicy.SessionKey)
 
 // keepForeignHookSessionProof renews the proof of key from now on (the
 // caller answered it allow with the account's key).
-func (a *APIServer) keepForeignHookSessionProof(identity string, key enterprisepolicy.SessionKey) {
+func (a *APIServer) keepForeignHookSessionProof(ctx context.Context, identity string, key enterprisepolicy.SessionKey) {
 	p := &a.foreignHookProofs
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.proofs == nil {
 		p.proofs = map[string]foreignHookSessionProof{}
 	}
-	p.proofs[foreignHookSessionProofID(identity, key)] = foreignHookSessionProof{identity: identity, key: key, seen: time.Now()}
+	p.proofs[foreignHookSessionProofID(identity, key)] = foreignHookSessionProof{identity: identity, key: key, seen: time.Now(), lastDecided: foreignHookDecidedInTime(ctx)}
 }
 
 // dropForeignHookSessionProof stops renewing every proof of identity's
@@ -330,7 +347,7 @@ func (a *APIServer) dropForeignHookSessionProof(identity string, key enterprisep
 
 // foreignHookSessionProofKept reports a proof still renewed, and forgets
 // one whose agent made no exchange for foreignHookSessionProofIdle.
-func (a *APIServer) foreignHookSessionProofKept(proof foreignHookSessionProof) bool {
+func (a *APIServer) foreignHookSessionProofKept(proof foreignHookSessionProof) (foreignHookSessionProof, bool) {
 	p := &a.foreignHookProofs
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -338,9 +355,9 @@ func (a *APIServer) foreignHookSessionProofKept(proof foreignHookSessionProof) b
 	current, ok := p.proofs[id]
 	if ok && time.Since(current.seen) > foreignHookSessionProofIdle {
 		delete(p.proofs, id)
-		return false
+		return foreignHookSessionProof{}, false
 	}
-	return ok
+	return current, ok
 }
 
 // foreignHookSessionProofList is every proof renewed now.
@@ -397,7 +414,7 @@ func (a *APIServer) renewForeignHookSessionProofsOnce() {
 		return
 	}
 	for _, proof := range proofs {
-		if err := a.foreignHookAccountAnswered(proof.identity); err != nil {
+		if err := a.foreignHookAccountAnswered(proof); err != nil {
 			fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: the gateway did not answer a hook of the account, so the outage proof of a %s session was not renewed and ends within %s: %v\n",
 				clipForeignHookAuditField(proof.key.Connector, 64), enterprisepolicy.PublishedSessionProofLifetime, err)
 			continue
@@ -425,9 +442,11 @@ func (a *APIServer) renewForeignHookSessionProof(places foreignHookSessionPlaces
 	stateDir := enterprisepolicy.ForeignHookSessionStoreDir(places.dataDir, proof.identity)
 	unlock := a.foreignHookSessionLocks.lock(stateDir)
 	defer unlock()
-	if !a.foreignHookSessionProofKept(proof) {
+	current, kept := a.foreignHookSessionProofKept(proof)
+	if !kept {
 		return nil
 	}
+	proof = current
 	answerBy := time.Now().Add(foreignHookExchangeHold)
 	ctx, cancel := context.WithTimeout(context.Background(), foreignHookExchangeWait)
 	release, err := foreignHookAccountExchangeLock(ctx, places.dataDir, proof.identity)
@@ -455,6 +474,9 @@ func (a *APIServer) renewForeignHookSessionProof(places foreignHookSessionPlaces
 	}
 	if !time.Now().Before(answerBy) {
 		return errForeignHookExchangeExpired
+	}
+	if err := a.foreignHookAccountAnswered(proof); err != nil {
+		return err
 	}
 	return foreignHookSessionPublish(places.recordRoot, proof.identity, proof.key, enterprisepolicy.GuardDecision{}, recordKey, time.Now())
 }
