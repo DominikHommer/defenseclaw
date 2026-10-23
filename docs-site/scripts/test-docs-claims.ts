@@ -142,6 +142,47 @@ describe('Windows Hermes failure guidance', () => {
   });
 });
 
+describe('Windows enrollment and machine-policy publication', () => {
+  it('qualifies unenrolled-user refusal for Codex and Cursor in the guide and detail', () => {
+    const reconcile = readFileSync(join(repo, 'internal/cli/enterprise_hooks_platform_windows.go'), 'utf8');
+    assert.match(reconcile, /else if len\(desiredCodex\) == 0 \{[\s\S]*?RemoveWindowsCodexMachineRequirements/);
+    assert.match(reconcile, /if cursorActive \|\| len\(desiredCursor\) == 0 \{[\s\S]*?PublishWindowsCursorManagedPolicyTargets\(desiredCursor\)/);
+    const enumerator = readFileSync(join(repo, 'internal/enterprisehooks/enumerator_standalone_windows.go'), 'utf8');
+    assert.match(enumerator, /case "cursor":\s*if !windowsCursorMachinePolicyPublished\(\)/);
+    assert.match(enumerator, /case "codex":\s*if !windowsCodexMachinePolicyPublished\(\)/);
+
+    const enrollment = page('enterprise/configure/enrollment.mdx');
+    assert.match(enrollment.split('## Choose who is enrolled')[0], /Published machine policy.*every user/i);
+    const settings = enrollment.split('## Choose who is enrolled')[1]?.split('### What each OS honors')[0];
+    const windows = enrollment.split('## Windows')[1]?.split('### Group filters on Windows')[0];
+    const newUsers = enrollment.split('## New, changed and removed users')[1]?.split('## Check it worked')[0];
+    for (const [name, section] of [['settings', settings], ['Windows', windows], ['new users', newUsers]] as const) {
+      assert.ok(section, `${name} section not found`);
+      assert.match(section, /Codex and Cursor.*at least one user.*enrolled.*for that agent.*without DefenseClaw hooks/i, name);
+    }
+    assert.doesNotMatch(settings, /unenrolled user always fails closed/i);
+    assert.match(newUsers, /machine-policy agents.*published.*first call/i);
+
+    const reference = page('enterprise/configure/reference.mdx');
+    const unprotected = reference.split('### Agents that cannot be enrolled')[1]?.split('### Agent upgrades')[0];
+    assert.ok(unprotected, 'reference unprotected-agent section not found');
+    assert.match(unprotected, /Codex and Cursor.*at least one user.*enrolled.*for that agent.*without DefenseClaw hooks/i);
+    const surfaces = reference.split('### Desktop apps and editor extensions')[1]?.split('### ', 1)[0];
+    assert.ok(surfaces, 'reference surfaces section not found');
+    assert.match(surfaces, /On Windows, published machine-policy hooks refuse the unenrolled user; Codex and Cursor have no hooks when no user is enrolled/i);
+    const referenceWindows = reference.split('### Windows')[1]?.split('#### Group filters on Windows')[0];
+    assert.ok(referenceWindows, 'reference Windows enrollment section not found');
+    assert.doesNotMatch(referenceWindows, /under `unenrolled_users: deny`/);
+    assert.match(referenceWindows, /Unenrolled users fail closed while policy is published/i);
+    const referenceNewUsers = reference.split('### New, changed and removed users')[1]?.split('### ', 1)[0];
+    assert.ok(referenceNewUsers, 'reference new-user section not found');
+    assert.match(referenceNewUsers, /Codex and Cursor.*at least one user.*enrolled.*for that agent.*without DefenseClaw hooks/i);
+    const policy = reference.split('## Machine policy detail')[1]?.split('### Managed OpenCode plugin')[0];
+    assert.ok(policy, 'reference machine-policy section not found');
+    assert.match(policy, /Codex.*requirements\.toml.*at least one user.*enrolled for Codex.*runs without DefenseClaw hooks/i);
+  });
+});
+
 describe('docs claim CI coverage', () => {
   it('runs when any product source read by these checks changes', () => {
     const testSource = readFileSync(fileURLToPath(import.meta.url), 'utf8');

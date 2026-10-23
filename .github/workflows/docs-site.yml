@@ -13,6 +13,8 @@ on:
       - 'scripts/install.sh'
       - 'cli/defenseclaw/commands/cmd_setup.py'
       - 'internal/gateway/connector/hookexec/managed_hermes.go'
+      - 'internal/cli/enterprise_hooks_platform_windows.go'
+      - 'internal/enterprisehooks/enumerator_standalone_windows.go'
       - '.github/workflows/docs-site.yml'
   pull_request:
     paths:
@@ -25,6 +27,8 @@ on:
       - 'scripts/install.sh'
       - 'cli/defenseclaw/commands/cmd_setup.py'
       - 'internal/gateway/connector/hookexec/managed_hermes.go'
+      - 'internal/cli/enterprise_hooks_platform_windows.go'
+      - 'internal/enterprisehooks/enumerator_standalone_windows.go'
       - '.github/workflows/docs-site.yml'
   workflow_dispatch:
 
