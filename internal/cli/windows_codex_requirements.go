@@ -159,14 +159,22 @@ func resolveWindowsCodexRequirementsLayout(
 		return opts, fmt.Errorf("resolve running gateway path: %w", err)
 	}
 	executable = filepath.Clean(executable)
-	if !strings.EqualFold(filepath.Base(executable), "defenseclaw-gateway.exe") ||
-		!strings.EqualFold(filepath.Base(filepath.Dir(executable)), "bin") {
-		return opts, fmt.Errorf(
-			"Codex requirements command must run from exact installed gateway <InstallRoot>\\bin\\defenseclaw-gateway.exe, got %s",
-			executable,
-		)
+	installRoot := ""
+	if action == "lifecycle-staged-retire" {
+		installRoot, err = resolveWindowsStagedRetireInstallRoot(executable)
+		if err != nil {
+			return opts, err
+		}
+	} else {
+		if !strings.EqualFold(filepath.Base(executable), "defenseclaw-gateway.exe") ||
+			!strings.EqualFold(filepath.Base(filepath.Dir(executable)), "bin") {
+			return opts, fmt.Errorf(
+				"codex requirements command must run from exact installed gateway <InstallRoot>\\bin\\defenseclaw-gateway.exe, got %s",
+				executable,
+			)
+		}
+		installRoot = filepath.Dir(filepath.Dir(executable))
 	}
-	installRoot := filepath.Dir(filepath.Dir(executable))
 
 	runtimeDir, err := exactWindowsCodexLayoutEnv("DEFENSECLAW_HOME")
 	if err != nil {
@@ -214,7 +222,7 @@ func resolveWindowsCodexRequirementsLayout(
 		return opts, err
 	}
 	loadConfig := config.LoadFromFile
-	if action == "lifecycle" || action == "remove" {
+	if action == "lifecycle" || action == "lifecycle-staged-retire" || action == "remove" {
 		// Only the API port is read here, also while a rollback restores
 		// the previous deployment under a new config the services could
 		// not load (GAP-1291).
@@ -223,6 +231,9 @@ func resolveWindowsCodexRequirementsLayout(
 	protectedConfig, err := loadConfig(configPath)
 	if err != nil {
 		return opts, fmt.Errorf("load protected Windows enterprise config: %w", err)
+	}
+	if action == "lifecycle-staged-retire" && protectedConfig.SecureClientIntegration() {
+		return opts, errors.New("staged managed-hook retirement refuses Secure Client integration")
 	}
 	gatewayAddr, err := connector.NormalizeWindowsManagedGatewayAddr(
 		fmt.Sprintf("127.0.0.1:%d", protectedConfig.Gateway.APIPort),
@@ -284,6 +295,71 @@ func resolveWindowsCodexRequirementsLayout(
 		)
 	}
 	return opts, nil
+}
+
+// A committed journal left by an older gateway must be retired with this
+// release's GC before Setup commits. The staged executable is authenticated by
+// Setup's source descriptor; here the protected installed deployment record
+// supplies the layout that an installed gateway would have derived from its
+// own path. This exception is limited to standalone, LocalSystem and retire.
+func resolveWindowsStagedRetireInstallRoot(executable string) (string, error) {
+	if !enterprisehooks.WindowsStandaloneProcess() {
+		return "", errors.New("staged managed-hook retirement requires the standalone profile")
+	}
+	if err := enterpriseHooksNativeMutationIdentityPreflight(); err != nil {
+		return "", fmt.Errorf("staged managed-hook retirement: %w", err)
+	}
+	runtimeDir, err := exactWindowsCodexLayoutEnv("DEFENSECLAW_HOME")
+	if err != nil {
+		return "", err
+	}
+	if !strings.EqualFold(filepath.Base(runtimeDir), "runtime") {
+		return "", errors.New("staged managed-hook retirement requires the exact managed StateRoot\\runtime directory")
+	}
+	stateRoot := filepath.Dir(runtimeDir)
+	metadata, exists, err := readWindowsCodexDeploymentMetadata(filepath.Join(stateRoot, "install", "deployment.json"))
+	if err != nil {
+		return "", err
+	}
+	if !exists {
+		return "", errors.New("staged managed-hook retirement requires protected installed deployment metadata")
+	}
+	roots, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileStandalone)
+	if err != nil {
+		return "", err
+	}
+	programData, err := winpath.TrustedProgramData()
+	if err != nil {
+		return "", err
+	}
+	return validateWindowsStagedRetireGatewayLayout(executable, stateRoot, programData, metadata, roots)
+}
+
+func validateWindowsStagedRetireGatewayLayout(
+	executable, stateRoot, programData string,
+	metadata windowsCodexDeploymentMetadata,
+	roots winpath.EnterpriseRoots,
+) (string, error) {
+	const prefix = "DefenseClaw-Enterprise-Setup-"
+	stageDir := filepath.Dir(executable)
+	stageLeaf := filepath.Base(stageDir)
+	if !strings.EqualFold(filepath.Base(executable), "defenseclaw-gateway.exe") ||
+		!sameWindowsEnterprisePathCLI(filepath.Dir(stageDir), programData) ||
+		!strings.HasPrefix(stageLeaf, prefix) ||
+		len(stageLeaf) != len(prefix)+32 ||
+		strings.Trim(stageLeaf[len(prefix):], "0123456789abcdef") != "" {
+		return "", fmt.Errorf("staged managed-hook retirement requires the exact protected Setup gateway path, got %s", executable)
+	}
+	if metadata.SchemaVersion != 1 ||
+		!managed.IsManagedEnterprise(metadata.DeploymentMode) ||
+		!sameWindowsEnterprisePathCLI(metadata.StateRoot, stateRoot) ||
+		(metadata.Installed != nil && !*metadata.Installed) {
+		return "", errors.New("staged managed-hook retirement requires matching installed deployment metadata")
+	}
+	if err := winpath.ValidateEnterpriseInstallRoot(roots, metadata.InstallRoot); err != nil {
+		return "", err
+	}
+	return filepath.Clean(metadata.InstallRoot), nil
 }
 
 // enableWindowsCodexManifestTargets records in opts each target connector

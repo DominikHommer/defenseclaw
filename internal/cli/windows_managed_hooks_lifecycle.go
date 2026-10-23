@@ -164,6 +164,7 @@ func newWindowsManagedHooksLifecycleCommand() *cobra.Command {
 	} {
 		action := action
 		var jsonOutput bool
+		var stagedRetire bool
 		child := &cobra.Command{
 			Use:          action,
 			Short:        action + " the managed machine-hook lifecycle snapshot",
@@ -171,7 +172,7 @@ func newWindowsManagedHooksLifecycleCommand() *cobra.Command {
 			Args:         cobra.NoArgs,
 			SilenceUsage: true,
 			RunE: func(cmd *cobra.Command, _ []string) error {
-				report, err := runWindowsManagedHooksLifecycle(action)
+				report, err := runWindowsManagedHooksLifecycleWithStagedRetire(action, stagedRetire)
 				if jsonOutput {
 					if encodeErr := json.NewEncoder(cmd.OutOrStdout()).Encode(report); encodeErr != nil {
 						if err == nil {
@@ -197,13 +198,17 @@ func newWindowsManagedHooksLifecycleCommand() *cobra.Command {
 			},
 		}
 		child.Flags().BoolVar(&jsonOutput, "json", false, "emit machine-readable JSON")
+		if action == "retire" {
+			child.Flags().BoolVar(&stagedRetire, "staged-retire", false, "retire a committed standalone journal with the verified Setup gateway")
+		}
 		command.AddCommand(child)
 	}
 	return command
 }
 
-func runWindowsManagedHooksLifecycle(
+func runWindowsManagedHooksLifecycleWithStagedRetire(
 	action string,
+	stagedRetire bool,
 ) (windowsManagedHooksLifecycleReport, error) {
 	report := windowsManagedHooksLifecycleReport{
 		SchemaVersion: windowsManagedHooksLifecycleSchema,
@@ -221,7 +226,7 @@ func runWindowsManagedHooksLifecycle(
 	if err := enterpriseHooksNativePlatformPreflight(); err != nil {
 		return fail(err)
 	}
-	ctx, err := resolveWindowsManagedHooksLifecycleContext()
+	ctx, err := resolveWindowsManagedHooksLifecycleContext(stagedRetire)
 	if err != nil {
 		return fail(err)
 	}
@@ -231,6 +236,9 @@ func runWindowsManagedHooksLifecycle(
 		return fail(err)
 	}
 	pendingExists := pending != nil
+	if stagedRetire && (action != "retire" || pendingExists) {
+		return fail(errors.New("staged managed-hook retirement requires a committed journal with no pending transaction"))
+	}
 	if action == "collect" {
 		skipped, collected, err := collectWindowsManagedHooksLifecycleGenerations(ctx, pendingExists)
 		if err != nil {
@@ -545,7 +553,7 @@ func validateWindowsManagedHooksLifecycleRetirement(
 	return nil
 }
 
-func resolveWindowsManagedHooksLifecycleContext() (
+func resolveWindowsManagedHooksLifecycleContext(stagedRetire bool) (
 	windowsManagedHooksLifecycleContext,
 	error,
 ) {
@@ -554,7 +562,11 @@ func resolveWindowsManagedHooksLifecycleContext() (
 	// been committed, or while an authenticated uninstall tombstone is being
 	// replaced. The lifecycle layout path still authenticates the exact binary,
 	// manifest, config, roots, and service environment.
-	opts, err := resolveWindowsCodexRequirementsLayout("lifecycle")
+	resolverAction := "lifecycle"
+	if stagedRetire {
+		resolverAction = "lifecycle-staged-retire"
+	}
+	opts, err := resolveWindowsCodexRequirementsLayout(resolverAction)
 	if err != nil {
 		return ctx, err
 	}
