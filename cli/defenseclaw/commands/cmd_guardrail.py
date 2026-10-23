@@ -2268,11 +2268,16 @@ def _hilt_preview_lines(app: AppContext, key: str, label: str, enabled: bool, mi
             config_path=str(config_path_for_data_dir(app.cfg.data_dir)),
         )
     except config_inspect.ConfigInspectError as exc:
-        return [
+        lines = [
             f"Could not resolve {label}'s hook mode with the gateway ({exc}). The saved HILT policy pauses "
             f"actions only where {label} runs in action mode; check an account with: "
             f"defenseclaw guardrail profile explain --user <name> --connector {normalize_connector(key)}"
         ]
+        if enabled and not has_native_approval_prompt(key):
+            # Whatever the mode, a connector without a native approval prompt
+            # alerts instead of asking (_hilt_enable_notice).
+            lines.append(_hilt_enable_notice(key, min_severity))
+        return lines
     base = preview.base
     if base.mode != "action":
         lines = [

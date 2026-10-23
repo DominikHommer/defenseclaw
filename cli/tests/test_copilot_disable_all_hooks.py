@@ -84,7 +84,6 @@ def _readiness(cfg, connector: str):
 
 
 def _doctor_rows(cfg, monkeypatch) -> list[dict[str, Any]]:
-    monkeypatch.setattr(cmd_doctor, "_opencode_managed_plugin_drift", lambda *_a, **_k: "")
     r = cmd_doctor._DoctorResult(passive=True, quiet=True)
     cmd_doctor._check_connector_hooks(cfg, "copilot", r)
     return [row for row in r.checks if row["label"] == "Copilot hooks"]

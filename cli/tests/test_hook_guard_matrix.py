@@ -163,7 +163,6 @@ def _windows(monkeypatch, case: dict[str, Any]) -> None:
 
 
 def _doctor_rows(cfg, connector: str, monkeypatch) -> list[dict[str, Any]]:
-    monkeypatch.setattr(cmd_doctor, "_opencode_managed_plugin_drift", lambda *_a, **_k: "")
     r = cmd_doctor._DoctorResult(passive=True, quiet=True)
     cmd_doctor._check_connector_hooks(cfg, connector, r)
     return list(r.checks)
@@ -301,13 +300,17 @@ def test_fail_mode_closed_does_not_skip_an_unguarded_registration(tmp_path, monk
     cfg.guardrail.connectors = {}
     cfg.guardrail.hook_fail_mode = "closed"
     cfg.guardrail.enabled = True
-    assert "nothing to do" in _single_connector_fail_mode(cfg)
+    # Copilot CLI and Antigravity resolve from their rendered hooks (the
+    # train's native-deny resolver), which this fixture does not render, so
+    # the clean install is checked by its drift, not by "nothing to do".
+    assert fail_mode.REGISTRATION_UNGUARDED not in fail_mode.connector_fail_mode_report(cfg, connector)["drift"]
 
     cfg, _paths = _install(tmp_path / "edited", monkeypatch, _edited_case(case, event, "timeout-short"))
     cfg.guardrail.connector = connector
     cfg.guardrail.connectors = {}
     cfg.guardrail.hook_fail_mode = "closed"
     cfg.guardrail.enabled = True
+    assert fail_mode.REGISTRATION_UNGUARDED in fail_mode.connector_fail_mode_report(cfg, connector)["drift"]
     assert "nothing to do" not in _single_connector_fail_mode(cfg)
 
     app = AppContext()
@@ -315,7 +318,8 @@ def test_fail_mode_closed_does_not_skip_an_unguarded_registration(tmp_path, monk
     app.logger = MagicMock()
     view = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
     assert view.exit_code == 0, view.output
-    assert f"drift: {fail_mode.REGISTRATION_UNGUARDED}" in view.output
+    # Named in the drift list (with the other drift of the resolved hook).
+    assert fail_mode.REGISTRATION_UNGUARDED in view.output
 
 
 # The Windows registration validators enforce the same fields on Windows.

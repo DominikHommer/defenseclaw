@@ -99,14 +99,13 @@ func RunContained(cmd *exec.Cmd) error {
 //
 // On Linux the kernel reparents every orphan of the tree to a
 // child-subreaper custodian, also one that left the group or session, and the
-// custodian kills and reaps them all; when it cannot, RunTracked returns
-// ErrNotContained. The command cannot signal or trace the custodian, so it
-// cannot end it and hand a child in a session of its own to init
-// (GAP-0631): its runner refuses positive signal targets and remote
-// prlimit, starts a separate session, and the custodian is not dumpable. A user
-// namespace like RunContained's would show root-owned files as owned by the
-// overflow user to the scanner. On macOS a supervisor, a short-lived copy of
-// this binary in a process group of its own, runs the command in a session of its own. It
+// custodian kills and reaps them while it remains alive. If a scanner SIGKILLs
+// the custodian, a detached child can keep running even though RunTracked
+// fails. If the custodian cannot complete its sweep, RunTracked returns
+// ErrNotContained. A user namespace like RunContained's would show root-owned
+// files as owned by the overflow user to the scanner. On macOS a supervisor,
+// a short-lived copy of this binary in a process group of its own, runs the
+// command in a session of its own. It
 // follows every descendant with kqueue NOTE_FORK and NOTE_EXIT and the
 // process table, by parent, group and session, also once it starts a
 // session of its own; it watches this process with NOTE_EXIT. To end the
