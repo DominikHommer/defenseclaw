@@ -67,9 +67,11 @@ from defenseclaw.connector_contracts import has_native_approval_prompt, normaliz
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.enforce import asset_lists
 from defenseclaw.fail_mode import (
+    REGISTRATION_UNGUARDED,
     FileSnapshot,
     fail_mode_transaction_lock,
     reconcile_connector_registration,
+    registration_unguarded,
     resolve_connector_fail_mode,
     restore_fail_mode_transaction,
     snapshot_fail_mode_transaction,
@@ -1900,6 +1902,17 @@ def fail_mode_cmd(
                 _eff = "closed (proxy-backed, no hooks: blocked while the gateway is down)"
             elif _cursor_stays_fail_closed(gc, _name):
                 _eff = "closed (Cursor hooks always fail closed in action mode)"
+            if (
+                _enforcing
+                and normalize_connector(_name) not in _RUNTIME_FAIL_MODE_CONNECTORS
+                and REGISTRATION_UNGUARDED not in _eff
+            ):
+                # A hook entry the agent skips leaves calls unchecked whatever
+                # the fail mode (rel-1-0-4 GAP-0538); the runtime connectors
+                # above, and Copilot CLI, Antigravity and Hermes resolved from
+                # their rendered hooks, carry it in their drift already.
+                if registration_unguarded(app.cfg, _name):
+                    _eff += f" (drift: {REGISTRATION_UNGUARDED})"
             if _eff.startswith("open") and not upstream_fail_open(app.cfg, _name):
                 _open_names.append(_name)
             _eff_disp = ux._style(_eff, fg="yellow") if _eff == "closed" else _eff
@@ -1992,6 +2005,7 @@ def fail_mode_cmd(
         not fail_mode_targets
         and saved_global == mode
         and (single_state is None or (single_state.desired == mode and single_state.current))
+        and not registration_unguarded(app.cfg, single_connector)
     ):
         if upstream_fail_open(app.cfg, single_connector):
             ux.echo(

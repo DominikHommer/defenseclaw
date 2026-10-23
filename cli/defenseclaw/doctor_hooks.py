@@ -39,6 +39,7 @@ import yaml
 
 from defenseclaw import codex_toml, connector_paths
 from defenseclaw.connector_contracts import resolve_connector_contract
+from defenseclaw.hook_guard_matrix import TOOL_GUARD_HOOKS
 from defenseclaw.hook_integrity import LAUNCHER_REINSTALL_STEP, claude_launcher_guard_view
 from defenseclaw.inventory.plugin_identity import is_link_or_reparse
 
@@ -264,6 +265,10 @@ _COPILOT_ADAPTER_TIMEOUT_MS = 25_000
 _COPILOT_ADAPTER_TIMEOUT = re.compile(r"(?m)^\$timeoutMS = (\d+)\r?$")
 _COPILOT_ADAPTER_TIMEOUT_ASSIGNMENT = f"$timeoutMS = {_COPILOT_ADAPTER_TIMEOUT_MS}"
 _COPILOT_ADAPTER_MAX_BYTES = 128 * 1024
+
+# Every Antigravity event Setup registers uses the matcher and timeout of the
+# PreToolUse row of the shared tool-guard table.
+_ANTIGRAVITY_GUARD = TOOL_GUARD_HOOKS["antigravity"]
 
 _ANTIGRAVITY_REQUIRED_HOOKS: dict[str, bool] = {
     "PreInvocation": False,
@@ -2071,8 +2076,10 @@ def _validate_devin_hook_matrix(document: dict[str, Any]) -> tuple[str, int]:
         group, handler, command = owned[0]
         if group.get("matcher", "") != "" or handler.get("type") != "command":
             raise _InspectionError("stale", f"Devin {event} handler has an invalid matcher or type")
-        if handler.get("timeout") != 10:
-            raise _InspectionError("stale", f"Devin {event} handler timeout is not 10 seconds")
+        if handler.get("timeout") != TOOL_GUARD_HOOKS["devin"].timeout:
+            raise _InspectionError(
+                "stale", f"Devin {event} handler timeout is not {TOOL_GUARD_HOOKS['devin'].timeout} seconds"
+            )
         commands.append(command)
     if len(set(commands)) != 1:
         raise _InspectionError("stale", "DefenseClaw Devin hooks use inconsistent commands")
@@ -2586,7 +2593,7 @@ def _validate_antigravity_hook_matrix(
             )
         if uses_matcher:
             group = entries[0]
-            if not isinstance(group, dict) or group.get("matcher") != "*":
+            if not isinstance(group, dict) or group.get("matcher") not in _ANTIGRAVITY_GUARD.matchers:
                 raise _InspectionError("stale", f"Antigravity {event} matcher must be '*'")
             handlers = group.get("hooks")
             if not isinstance(handlers, list) or len(handlers) != 1:
@@ -2602,8 +2609,8 @@ def _validate_antigravity_hook_matrix(
                 )
         if not isinstance(handler, dict) or handler.get("type") != "command":
             raise _InspectionError("malformed", f"Antigravity {event} handler type is not command")
-        if handler.get("timeout") != 30:
-            raise _InspectionError("stale", f"Antigravity {event} timeout must be 30 seconds")
+        if type(handler.get("timeout")) is not int or handler.get("timeout") != _ANTIGRAVITY_GUARD.timeout:
+            raise _InspectionError("stale", f"Antigravity {event} timeout must be {_ANTIGRAVITY_GUARD.timeout} seconds")
         command = handler.get("command")
         if not isinstance(command, str) or not command.strip():
             raise _InspectionError("malformed", f"Antigravity {event} handler has no command")
@@ -2774,8 +2781,10 @@ def _validate_hermes_hook_matrix(document: dict[str, Any]) -> int:
                 f"Hermes event {event} has {len(owned)} DefenseClaw handlers; expected exactly one",
             )
         entry = owned[0]
-        if entry.get("timeout") != 30 or type(entry.get("timeout")) is not int:
-            raise _InspectionError("stale", f"Hermes event {event} timeout must be 30 seconds")
+        if entry.get("timeout") != TOOL_GUARD_HOOKS["hermes"].timeout or type(entry.get("timeout")) is not int:
+            raise _InspectionError(
+                "stale", f"Hermes event {event} timeout must be {TOOL_GUARD_HOOKS['hermes'].timeout} seconds"
+            )
         matcher = entry.get("matcher") if "matcher" in entry else None
         if matcher != expected_matcher:
             raise _InspectionError(
@@ -3280,10 +3289,11 @@ def _validate_copilot_hook_matrix(
         if entry.get("type") != "command":
             raise _InspectionError("malformed", f"Copilot event {event} handler type is not command")
         timeout = entry.get("timeoutSec")
-        if type(timeout) is not int or timeout != 30:
+        expected_timeout = TOOL_GUARD_HOOKS["copilot"].timeout
+        if type(timeout) is not int or timeout != expected_timeout:
             raise _InspectionError(
                 "stale",
-                f"Copilot event {event} timeoutSec is {timeout!r}; expected 30",
+                f"Copilot event {event} timeoutSec is {timeout!r}; expected {expected_timeout}",
             )
         if "bash" in entry or "command" in entry:
             raise _InspectionError(
