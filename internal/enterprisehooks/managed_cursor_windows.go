@@ -38,6 +38,10 @@ const (
 
 var windowsCursorManagedRootResolver = defaultWindowsCursorManagedRoot
 
+// windowsCursorManagedGuardRebuildBeforeWrite runs before the guard rebuild
+// re-reads and replaces each artifact; tests use it to edit a file concurrently.
+var windowsCursorManagedGuardRebuildBeforeWrite = func(string) {}
+
 // WindowsCursorManagedRuntimeTarget binds a machine-authorized SID to only
 // that user's canonical DefenseClaw runtime. No token is stored in ProgramData.
 type WindowsCursorManagedRuntimeTarget struct {
@@ -854,60 +858,97 @@ func restoreWindowsCursorManagedGuard(
 		return false, nil
 	}
 	failMode := cursorManagedPolicyFailMode(candidate.parsed)
-	base := []byte("{}\n")
-	if current.hooks.existed {
-		if err := windowsManagedPolicyFileTrustCheck(current.hooks.path); err != nil {
-			return false, fmt.Errorf("enterprise hooks: untrusted Cursor enterprise artifact %s: %w", current.hooks.path, err)
-		}
-		base = current.hooks.data
-	}
-	hooks, err := connector.MergeWindowsCursorEnterpriseHooks(base, current.adapter.path, failMode)
-	if err != nil && current.hooks.existed && !json.Valid(current.hooks.data) {
-		fmt.Fprintf(os.Stderr,
-			"[enterprise-hooks] replacing %s, which is not JSON, to restore the Cursor machine guard\n",
-			current.hooks.path)
-		hooks, err = connector.MergeWindowsCursorEnterpriseHooks([]byte("{}\n"), current.adapter.path, failMode)
-	}
+	hooks, err := mergeWindowsCursorManagedRebuildHooks(current.hooks, current.adapter.path, failMode, true)
 	if err != nil {
-		return false, fmt.Errorf("enterprise hooks: rebuild Cursor hooks.json registration: %w", err)
-	}
-	if len(hooks) > windowsCursorManagedHooksLimit {
-		return false, fmt.Errorf("enterprise hooks: rebuilt Cursor hooks.json exceeds %d bytes", windowsCursorManagedHooksLimit)
+		return false, err
 	}
 
 	type rebuild struct {
-		preimage         windowsManagedFileSnapshot
-		metadata         windowsCursorManagedFileMetadata
-		data             []byte
-		preserveMetadata bool
+		preimage        windowsManagedFileSnapshot
+		metadata        windowsCursorManagedFileMetadata
+		limit           int
+		data            []byte
+		hooks           bool
+		written         bool
+		writtenMetadata windowsCursorManagedFileMetadata
 	}
-	var plan []rebuild
+	var plan []*rebuild
 	if !current.adapter.existed || !bytes.Equal(current.adapter.data, candidate.adapter.data) {
-		plan = append(plan, rebuild{current.adapter, current.adapterMetadata, candidate.adapter.data, false})
+		plan = append(plan, &rebuild{
+			preimage: current.adapter, metadata: current.adapterMetadata,
+			limit: windowsCursorManagedAdapterLimit, data: candidate.adapter.data,
+		})
 	}
 	if !bytes.Equal(current.state.data, candidate.state.data) {
-		plan = append(plan, rebuild{current.state, current.stateMetadata, candidate.state.data, false})
+		plan = append(plan, &rebuild{
+			preimage: current.state, metadata: current.stateMetadata,
+			limit: windowsCursorManagedStateLimit, data: candidate.state.data,
+		})
 	}
 	if !current.hooks.existed || !bytes.Equal(current.hooks.data, hooks) {
-		plan = append(plan, rebuild{current.hooks, current.hooksMetadata, hooks, true})
+		plan = append(plan, &rebuild{
+			preimage: current.hooks, metadata: current.hooksMetadata,
+			limit: windowsCursorManagedHooksLimit, data: hooks, hooks: true,
+		})
 	}
 	if len(plan) == 0 {
 		return false, nil
 	}
-	var written []rebuild
+	var written []*rebuild
+	// Roll back only what this rebuild still owns: a file that changed again
+	// after it was written, such as an administrator's hooks.json edit, is
+	// left as it is and reported, never overwritten with the preimage.
 	rollback := func(cause error) error {
 		for index := len(written) - 1; index >= 0; index-- {
 			item := written[index]
-			if restoreErr := restoreWindowsCursorManagedFile(item.preimage, item.metadata); restoreErr != nil {
-				cause = errors.Join(cause, fmt.Errorf("restore Cursor preimage %s: %w", item.preimage.path, restoreErr))
+			onDisk, onDiskMetadata, err := snapshotWindowsCursorManagedFileWithMetadata(item.preimage.path, item.limit)
+			switch {
+			case err != nil:
+				cause = errors.Join(cause, fmt.Errorf("restore Cursor preimage %s: %w", item.preimage.path, err))
+			case windowsCursorManagedFileSnapshotEqual(onDisk, onDiskMetadata, item.preimage, item.metadata):
+				// The write did not land; nothing to put back.
+			case onDisk.existed && bytes.Equal(onDisk.data, item.data) &&
+				(!item.written || onDiskMetadata == item.writtenMetadata):
+				if restoreErr := restoreWindowsCursorManagedFile(item.preimage, item.metadata); restoreErr != nil {
+					cause = errors.Join(cause, fmt.Errorf("restore Cursor preimage %s: %w", item.preimage.path, restoreErr))
+				}
+			default:
+				cause = errors.Join(cause, fmt.Errorf(
+					"enterprise hooks: refusing to roll back %s, which changed concurrently during the Cursor guard rebuild",
+					item.preimage.path))
 			}
 		}
 		return cause
 	}
 	for _, item := range plan {
+		windowsCursorManagedGuardRebuildBeforeWrite(item.preimage.path)
+		// The snapshot is from the start of the transaction. Cursor and
+		// administrators do not take the DefenseClaw lock, so read the file
+		// again before replacing it.
+		onDisk, onDiskMetadata, err := snapshotWindowsCursorManagedFileWithMetadata(item.preimage.path, item.limit)
+		if err != nil {
+			return false, rollback(err)
+		}
+		if !windowsCursorManagedFileSnapshotEqual(onDisk, onDiskMetadata, item.preimage, item.metadata) {
+			if !item.hooks {
+				return false, rollback(fmt.Errorf(
+					"enterprise hooks: %s changed concurrently during the Cursor guard rebuild", item.preimage.path))
+			}
+			// Keep the administrator's concurrent edit: merge the registration
+			// into it, or stop when it cannot carry the guard.
+			merged, mergeErr := mergeWindowsCursorManagedRebuildHooks(onDisk, current.adapter.path, failMode, false)
+			if mergeErr != nil {
+				return false, rollback(fmt.Errorf(
+					"enterprise hooks: Cursor hooks.json changed concurrently during the guard rebuild: %w", mergeErr))
+			}
+			item.preimage, item.metadata, item.data = onDisk, onDiskMetadata, merged
+			if onDisk.existed && bytes.Equal(onDisk.data, merged) {
+				continue
+			}
+		}
 		written = append(written, item)
 		var writeErr error
-		if item.preserveMetadata {
+		if item.hooks {
 			writeErr = writeWindowsCursorManagedFilePreservingMetadata(item.preimage, item.metadata, item.data)
 		} else {
 			writeErr = windowsManagedPolicyWriter(item.preimage.path, item.data, true)
@@ -915,6 +956,15 @@ func restoreWindowsCursorManagedGuard(
 		if writeErr != nil {
 			return false, rollback(writeErr)
 		}
+		after, afterMetadata, err := snapshotWindowsCursorManagedFileWithMetadata(item.preimage.path, item.limit)
+		if err != nil {
+			return false, rollback(err)
+		}
+		if !after.existed || !bytes.Equal(after.data, item.data) {
+			return false, rollback(fmt.Errorf(
+				"enterprise hooks: %s changed concurrently while the Cursor guard was rebuilt", item.preimage.path))
+		}
+		item.written, item.writtenMetadata = true, afterMetadata
 	}
 	repaired, err := snapshotWindowsCursorManagedArtifacts()
 	if err != nil {
@@ -928,6 +978,54 @@ func restoreWindowsCursorManagedGuard(
 		return false, rollback(err)
 	}
 	return true, nil
+}
+
+// mergeWindowsCursorManagedRebuildHooks renders hooks.json with the guard's
+// registration merged into the snapshot, keeping unrelated hooks. A missing
+// file starts empty. A file that is not JSON cannot carry the guard: it is
+// replaced when replaceInvalid is set, and refused otherwise (an
+// administrator's concurrent edit is never discarded).
+func mergeWindowsCursorManagedRebuildHooks(
+	snapshot windowsManagedFileSnapshot,
+	adapterPath string,
+	failMode string,
+	replaceInvalid bool,
+) ([]byte, error) {
+	base := []byte("{}\n")
+	if snapshot.existed {
+		if err := windowsManagedPolicyFileTrustCheck(snapshot.path); err != nil {
+			return nil, fmt.Errorf("enterprise hooks: untrusted Cursor enterprise artifact %s: %w", snapshot.path, err)
+		}
+		base = snapshot.data
+	}
+	hooks, err := connector.MergeWindowsCursorEnterpriseHooks(base, adapterPath, failMode)
+	if err != nil && replaceInvalid && snapshot.existed && !json.Valid(snapshot.data) {
+		fmt.Fprintf(os.Stderr,
+			"[enterprise-hooks] replacing %s, which is not JSON, to restore the Cursor machine guard\n",
+			snapshot.path)
+		hooks, err = connector.MergeWindowsCursorEnterpriseHooks([]byte("{}\n"), adapterPath, failMode)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("enterprise hooks: rebuild Cursor hooks.json registration: %w", err)
+	}
+	if len(hooks) > windowsCursorManagedHooksLimit {
+		return nil, fmt.Errorf("enterprise hooks: rebuilt Cursor hooks.json exceeds %d bytes", windowsCursorManagedHooksLimit)
+	}
+	return hooks, nil
+}
+
+// snapshotWindowsCursorManagedFileWithMetadata reads one Cursor artifact and
+// its security descriptor and attributes.
+func snapshotWindowsCursorManagedFileWithMetadata(
+	path string,
+	limit int,
+) (windowsManagedFileSnapshot, windowsCursorManagedFileMetadata, error) {
+	snapshot, err := snapshotWindowsManagedFileWithLimit(path, limit)
+	if err != nil {
+		return snapshot, windowsCursorManagedFileMetadata{}, err
+	}
+	metadata, err := snapshotWindowsCursorManagedFileMetadata(snapshot)
+	return snapshot, metadata, err
 }
 
 func refreshWindowsCursorManagedAdapter(hookExecutable string, upgradeTemplate bool) (bool, error) {
