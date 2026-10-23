@@ -22,6 +22,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
@@ -105,6 +106,7 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 	validateSeam, writeSeam := windowsEnterpriseHotConfigValidate, windowsEnterpriseHotConfigWrite
 	timeoutSeam, restartTimeoutSeam, pollSeam := windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigRestartTimeout, windowsEnterpriseHotConfigPoll
 	sourceSeam, refreshSeam := windowsEnterpriseHotConfigSourceCheck, windowsEnterpriseHotConfigRefreshTargets
+	runtimeCandidateSeam := windowsEnterpriseStandaloneRuntimeCandidateCheck
 	reloadSeam, failClosedSeam := windowsEnterpriseHotBundleReload, windowsEnterpriseHotConfigFailClosed
 	restartSeam, recoverSeam := windowsEnterpriseHotConfigRestart, windowsEnterpriseHotConfigRecover
 	t.Cleanup(func() {
@@ -117,10 +119,12 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 		windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigPoll = timeoutSeam, pollSeam
 		windowsEnterpriseHotConfigRestartTimeout = restartTimeoutSeam
 		windowsEnterpriseHotConfigSourceCheck = sourceSeam
+		windowsEnterpriseStandaloneRuntimeCandidateCheck = runtimeCandidateSeam
 		windowsEnterpriseHotBundleReload = reloadSeam
 	})
 	// The supplied file stands for an administrator-only staged config.
 	windowsEnterpriseHotConfigSourceCheck = func(string) error { return nil }
+	windowsEnterpriseStandaloneRuntimeCandidateCheck = func(*config.Config) error { return nil }
 	windowsEnterpriseHotConfigLayout = func() (managed.StandaloneLayout, error) {
 		return managed.StandaloneLayout{ConfigPath: host.configPath, ConfigDir: filepath.Dir(host.configPath), DataDir: dir, ServiceUser: `NT SERVICE\DefenseClawGateway`}, nil
 	}
