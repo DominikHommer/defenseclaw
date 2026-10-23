@@ -44,6 +44,7 @@ func actionCommandDecision(command, cwd, home string, depth int) string {
 	}
 	called := calledFunctions(file, home)
 	functionArgs := actionLiteralFunctionArgs(file, home)
+	boundPrograms := actionBoundProgramWords(file, home)
 	straightLine := make(map[*syntax.Stmt]bool, len(file.Stmts))
 	for _, stmt := range file.Stmts {
 		straightLine[stmt] = true
@@ -114,8 +115,11 @@ func actionCommandDecision(command, cwd, home string, depth int) string {
 		}
 		program, fixed := StaticWord(call.Args[0], home)
 		if !fixed {
-			reason = "dynamic-command"
-			return false
+			program, fixed = boundPrograms[call]
+			if !fixed {
+				reason = "dynamic-command"
+				return false
+			}
 		}
 		words := make([]string, len(call.Args))
 		words[0] = program
@@ -487,7 +491,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 		}
 		if words[1] == "-" {
 			if code, known := actionLiteralHereDocument(stmt); known {
-				if class, _ := unprovenInterpreterCode(code, program, cwd, home); class != "" {
+				if class, _ := unprovenInterpreterCode(code, program, cwd, home, true); class != "" {
 					return class
 				}
 				for _, target := range literalInterpreterWrites(code, program) {
@@ -503,7 +507,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 			if len(words) < 3 || words[2] == "" {
 				return "interpreter-path"
 			}
-			if class, _ := unprovenInterpreterCode(words[2], program, cwd, home); class != "" {
+			if class, _ := unprovenInterpreterCode(words[2], program, cwd, home, true); class != "" {
 				return class
 			}
 			return ""
@@ -518,7 +522,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 		if !read {
 			return "interpreter-path"
 		}
-		if class, _ := unprovenInterpreterCode(content, program, cwd, home); class != "" {
+		if class, _ := unprovenInterpreterCode(content, program, cwd, home, true); class != "" {
 			return class
 		}
 		return ""
