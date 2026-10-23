@@ -733,7 +733,7 @@ func TestWindowsEnterpriseConfigRefusalReportsTheInstalledHost(t *testing.T) {
 	}
 }
 
-// GAP-0742: Setup /install forwards an approved config to this preflight.
+// GAP-0723: Setup /install forwards a supplied config to this preflight.
 // A connector Windows cannot enroll is a bad argument (1639), before the
 // lifecycle can create a root or change hook wiring.
 func TestWindowsEnterpriseInstallUnsupportedConnectorIsInvalidArguments(t *testing.T) {
