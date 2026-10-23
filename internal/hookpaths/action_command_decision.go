@@ -557,6 +557,15 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 		return ""
 	}
 	switch program {
+	case "source", ".":
+		if len(words) != 2 || words[1] == "" || !actionScriptInsideCWD(words[1], cwd) {
+			return "eval-source"
+		}
+		content, read := readIndirectSource(words[1], cwd)
+		if !read {
+			return "eval-source"
+		}
+		return actionCommandDecision(content, cwd, home, depth+1)
 	case "git":
 		return actionGitDecision(words, cwd, home, depth+1)
 	case "command", "exec", "busybox", "time", "nohup":

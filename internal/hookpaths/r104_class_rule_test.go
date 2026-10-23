@@ -39,6 +39,10 @@ func TestR104ActionClassUnknownShellAndInterpreter(t *testing.T) {
 		{"shell redirected stdin", `bash < safe.sh`, true},
 		{"shell heredoc", "sh <<'EOF'\necho marker >> report.txt\nEOF", true},
 		{"outside script", `bash ../outside.sh`, true},
+		{"outside sourced script", `source ../outside.sh`, true},
+		{"outside dotted script", `. ../outside.sh`, true},
+		{"missing sourced script", `source missing.sh`, true},
+		{"sourced script with arguments", `source safe.sh one`, true},
 		{"script with arguments", `bash safe.sh one two`, true},
 		{"positional parameter 2", `bash -c 'echo marker >> "$2"' sh report.txt alias`, true},
 		{"positional parameter 9", `sh -c 'echo marker >> "$9"' sh a b c d e f g h alias`, true},
@@ -56,6 +60,8 @@ func TestR104ActionClassUnknownShellAndInterpreter(t *testing.T) {
 		{"eval", `eval 'echo marker >> report.txt'`, true},
 		{"ordinary inline shell", `bash -c 'echo marker >> report.txt'`, false},
 		{"ordinary local script", `bash safe.sh`, false},
+		{"ordinary local sourced script", `source safe.sh`, false},
+		{"ordinary local dotted script", `. safe.sh`, false},
 		{"ordinary redirect", `echo marker >> report.txt`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
