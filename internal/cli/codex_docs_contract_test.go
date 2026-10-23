@@ -15,16 +15,16 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// The Codex page's managed section quotes the Windows hook program and
-// requirements file lines as enterprise policy verify prints them.
+// The Codex page's managed section quotes the Windows header and Codex row
+// with its requirements file as enterprise policy verify prints them.
 func TestCodexPageQuotesTheVerifyLines(t *testing.T) {
 	resetEnterprisePolicyFlags(t)
 	raw, err := os.ReadFile(filepath.Join("..", "..", "docs-site", "content", "docs", "connectors", "codex.mdx"))
@@ -57,25 +57,31 @@ func TestCodexPageQuotesTheVerifyLines(t *testing.T) {
 		t.Fatal(err)
 	}
 	report := enterprisePolicyReport{goos: "windows", HookBinary: opts.HookBinary, Result: enterprisepolicy.Result{States: []enterprisepolicy.State{
-		{Connector: "codex", Route: enterprisepolicy.RouteMachinePolicy, Covered: true, Paths: []string{present}},
+		{
+			Connector: "codex", Route: enterprisepolicy.RouteMachinePolicy,
+			Covered: true, EffectiveLock: config.ManagedHooksOnlyEnforce,
+			ForeignHooks: config.ForeignHooksRemove, OwnedEntries: 11,
+			Paths: []string{present},
+		},
 	}}}
 	var out bytes.Buffer
 	if err := writeEnterprisePolicyReport(&out, report); err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.ReplaceAll(out.String(), present, requirements), "\n")
-	header, file := lines[0], ""
-	for _, line := range lines {
-		if strings.HasPrefix(strings.TrimSpace(line), "file:") {
-			file = line
-		}
-	}
-	if !strings.HasPrefix(header, "Standalone machine agent policy (hook binary ") || file == "" {
+	if len(lines) < 5 || !strings.HasPrefix(lines[0], "Standalone machine agent policy (hook binary ") ||
+		!strings.HasPrefix(lines[2], "codex ") || !strings.HasPrefix(lines[3], "    file:      ") {
 		t.Fatalf("unexpected verify output:\n%s", out.String())
 	}
-	for _, line := range []string{header, file} {
-		if !slices.Contains(blocks, line+"\n") {
-			t.Errorf("the managed section does not quote the verify line %q", line)
+	for _, quote := range []string{lines[0] + "\n", lines[2] + "\n" + lines[3] + "\n"} {
+		found := false
+		for _, block := range blocks {
+			if block == quote {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("the managed section does not quote the verify output:\n%s", quote)
 		}
 	}
 }

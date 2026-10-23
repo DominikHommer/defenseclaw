@@ -34,17 +34,6 @@ def _text_blocks(text: str) -> list[str]:
     return re.findall(r"```text\n(.*?)```", text, flags=re.S)
 
 
-@pytest.fixture(autouse=True)
-def _unicode_output():
-    # The quoted output carries Unicode glyphs; TERM=dumb or another test's
-    # console snapshot must not swap them for ASCII.
-    with (
-        mock.patch.object(ux, "_configured_unicode_output", True),
-        mock.patch.dict(os.environ, {"TERM": "xterm-256color"}),
-    ):
-        yield
-
-
 # GAP-0567: the Hermes page said doctor reports no failed check, but doctor
 # fails the Hermes hooks row while any Hermes host runs and passes once all
 # are closed. The page quotes both rows as doctor prints them.
@@ -62,6 +51,8 @@ def test_hermes_page_quotes_the_doctor_row(tmp_path, running, tag):
         mock.patch.object(cmd_doctor, "_hermes_host_running", return_value=running),
         mock.patch.object(cmd_doctor, "_json_mode", False),
         mock.patch.object(cmd_doctor.ux, "_color_enabled", return_value=False),
+        mock.patch.object(ux, "_configured_unicode_output", True),
+        mock.patch.dict(os.environ, {"TERM": "xterm-256color"}),
         cmd_doctor._doctor_label_suffix("[hermes]"),
         redirect_stdout(out),
     ):
@@ -69,20 +60,43 @@ def test_hermes_page_quotes_the_doctor_row(tmp_path, running, tag):
     row = r.checks[-1]
     assert row["status"] == ("fail" if running else "pass")
     page = _flat(_page("connectors/hermes.mdx"))
-    detail = _flat(row["detail"].replace(str(hook), "~/.hermes/config.yaml"))
+    example = "/home/alice/.hermes/config.yaml"
+    detail = _flat(row["detail"].replace(str(hook), example))
     assert detail in page, detail
     if running:
-        line = out.getvalue().splitlines()[0].strip().replace(str(hook), "~/.hermes/config.yaml")
+        line = out.getvalue().splitlines()[0].strip().replace(str(hook), example)
         assert line.startswith(f"{tag} Hermes hooks [hermes]"), line
         assert line + "\n" in _text_blocks(_page("connectors/hermes.mdx")), line
     assert "reports no failed check" not in page
     # Setup prints a restart hint, not a pending_reload state, and doctor
-    # has no such row. Only the gateway's state file holds pending_reload.
+    # has no such row.
     hint = f"! ({cmd_setup._pending_reload_hint('hermes')})"
     reference = _flat(_page("reference/connectors/hermes.mdx"))
     assert hint in page and hint in reference
-    assert "pending_reload" not in page
+    assert re.findall(r"`[^`]*pending_reload[^`]*`", page) == ['`"status": "pending_reload"`'], page
     assert re.findall(r"`[^`]*pending_reload[^`]*`", reference) == ['`"status": "pending_reload"`'], reference
+
+
+def test_hermes_reload_state_is_scoped_to_windows():
+    connector = _page("connectors/hermes.mdx")
+    setup = connector.split("## Set up\n", 1)[1].split("\n## Check it", 1)[0]
+    check = connector.split("## Check it\n", 1)[1].split("\n## What it can", 1)[0]
+    reference = _page("reference/connectors/hermes.mdx")
+    reference_setup = reference.split("### What setup does\n", 1)[1].split("\n### Files", 1)[0]
+    reference_files = reference.split("### Files\n", 1)[1].split("\n### Inventory", 1)[0]
+    state_file = "hermes-direct-native-state.json"
+
+    # The native writer is called only inside the Windows branch. Unix uses
+    # hermes-hook.sh and does not create this direct-native state file.
+    source = (ROOT / "internal/gateway/connector/hook_only.go").read_text(encoding="utf-8")
+    writer = source.split("func setupHermesFiles(", 1)[1].split("func hermesConfiguredHookCommand(", 1)[0]
+    assert 'if runtime.GOOS == "windows" {\n\t\tif err = writeHermesDirectNativeState(' in writer
+    for section in (setup, check, reference_setup):
+        assert "macOS and Linux" in section and "Windows" in section
+    assert state_file in setup and state_file in check and state_file in reference_setup
+    assert "macOS and Linux do not write" in setup
+    assert "macOS and Linux have no" in check
+    assert 'Windows only | `hooks/' + state_file + '`' in reference_files
 
 
 def _fail_mode_view(tmp_path, body: str) -> str:
@@ -115,14 +129,21 @@ _ROSTER = (
 
 # GAP-0576: the example mixed the closed footer into an open global value.
 # Each quoted block is the command's real output for its configuration.
-def test_fail_mode_page_quotes_the_real_output(tmp_path):
+@pytest.mark.parametrize(("unicode_output", "term"), [(True, "xterm-256color"), (False, "xterm-256color"), (True, "dumb")])
+def test_fail_mode_page_quotes_the_real_output(tmp_path, unicode_output, term):
     blocks = _text_blocks(_page("reference/configuration/fail-modes.mdx"))
-    open_view = _fail_mode_view(
-        tmp_path, _ROSTER.format(global_mode="open", claude="{}", codex="{hook_fail_mode: closed}")
-    )
+    with (
+        mock.patch.object(ux, "_configured_unicode_output", unicode_output),
+        mock.patch.dict(os.environ, {"TERM": term}),
+    ):
+        if not ux.unicode_output_enabled():
+            blocks = [ux.ascii_presentation_text(block) for block in blocks]
+        open_view = _fail_mode_view(
+            tmp_path, _ROSTER.format(global_mode="open", claude="{}", codex="{hook_fail_mode: closed}")
+        )
+        closed_view = _fail_mode_view(
+            tmp_path, _ROSTER.format(global_mode="closed", claude="{hook_fail_mode: open}", codex="{}")
+        )
     assert open_view.strip("\n") + "\n" in blocks, open_view
-    closed_view = _fail_mode_view(
-        tmp_path, _ROSTER.format(global_mode="closed", claude="{hook_fail_mode: open}", codex="{}")
-    )
     footer = closed_view[closed_view.index("  Invalid,"):].strip("\n") + "\n"
     assert footer in blocks, closed_view

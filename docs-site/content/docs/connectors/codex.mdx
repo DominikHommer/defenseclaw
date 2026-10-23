@@ -78,9 +78,10 @@ The per-user files in [Files it changes](#files-it-changes) are not used there. 
 Standalone machine agent policy (hook binary C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe)
 ```
 
-and the line under the `codex` row names the requirements file:
+and the `codex` row names the requirements file:
 
 ```text
+codex        machine_policy  covered      lock=enforce  foreign_hooks=remove  owned=11 foreign=0
     file:      C:\ProgramData\OpenAI\Codex\requirements.toml
 ```
 

@@ -32,7 +32,7 @@ On Windows the command is one directly quoted absolute `defenseclaw-hook.exe` ar
 
 The alias also accepts `--mode`, `--rule-pack`, `--fail-mode`, approval, block-message, add/replace and workspace options ([quick-alias reference](/docs/reference/commands/guardrail-setup#aliases)). To tune Hermes later, use [`defenseclaw setup guardrail --connector hermes`](/docs/features/guardrail). On a host with several connectors, `defenseclaw setup guardrail --connector hermes --mode action` switches only Hermes.
 
-Hermes registers shell callbacks in each running process, and DefenseClaw has no vendor-proven command that reloads every Hermes CLI, gateway, desktop and service host. So the gateway records `"status": "pending_reload"` in `hooks/hermes-direct-native-state.json` under the data directory. While a Hermes host runs, setup ends its check line with `! (restart any open Hermes session so it loads the DefenseClaw hooks)` and doctor fails the **Hermes hooks** row with `live=false`, also after a restart ([Check it](/docs/connectors/hermes#check-it)). Reload every host after setup and after disable. Restarting `defenseclaw-gateway` does not reload Hermes. On Windows, disable first writes a direct-native disabled tombstone (`hermes-direct-native-state.json`) so stale cached callbacks no-op while revocation is pending.
+Hermes registers shell callbacks in each running process, and DefenseClaw has no vendor-proven command that reloads every Hermes CLI, gateway, desktop and service host. On macOS and Linux, setup registers the portable `hermes-hook.sh` and writes no direct-native reload state file. On native Windows, setup writes `"status": "pending_reload"` in `hooks/hermes-direct-native-state.json` under the data directory; disable first writes a direct-native disabled tombstone to that file so stale cached callbacks no-op while revocation is pending. This file does not prove what a running host loaded. While a Hermes host runs on any OS, setup ends its check line with `! (restart any open Hermes session so it loads the DefenseClaw hooks)` and doctor fails the **Hermes hooks** row with `live=false`, also after a restart ([Check it](/docs/connectors/hermes#check-it)). Reload every host after setup and after disable. Restarting `defenseclaw-gateway` does not reload Hermes.
 
 ### Files
 
@@ -41,7 +41,7 @@ Hermes registers shell callbacks in each running process, and DefenseClaw has no
 | Hooks | `$HERMES_HOME/config.yaml`, `hooks` block |
 | Approvals | `shell-hooks-allowlist.json` beside it |
 | Hook program, macOS and Linux | `~/.defenseclaw/hooks/hermes-hook.sh` |
-| Reload state | `~/.defenseclaw/` managed connector data, `hermes-direct-native-state.json` |
+| Reload state, Windows only | `hooks/hermes-direct-native-state.json` under the DefenseClaw data directory |
 | Hook runtime, Windows | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
 
 Disable removes only DefenseClaw's entries and approvals. Settings and comments outside the `hooks` mapping are kept; whitespace can change. On Linux and macOS `hermes-hook.sh` stays as an inert stub, because a running Hermes keeps calling it until it restarts.

@@ -24,6 +24,8 @@ defenseclaw setup hermes --mode action  # block on policy hits
 
 On Windows, run the same commands in PowerShell. Interactive setup asks for the mode, whether to add to or replace an existing connector roster, and whether to add an LLM judge. For scripts, pass `--yes --mode observe` (or `--mode action`).
 
+On macOS and Linux, setup registers the portable `hermes-hook.sh` in Hermes's `config.yaml`; macOS and Linux do not write `hermes-direct-native-state.json`. On Windows, setup registers `defenseclaw-hook.exe` directly and writes `hooks/hermes-direct-native-state.json` under the DefenseClaw data directory with `"status": "pending_reload"`. That file records a staged registration, not proof that a running Hermes host loaded it.
+
 Then reload or restart every Hermes host. Hermes registers hooks in each running process, so restarting the DefenseClaw gateway does not reload them. If a Hermes host is running when setup checks the hooks, setup ends that line with `! (restart any open Hermes session so it loads the DefenseClaw hooks)`. Doctor cannot tell when a host has reloaded; see [Check it](#check-it).
 
 ## Check it
@@ -34,13 +36,15 @@ defenseclaw status
 
 The agent appears under **Agents** with its mode.
 
-`defenseclaw doctor` cannot see which hooks a running Hermes loaded. While any Hermes host runs, the **Hermes hooks** row fails, also after a restart:
+`defenseclaw doctor` cannot see which hooks a running Hermes loaded. On macOS and Linux it checks the portable hook registration in `config.yaml` and whether a Hermes host is running. While any host runs, the **Hermes hooks** row fails, also after a restart. For a Linux account with home `/home/alice`, the row is:
 
 ```text
-[FAIL] Hermes hooks [hermes]  —  on-disk registration is present at ~/.hermes/config.yaml, but running Hermes hosts are unverified: doctor cannot verify which hooks an already running host loaded, even after a restart or successful hook traffic; live=false
+[FAIL] Hermes hooks [hermes]  —  on-disk registration is present at /home/alice/.hermes/config.yaml, but running Hermes hosts are unverified: doctor cannot verify which hooks an already running host loaded, even after a restart or successful hook traffic; live=false
 ```
 
-Close every Hermes host and run `defenseclaw doctor` again. With no Hermes running the row passes: `registered at ~/.hermes/config.yaml; no Hermes host is running, so the next one starts with the DefenseClaw hooks`. Then start Hermes.
+On Windows, doctor checks the native registration in `config.yaml`, its exact approvals, the hook executable and `hooks/hermes-direct-native-state.json`. A valid registration is `pending-reload`; while a Hermes host runs, the **Hermes hooks** row fails with `live=false`. macOS and Linux have no direct-native state file to check.
+
+Close every Hermes host and run `defenseclaw doctor` again. With a valid registration and no Hermes running, the row passes on every OS. For that Linux account its detail is `registered at /home/alice/.hermes/config.yaml; no Hermes host is running, so the next one starts with the DefenseClaw hooks`. On macOS the same check prints the resolved absolute config path; on Windows the pass detail includes the native registration checks. Doctor does not clear the Windows state file. Then start Hermes.
 
 ## What it can block or ask
 
