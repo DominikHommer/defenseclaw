@@ -589,7 +589,10 @@ func openConnectorStateFileWithRetry(path string) (*os.File, error) {
 }
 
 // readConnectorStateFile is os.ReadFile with the sharing and bounded lock wait
-// of openConnectorStateFileWithRetry.
+// of openConnectorStateFileWithRetry. The hook runtime files (the .hookcfg
+// sidecars, the hook contract lock and the hook scripts) are read the same
+// way: a fail-mode change publishes them while the gateway hook guard and
+// running hooks read them (rel-1-0-4 GAP-0584).
 func readConnectorStateFile(path string) ([]byte, error) {
 	file, err := openConnectorStateFileWithRetry(path)
 	if err != nil {
@@ -2575,7 +2578,7 @@ func loadHookContractLock(dataDir string) hookContractLock {
 	if strings.TrimSpace(dataDir) == "" {
 		return hookContractLock{Version: 1, Connectors: map[string]HookContractLockEntry{}}
 	}
-	data, err := os.ReadFile(filepath.Join(dataDir, hookContractLockFile))
+	data, err := readConnectorStateFile(filepath.Join(dataDir, hookContractLockFile))
 	if err != nil {
 		return hookContractLock{Version: 1, Connectors: map[string]HookContractLockEntry{}}
 	}
@@ -2603,7 +2606,7 @@ func loadHookContractLockForUpdate(
 	if managedEnterprise {
 		return loadManagedHookContractLock(dataDir)
 	}
-	data, err := os.ReadFile(filepath.Join(dataDir, hookContractLockFile))
+	data, err := readConnectorStateFile(filepath.Join(dataDir, hookContractLockFile))
 	if os.IsNotExist(err) {
 		return empty, nil
 	}

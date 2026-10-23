@@ -96,7 +96,25 @@ type InstallOptions struct {
 	// WindowsStandaloneClaudeMachinePolicyContract). Empty, and every
 	// Secure Client process, render the row's own contract.
 	MachinePolicyContractID string
+
+	// WindowsTargetLogon selects the logon a Windows install acts under for
+	// the target's user. The zero value is the user's active session.
+	WindowsTargetLogon WindowsTargetLogon
 }
+
+// WindowsTargetLogon is the logon whose token a Windows install impersonates.
+type WindowsTargetLogon int
+
+const (
+	// WindowsTargetLogonActive is the user's active session only.
+	WindowsTargetLogonActive WindowsTargetLogon = iota
+	// WindowsTargetLogonAnyWithS4U is the user's active session, else a
+	// disconnected one (the user is still signed in), else an S4U logon for
+	// a signed-out user. Without any of them the install fails with
+	// ErrEnrolledUserSignedOut before it acts as the user. Only a change
+	// that closes the hook fail mode uses it (rel-1-0-4 GAP-0585).
+	WindowsTargetLogonAnyWithS4U
+)
 
 var publishEnterpriseHookAPIToken = connector.PublishHookAPIToken
 
