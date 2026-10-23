@@ -59,7 +59,7 @@ Cursor gets machine policy instead of `~/.cursor/hooks.json`. DefenseClaw merges
 | macOS | `/Library/Application Support/Cursor/hooks.json` |
 | Windows | `%ProgramData%\Cursor\hooks.json`, with the `defenseclaw-hook.ps1` adapter beside it |
 
-Each entry runs the administrator's hook binary with `hook --connector cursor --enterprise-managed`. Its `failClosed` value follows the administrator's resolved fail mode: `true` for `closed`, `false` for `open`. The managed `open` choice covers eligible gateway outages only; a foreign-hook guard can still block the call. Cursor still runs Team, Project and User hooks and a deny from any wins, so they cannot allow what DefenseClaw denies, but a foreign `preToolUse` hook can still rewrite tool input. Cursor applies the Enterprise file only on plans that support enterprise hooks, so confirm in a real session that DefenseClaw records its events. The macOS route is a preview and is not verified live.
+Each entry runs the administrator's hook binary with `hook --connector cursor --enterprise-managed` and sets `failClosed: true`. Cursor still runs Team, Project and User hooks and a deny from any wins, so they cannot allow what DefenseClaw denies, but a foreign `preToolUse` hook can still rewrite tool input. Cursor applies the Enterprise file only on plans that support enterprise hooks, so confirm in a real session that DefenseClaw records its events. The macOS route is a preview and is not verified live.
 
 ### OpenShell sandbox
 
@@ -114,7 +114,7 @@ DefenseClaw does not enable Cursor native approval. Confirm verdicts stay attrib
 
 ## Fail mode
 
-Per-user Cursor in observe mode fails open when the gateway is unreachable even if `hook_fail_mode` is `closed`: its user hooks register `failClosed: false`. In action mode they register `failClosed: true` and block supported events when the gateway cannot give a usable answer, even if `hook_fail_mode` is `open`. A conflicting `--fail-mode` is ignored with a warning. Managed Cursor follows the administrator's resolved fail mode, subject to the managed outage and foreign-hook guard limits. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes).
+Fail closed: yes. When the gateway cannot give a usable answer, the hook blocks the events that support a block response unless `guardrail.hook_fail_mode` is `open`. The default is `closed`. Action mode registers `failClosed: true` and observe mode registers `failClosed: false`; a conflicting `--fail-mode` is ignored with a warning. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes).
 
 ## Limits
 
