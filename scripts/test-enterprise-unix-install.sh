@@ -264,13 +264,18 @@ assert_userns_restriction() {
         die "the managed user namespace sysctl file does not persist zero"
     grep -Fxq "kernel.yama.ptrace_scope = $ptrace_scope" /etc/sysctl.d/99-zz-defenseclaw-userns.conf ||
         die "the managed sysctl file does not persist ptrace scope $ptrace_scope"
-    # PRoot uses PTRACE_TRACEME as an ordinary user. Check the kernel decision
-    # as that user, not just the value the root lifecycle read back.
+    # PRoot uses PTRACE_TRACEME as an ordinary user. Fork first so the
+    # potential tracer (the parent) is also unprivileged; runuser itself is a
+    # privileged parent and could make a direct TRACEME check pass at scope 2.
     as_standard_user "$python" -c '
-import ctypes, errno, sys
+import ctypes, errno, os, sys
 libc = ctypes.CDLL(None, use_errno=True)
-result = libc.ptrace(0, 0, 0, 0)  # PTRACE_TRACEME
-sys.exit(0 if result == -1 and ctypes.get_errno() == errno.EPERM else 1)
+pid = os.fork()
+if pid == 0:
+    result = libc.ptrace(0, 0, 0, 0)  # PTRACE_TRACEME
+    os._exit(0 if result == -1 and ctypes.get_errno() == errno.EPERM else 1)
+_, status = os.waitpid(pid, 0)
+sys.exit(0 if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0 else 1)
 ' || die "a standard user can still trace a child process"
 }
 
@@ -566,7 +571,9 @@ seed_upgrade_secret() {
 # upgrade_secret_kept: the stored credential holds exactly upgrade_secret_value.
 upgrade_secret_kept() {
     [ -n "$upgrade_secret_value" ] && [ -f "$secrets_dir/$upgrade_secret_name" ] &&
-        printf '%s' "$upgrade_secret_value" | cmp -s - "$secrets_dir/$upgrade_secret_name"
+        printf '%s' "$upgrade_secret_value" |
+            "$python" -c 'import pathlib, sys; sys.exit(pathlib.Path(sys.argv[1]).read_bytes() != sys.stdin.buffer.read())' \
+                "$secrets_dir/$upgrade_secret_name"
 }
 
 write_admin_config() {
