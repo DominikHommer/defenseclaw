@@ -172,7 +172,7 @@ func (r *NSSResolver) provenFactsForUID(uid int, now time.Time, includeGroups, u
 	// holds the uid too is another account the uid does not tell from this
 	// one (SharedUIDError, fail closed). A service that holds no account of
 	// the uid at all leaves the facts plain.
-	service, _, ownerErr := r.accountOwner(uid, account.Name)
+	service, _, ownerErr := r.accountOwnerWithRecordedUnsharedUID(uid, account.Name, unsharedRecorded)
 	if ownerErr != nil && !IsNotFound(ownerErr) {
 		return useridentity.DirectoryFacts{}, ownerErr
 	}
@@ -2106,16 +2106,18 @@ func (r *NSSResolver) passwdAbsent(service, key string, byUID bool) error {
 // answer (passwdAbsent).
 var errServiceUncheckable = errors.New("DefenseClaw has no check for this NSS service")
 
-// passwdOwner names the NSS passwd service that holds uid, asking the
-// services of the passwd line in order as glibc does (passwdProviders), with
-// its answer. A service's "no such account" passes the uid on only when it
-// is definitive (passwdAbsent): getent reports an nslcd, ypbind, winbindd or
-// SSSD that cannot answer the same way, and an account a later service
+// passwdOwnerWithRecordedUnsharedUID names the NSS passwd service that holds
+// uid, asking the services of the passwd line in order as glibc does
+// (passwdProviders), with its answer. A service's "no such account" passes
+// the uid onward only when the miss is definitive (passwdAbsent): getent
+// reports an nslcd, ypbind, winbindd or SSSD that cannot answer the same
+// way, and an account a later service
 // still holds under the uid is then not proved to be the one the uid
 // belongs to. A service DefenseClaw has no check for (an Entra ID module,
 // another module) is taken at its word, as before. ErrNotFound when every
-// service says no account holds it.
-func (r *NSSResolver) passwdOwner(uid int) (string, Account, error) {
+// service says no account holds it. A guardian-recorded absence proof can
+// resolve the root-only SSSD check when unsharedRecorded is true.
+func (r *NSSResolver) passwdOwnerWithRecordedUnsharedUID(uid int, unsharedRecorded bool) (string, Account, error) {
 	services, err := passwdProviders()
 	if err != nil {
 		return "", Account{}, err
@@ -2139,7 +2141,7 @@ func (r *NSSResolver) passwdOwner(uid int) (string, Account, error) {
 			// account's facts (review of r104 W2B, loop round 3).
 			return "", Account{}, fmt.Errorf("unixidentity: NSS service %s did not answer whether it holds uid %d: %w: %w", service, uid, err, errDirectoryUnconfirmed)
 		}
-		if err := r.passwdAbsent(service, strconv.Itoa(uid), true); err != nil && !errors.Is(err, errServiceUncheckable) {
+		if err := r.uidPasswdAbsent(service, uid, unsharedRecorded); err != nil {
 			return "", Account{}, fmt.Errorf("unixidentity: NSS service %s holds no uid %d but cannot show that it answers: %w", service, uid, err)
 		}
 	}
@@ -2153,6 +2155,10 @@ func (r *NSSResolver) passwdOwner(uid int) (string, Account, error) {
 // SSSD answer that holds no SID and is the /etc/passwd entry of the uid in
 // every field is that entry, so its owner is files.
 func (r *NSSResolver) accountOwner(uid int, name string) (string, Account, error) {
+	return r.accountOwnerWithRecordedUnsharedUID(uid, name, false)
+}
+
+func (r *NSSResolver) accountOwnerWithRecordedUnsharedUID(uid int, name string, unsharedRecorded bool) (string, Account, error) {
 	services, err := passwdProviders()
 	if err != nil {
 		return "", Account{}, err
@@ -2164,7 +2170,7 @@ func (r *NSSResolver) accountOwner(uid int, name string) (string, Account, error
 	if hasLocal && local.Name == name && leadingPasswdService(services) == "files" {
 		return "files", local, nil
 	}
-	service, owner, err := r.passwdOwner(uid)
+	service, owner, err := r.passwdOwnerWithRecordedUnsharedUID(uid, unsharedRecorded)
 	if err != nil {
 		return "", Account{}, err
 	}
@@ -2178,6 +2184,17 @@ func (r *NSSResolver) accountOwner(uid int, name string) (string, Account, error
 		}
 	}
 	return service, owner, nil
+}
+
+// uidPasswdAbsent accepts only the guardian's recorded root-only SSSD miss;
+// a found account, a stopped responder, or any other service still has to
+// answer for itself. NSS modules with no check retain their existing rule.
+func (r *NSSResolver) uidPasswdAbsent(service string, uid int, unsharedRecorded bool) error {
+	err := r.passwdAbsent(service, strconv.Itoa(uid), true)
+	if errors.Is(err, errServiceUncheckable) || unsharedRecorded && service == "sss" && errors.Is(err, errSSSDOnlineNeedsRoot) {
+		return nil
+	}
+	return err
 }
 
 // leadingPasswdService is the first service glibc asks for an account.
@@ -2293,8 +2310,7 @@ func (r *NSSResolver) checkUIDNotShared(uid int, owner string, account Account, 
 		switch {
 		case err == nil:
 		case IsNotFound(err):
-			if absentErr := r.passwdAbsent(service, strconv.Itoa(uid), true); absentErr != nil && !errors.Is(absentErr, errServiceUncheckable) &&
-				(!unsharedRecorded || !errors.Is(absentErr, errSSSDOnlineNeedsRoot)) {
+			if absentErr := r.uidPasswdAbsent(service, uid, unsharedRecorded); absentErr != nil {
 				return fmt.Errorf("unixidentity: uid %d: NSS service %s cannot show that it holds no other account of the uid: %w", uid, service, absentErr)
 			}
 			continue
@@ -2546,7 +2562,18 @@ var winbindUIDSID = func(ctx context.Context, uid int) (string, error) {
 // answers, the owner names another account than name, or SSSD or winbind
 // does not name the SID.
 func (r *NSSResolver) AccountIncarnation(uid int, name string) (string, bool) {
-	service, owner, err := r.accountOwner(uid, name)
+	return r.accountIncarnation(uid, name, false)
+}
+
+// AccountIncarnationForRecordedUnsharedUID names the current holder using a
+// guardian-recorded proof of SSSD's absence where that check needs root.
+// A newly found SSSD holder still changes the incarnation.
+func (r *NSSResolver) AccountIncarnationForRecordedUnsharedUID(uid int, name string) (string, bool) {
+	return r.accountIncarnation(uid, name, true)
+}
+
+func (r *NSSResolver) accountIncarnation(uid int, name string, unsharedRecorded bool) (string, bool) {
+	service, owner, err := r.accountOwnerWithRecordedUnsharedUID(uid, name, unsharedRecorded)
 	if err != nil || owner.Name != name {
 		return "", false
 	}

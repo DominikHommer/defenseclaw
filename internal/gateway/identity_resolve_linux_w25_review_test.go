@@ -52,10 +52,12 @@ func installPeerNSSReviewFake(t *testing.T, fake *peerNSSReviewFake, service boo
 	t.Helper()
 	oldFactory, oldNeedsRoot := newPeerNSSResolver, peerUnsharedUIDNeedsRoot
 	oldIncarnation, oldGroups := managedHookPeerAccountIncarnation, processGroupIDs
+	oldRecordedIncarnation := managedHookPeerRecordedAccountIncarnation
 	oldService, oldDomains := managedServiceHosted.Load(), observedGroupDomains
 	t.Cleanup(func() {
 		newPeerNSSResolver, peerUnsharedUIDNeedsRoot = oldFactory, oldNeedsRoot
 		managedHookPeerAccountIncarnation, processGroupIDs = oldIncarnation, oldGroups
+		managedHookPeerRecordedAccountIncarnation = oldRecordedIncarnation
 		setManagedServiceHosted(oldService)
 		observedGroupDomains = oldDomains
 	})
@@ -65,6 +67,40 @@ func installPeerNSSReviewFake(t *testing.T, fake *peerNSSReviewFake, service boo
 	processGroupIDs = func() ([]int, error) { return []int{os.Getgid()}, nil }
 	setManagedServiceHosted(service)
 	observedGroupDomains = &boundedNameSet{max: 16}
+}
+
+// The unixidentity test configures "passwd: sss files" and proves that its
+// ordinary owner lookup needs root while its recorded lookup finds files.
+// Here the gateway must use that recorded proof for the incarnation check
+// and the facts retry, then decide the managed local user's assignments.
+func TestResolveNSSPeerFactsUsesSSSDFirstGuardianRecord(t *testing.T) {
+	write, _ := unixFactsSpool(t)
+	fake := &peerNSSReviewFake{account: unixidentity.Account{UID: 6001, Name: "local-user"},
+		recordedFacts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal, Source: useridentity.SourceNSSFiles,
+			Groups: []string{"local-strict"}, Assurance: useridentity.AssuranceVerified, ResolvedAt: time.Now()}}
+	installPeerNSSReviewFake(t, fake, true)
+	managedHookPeerAccountIncarnation = func(unixidentity.Account) (string, bool) { return "", false }
+	managedHookPeerRecordedAccountIncarnation = func(unixidentity.Account) (string, bool) { return "files", true }
+	write(enterprisehooks.IdentitySpoolRecord{User: fake.account.Name, AccountIncarnation: "files"})
+
+	facts, err := resolveNSSPeerFacts(unixFactsUID)
+	if err != nil || fake.recordedCalls != 1 || facts.Source != useridentity.SourceNSSFiles || !facts.GuardianRecord {
+		t.Fatalf("recorded SSSD-first local facts = %+v, %v; recorded calls = %d", facts, err, fake.recordedCalls)
+	}
+	subject := profileSubjectFromVerified(VerifiedSubject{UserID: unixFactsUID, IDKind: useridentity.KindPOSIXUID,
+		UserName: fake.account.Name, Directory: facts, Source: subjectSourcePeerCredentials}, true)
+	set := identityTestSet(t, identityTestPlatforms[0], "watch",
+		config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Groups: []string{"local-strict"}}},
+		config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Users: []string{fake.account.Name}}})
+	if got := set.match(&subject, profileSubjectVerified, "codex", ""); got.Name != "strict" || got.Refused != "" {
+		t.Fatalf("managed local assignment = %+v; want strict without refusal", got)
+	}
+	// If the SSSD lookup now finds an account, the recorded miss cannot
+	// authorize reuse of the local facts.
+	fake.recordedErr = &unixidentity.SharedUIDError{UID: 6001, Accounts: []string{"local", "sss"}}
+	if facts, err := resolveNSSPeerFacts(unixFactsUID); err == nil || !facts.ResolvedAt.IsZero() {
+		t.Fatalf("new SSSD holder facts = %+v, %v; want refusal", facts, err)
+	}
 }
 
 func reviewPeerDecision(t *testing.T, uid int, name string, facts useridentity.DirectoryFacts, match config.ProfileMatch) profileDecision {

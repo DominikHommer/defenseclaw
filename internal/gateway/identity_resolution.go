@@ -29,16 +29,16 @@ import (
 //     LDAP, winbind or Windows token chain, an ambiguous name or uid, a
 //     pre-1.0.4 agents entry the upgrade did not bind, a group fact newer
 //     than the last macOS account listing).
-//   - A maybe whose profile the proven facts already give (a yes
-//     assignment's, or with no yes the default) changes nothing. Otherwise
-//     the request is refused, naming the facts those maybes need
+//   - A maybe changes nothing when the proven assignments' profile covers
+//     its profile, or when it names the default and no assignment is proven.
+//     Otherwise the request is refused, naming the facts those maybes need
 //     (profileDecision.Refused); Name is then the strictest combination of
 //     default_profile and every profile that matches or could match, for
 //     the administrator's explain, and authorizes nothing.
 //   - Else the profiles of the yes assignments apply, or default_profile
 //     when none matches: the one that enforces at least what each of the
 //     others does (profileCovers), otherwise their meet, the strictest
-//     combination field by field (guardrail_profile_meet_gw.go).
+//     combination field by field (guardrail_profile_meet.go).
 //
 // This replaces the earlier special cases (matchWithFailedLookup,
 // matchWithUnknownGroups, matchWithUnconfirmedGroups, and the legacy agent
@@ -373,13 +373,22 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 		}
 		return profileDecision{}, false
 	}
-	// An assignment that may apply changes nothing when its profile is one
-	// the proven facts already give: a matching assignment's, or with none
-	// matching, the default. The decision needs the unproven facts of the
-	// others only.
+	// An assignment that may apply changes nothing when the profile selected
+	// by proven assignments already covers it. With no proven assignment,
+	// only an uncertain assignment naming the default changes nothing.
+	// The decision needs only facts that could change the selected profile.
+	proven := set.defaultProfile
+	if len(yes) > 0 {
+		matched := make([]string, 0, len(yes))
+		for _, h := range yes {
+			matched = append(matched, h.profile)
+		}
+		proven, _ = set.meetOf(compactProfiles(matched), connectorName)
+	}
+	connectors := profileCoverConnectors(connectorName)
 	var needed []string
 	for i, name := range maybe {
-		if len(yes) == 0 && name == set.defaultProfile || len(yes) > 0 && slices.ContainsFunc(yes, func(h hit) bool { return h.profile == name }) {
+		if len(yes) == 0 && name == set.defaultProfile || len(yes) > 0 && set.profileCovers(proven, name, connectors) {
 			continue
 		}
 		for _, fact := range maybeNeeds[i] {

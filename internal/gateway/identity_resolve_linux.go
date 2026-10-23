@@ -44,6 +44,19 @@ var managedHookPeerAccountIncarnation = func(account unixidentity.Account) (stri
 	return resolver.AccountIncarnation(account.UID, account.Name)
 }
 
+// This lookup is used only after a current guardian record was read for the
+// same uid and account name. Its root-only SSSD absence proof came from that
+// record; the resolver still detects an SSSD account newly holding the uid.
+var managedHookPeerRecordedAccountIncarnation = func(account unixidentity.Account) (string, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), peerIncarnationTimeout)
+	defer cancel()
+	resolver, err := unixidentity.NewNSSResolver(ctx)
+	if err != nil {
+		return "", false
+	}
+	return resolver.AccountIncarnationForRecordedUnsharedUID(account.UID, account.Name)
+}
+
 // holderSpoolRecord is the guardian's current record of the uid key when it
 // was resolved for account, the account that holds the uid now: its name and
 // its account incarnation (unixidentity.AccountIncarnation) are the
@@ -52,7 +65,8 @@ var managedHookPeerAccountIncarnation = func(account unixidentity.Account) (stri
 // facts the first one's record gave it the first one's UPN, principal and
 // domain, and the profile assigned to them, until the guardian's next pass
 // (review of GAP-0551). A record that names no incarnation (an older
-// guardian's), or an incarnation that cannot be told now, proves nothing:
+// guardian's), or an incarnation that cannot be told now even with the
+// guardian's recorded SSSD miss, proves nothing:
 // the facts are then the gateway's own, as without a guardian, and the
 // cache looks them up again soon (awaitingSpoolUPN).
 // A record of another SID is an error (readIdentitySpoolFactsForAccount): the
@@ -65,7 +79,11 @@ func holderSpoolRecord(key string, account unixidentity.Account, accountSID stri
 	if !ok || record.AccountIncarnation == "" {
 		return enterprisehooks.IdentitySpoolRecord{}, false, nil
 	}
-	if incarnation, known := managedHookPeerAccountIncarnation(account); !known || incarnation != record.AccountIncarnation {
+	incarnation, known := managedHookPeerAccountIncarnation(account)
+	if !known {
+		incarnation, known = managedHookPeerRecordedAccountIncarnation(account)
+	}
+	if !known || incarnation != record.AccountIncarnation {
 		return enterprisehooks.IdentitySpoolRecord{}, false, nil
 	}
 	return record, true, nil
