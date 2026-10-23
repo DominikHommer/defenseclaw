@@ -86,6 +86,11 @@ _CONNECTORS: tuple[_Removed, ...] = (
 
 NAMES: tuple[str, ...] = tuple(c.name for c in _CONNECTORS)
 
+
+def is_removed(name: str | None) -> bool:
+    """Recognize a connector removed in 1.0.4, including its old ID aliases."""
+    return isinstance(name, str) and name.strip().casefold() in {*NAMES, "open-hands", "open_hands"}
+
 # How a Windows hooks.json command names the OpenHands connector of the
 # native launcher (defenseclaw-hook --connector openhands).
 _LAUNCHER_FLAG = re.compile(r"--connector(?:\s*=\s*|\s+)[\"']?open[-_]?hands\b", re.IGNORECASE)
@@ -356,6 +361,7 @@ def _links(path: str) -> int:
 def _hard_link_step(c: _Removed, script: str) -> str:
     lister = f"fsutil hardlink list {script}" if os.name == "nt" else f"find / -xdev -samefile {script}"
     return (
+        "copy back what you need from connector_backups before deleting any linked name there; "
         f"delete every other name of this file ({lister} lists them), then run "
         f"defenseclaw-gateway connector teardown --connector {c.name}, which writes the stub and revokes the tokens"
     )

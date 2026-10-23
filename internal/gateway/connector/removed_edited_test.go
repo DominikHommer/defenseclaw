@@ -328,6 +328,7 @@ func TestRemovedTeardownSavesTheEditToACopyOfItsOwn(t *testing.T) {
 	cases := map[string]struct {
 		unixOnly               bool
 		windowsRefusesHardLink bool
+		windowsLinkCount       uint32
 		prepare                func(t *testing.T, h *removedHost, saved string) prepared
 		// failSave: the save cannot be made (a link at its name); the
 		// module, its tokens and the link stay.
@@ -337,6 +338,7 @@ func TestRemovedTeardownSavesTheEditToACopyOfItsOwn(t *testing.T) {
 			// Windows cannot write the stub into a hard-linked module. It
 			// leaves the module and its tokens for manual cleanup instead.
 			windowsRefusesHardLink: true,
+			windowsLinkCount:       2,
 			prepare: func(t *testing.T, h *removedHost, saved string) prepared {
 				removedLinkOrSkip(t, h.script(c), saved)
 				return prepared{}
@@ -345,7 +347,8 @@ func TestRemovedTeardownSavesTheEditToACopyOfItsOwn(t *testing.T) {
 		"a hard link to the module, which has another name too": {
 			// Windows never writes into a file with more names; it keeps
 			// the module and its tokens (TestRemovedTeardownWritesTheStubUnderEveryNameOfTheScript).
-			unixOnly: true,
+			windowsRefusesHardLink: true,
+			windowsLinkCount:       3,
 			prepare: func(t *testing.T, h *removedHost, saved string) prepared {
 				removedLinkOrSkip(t, h.script(c), saved)
 				removedLinkOrSkip(t, h.script(c), filepath.Join(h.home, "elsewhere", c.script))
@@ -435,8 +438,16 @@ func TestRemovedTeardownSavesTheEditToACopyOfItsOwn(t *testing.T) {
 					if closeErr := file.Close(); closeErr != nil {
 						t.Fatal(closeErr)
 					}
-					if linkErr != nil || links != 2 {
-						t.Fatalf("the module still has %d names (%v), want two", links, linkErr)
+					if linkErr != nil || links != tc.windowsLinkCount {
+						t.Fatalf("the module still has %d names (%v), want %d", links, linkErr, tc.windowsLinkCount)
+					}
+					if tc.windowsLinkCount == 3 {
+						other := filepath.Join(h.home, "elsewhere", c.script)
+						otherInfo, statErr := os.Stat(other)
+						otherData, readErr := os.ReadFile(other)
+						if statErr != nil || readErr != nil || !os.SameFile(module, otherInfo) || string(otherData) != string(edit) {
+							t.Fatalf("the third name %s changed: stat %v, read %v", other, statErr, readErr)
+						}
 					}
 					newSaved := saved + "-2"
 					h.requireEditedSavedAt(t, c, newSaved, string(edit))

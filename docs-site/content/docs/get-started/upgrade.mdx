@@ -451,7 +451,9 @@ or OmniGent before 1.0.4:
   can't be written into (on Windows, or a file another account owns),
   DefenseClaw changes nothing there and keeps the tokens, so an old hook
   still reaches the gateway, which blocks the call. The gateway start, `doctor` and `status`
-  name the file with the step: delete its other names (`find / -xdev
+  name the file with the step: copy back any needed bytes from
+  `connector_backups` before deleting a linked name there; delete its other
+  names (`find / -xdev
   -samefile <file>` lists them; `fsutil hardlink list <file>` on Windows),
   or delete the file or move it out of `~/.defenseclaw/hooks` if it is not
   DefenseClaw's. Then run
@@ -473,6 +475,13 @@ or OmniGent before 1.0.4:
   `defenseclaw-gateway connector teardown --connector openhands` (or
   `omnigent`) and Windows Setup list what is left, each with the step to
   remove it:
+
+  A 1.0.3 OpenHands upgrade leaves its entries in `hooks.json` for manual removal,
+  even when that file still has the bytes setup wrote. The cleanup does not edit
+  agent config files that may also hold your hooks. The deny stub and retired
+  gateway route block calls through those entries. Running teardown again does
+  not remove the entries or clear the Cleanup row while they remain.
+
   - **OpenHands:** remove every hook whose command runs `openhands-hook.sh`
     (or `defenseclaw-hook --connector openhands`) from `hooks.json`, then
     restart OpenHands.
