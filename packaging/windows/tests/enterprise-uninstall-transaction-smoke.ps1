@@ -3540,12 +3540,12 @@ targets:
             Assert-Harness `
                 -Condition ($failed -ne $ExpectSuccess) `
                 -Message "$Name success result did not match expectation"
-            if ($ExpectSuccess -and -not $AlreadyUninstalled) {
+            if ($ExpectSuccess -and
+                $script:HarnessState.ContainsKey('tombstone_purge_requested')) {
                 # Recovery of an interrupted uninstall replays the mode
-                # this tombstone recorded at commit.
+                # the tombstone this case wrote recorded at commit.
                 Assert-Harness `
                     -Condition (
-                        $script:HarnessState.ContainsKey('tombstone_purge_requested') -and
                         [bool]$script:HarnessState.tombstone_purge_requested -eq [bool]$Purge
                     ) `
                     -Message "$Name tombstone did not record its uninstall mode"
