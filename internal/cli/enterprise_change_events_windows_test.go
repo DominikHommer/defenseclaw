@@ -334,6 +334,13 @@ func TestWindowsLifecycleRefusesBundleFlagsOnOtherChangeActions(t *testing.T) {
 				if len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" {
 					t.Fatalf("errors = %+v, want one invalid_arguments", result.Errors)
 				}
+				if tc.name == "REFUSECAPABILITYLOSS=1" {
+					for _, want := range []string{"REFUSECAPABILITYLOSS=1", "requires BUNDLE=", "deliver both with Setup /ensure"} {
+						if !strings.Contains(result.Errors[0].Message, want) {
+							t.Fatalf("refusal %q does not name %q", result.Errors[0].Message, want)
+						}
+					}
+				}
 				assertWindowsBundleInstalledAnchors(t, layout, nil, "after the refusal")
 				if tc.anchorRow {
 					assertOneRefusedAnchorInstall(t, spool, "invalid_arguments")
@@ -342,6 +349,69 @@ func TestWindowsLifecycleRefusesBundleFlagsOnOtherChangeActions(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A bundle delivery first settles receipts from interrupted runs. A full
+// state volume during that receipt write is a disk_full refusal, with the
+// recovery step and a matching refused TRUSTANCHORS= change event.
+func TestWindowsBundleSettleReceiptWriteOnAFullVolumeIsDiskFull(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	for _, tc := range []struct {
+		name, code string
+		anchors    bool
+		writeErr   error
+		nextStep   string
+	}{
+		{"full volume", string(enterprisebundle.CodeDiskFull), false, windows.ERROR_DISK_FULL, "free space on that volume"},
+		{"full volume with anchors", string(enterprisebundle.CodeDiskFull), true, windows.ERROR_DISK_FULL, "free space on that volume"},
+		{"other write failure", string(enterprisebundle.CodeStateInvalid), true, errors.New("access denied"), "run the same command again"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			layout := stubWindowsBundleHost(t)
+			spool := stubWindowsChangeSpool(t)
+			store := newWindowsBundleDriver(layout).Store
+			if _, err := store.Receive("b-01JA0000000000000000000033", 3, ""); err != nil {
+				t.Fatal(err)
+			}
+			receiptsDir := filepath.Join(layout.LifecycleDir, enterprisebundle.ReceiptsDirName)
+			faults := 0
+			windowsBundleEnsurePrivateDirectory = func(path string) error {
+				if filepath.Clean(path) == filepath.Clean(receiptsDir) {
+					faults++
+					return &os.PathError{Op: "write", Path: path, Err: tc.writeErr}
+				}
+				return os.MkdirAll(path, 0o700)
+			}
+			cmd, out := windowsBundleCommand()
+			opts := &windowsEnterpriseLifecycleOptions{bundlePath: filepath.Join(e.dir, "next.dcbundle"),
+				profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+			if tc.anchors {
+				opts.trustAnchors = e.anchors
+			}
+			done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", opts)
+			cleanupPreparedWindowsBundle(t, opts)
+			if !done || err == nil || faults != 1 {
+				t.Fatalf("settle: done=%v err=%v receipt write faults=%d, want one refusal\n%s", done, err, faults, out)
+			}
+			var result enterprisestatus.Result
+			if decodeErr := json.Unmarshal(out.Bytes(), &result); decodeErr != nil {
+				t.Fatalf("settle result: %v\n%s", decodeErr, out)
+			}
+			if len(result.Errors) != 1 || result.Errors[0].Code != tc.code ||
+				!strings.Contains(result.Errors[0].Message, "cannot settle the earlier bundle receipts") ||
+				!strings.Contains(result.Errors[0].Message, tc.nextStep) {
+				t.Fatalf("settle errors = %+v; want %s with cause and next step", result.Errors, tc.code)
+			}
+			assertWindowsBundleInstalledAnchors(t, layout, nil, "after the settlement refusal")
+			if tc.anchors {
+				assertOneRefusedAnchorInstall(t, spool, tc.code)
+			} else if events := windowsChangeEvents(t, spool); len(events) != 0 {
+				t.Fatalf("bundle-only refusal recorded anchor changes: %+v", events)
+			}
+			assertNoWindowsChangeReservations(t, spool)
+		})
 	}
 }
 

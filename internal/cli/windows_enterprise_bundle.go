@@ -720,11 +720,14 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		recordWindowsEarlyAnchorsRefusal(cmd, opts, code)
 		return refuse(code, message)
 	}
-	if opts.refuseCapabilityLoss && opts.bundlePath == "" {
-		return refuseArguments("invalid_arguments", "--refuse-capability-loss requires --bundle")
+	if opts.refuseCapabilityLoss && action != "ensure" {
+		return refuseArguments("invalid_arguments", "REFUSECAPABILITYLOSS=1 (--refuse-capability-loss) requires BUNDLE= (--bundle) and is valid only with Setup /ensure; nothing was changed: deliver both with Setup /ensure (defenseclaw enterprise windows ensure)")
 	}
 	if requested && action != "ensure" {
 		return refuseArguments("invalid_arguments", "BUNDLE= (--bundle) and TRUSTANCHORS= (--trust-anchors) are valid only with ensure; nothing was changed: deliver them with Setup /ensure (defenseclaw enterprise windows ensure)")
+	}
+	if opts.refuseCapabilityLoss && opts.bundlePath == "" {
+		return refuseArguments("invalid_arguments", "REFUSECAPABILITYLOSS=1 (--refuse-capability-loss) requires BUNDLE= (--bundle); nothing was changed: deliver both with Setup /ensure (defenseclaw enterprise windows ensure)")
 	}
 	// --mode/--connector is the QA shorthand the installer renders a
 	// config from: a config all the same (Setup refused it with these too).
@@ -890,8 +893,12 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	driver.DeliveryID = opts.bundleDeliveryID
 	report, rollback, err := driver.SettleRun(installed, windowsBundlePolicy(ctx))
 	if err != nil {
-		return refuseAnchors(string(enterprisebundle.CodeStateInvalid), "cannot settle the earlier bundle receipts: "+err.Error()+
-			"; nothing was failed or rolled back: run the same command again")
+		failure := enterprisebundle.StateWriteError("cannot settle the earlier bundle receipts", err)
+		message := failure.Detail
+		if failure.Code != enterprisebundle.CodeDiskFull {
+			message += "; nothing was failed or rolled back: run the same command again"
+		}
+		return refuseAnchors(string(failure.Code), message)
 	}
 	if n := len(report.Pending); n > 0 {
 		run.warnings = append(run.warnings, enterprisebundle.Warning{Code: enterprisebundle.WarnBundlePending,
