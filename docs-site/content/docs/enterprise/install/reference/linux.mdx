@@ -225,16 +225,24 @@ be applied, the transaction fails. After uninstall, the lifecycle removes
 its persistent sysctl file but leaves the running restriction in place until
 reboot.
 
-The user namespace setting also prevents rootless containers, root-run workloads that create
-user namespaces, and the user namespace based command sandboxes in Codex and
-Claude Code from starting. Configure agent
-sandbox behavior for this managed host before rollout; DefenseClaw's hooks
-still inspect each tool call when the agent runs without its own sandbox. A
-private user namespace that does not hide policy (`unshare -Ur`) is also
-rejected by the hook, but that check alone cannot protect a hidden policy.
-The ptrace setting prevents standard users from debugging their own processes
-with `gdb` or `strace`. Application control is still needed to keep users
-from launching modified agent clients or loader-injected variants.
+These are host-wide kernel settings, including for processes outside
+DefenseClaw. On a managed RHEL 9.8 compatibility lane, setting
+`user.max_user_namespaces=0` made a standard user's `unshare -Ur` and
+RootlessKit fail and stopped Codex's workspace sandbox from running a command.
+An OpenShell Docker sandbox ran with that setting alone, but failed when
+`kernel.yama.ptrace_scope=2` was applied; the combined settings also failed.
+Ordinary Claude Code and Hermes turns ran on that lane, without proving their
+optional sandboxes work. The OpenShell MicroVM probe was inconclusive because
+gateway JWT signing was not configured. Expect rootless container workflows,
+user namespace based command sandboxes, and process debugging with `gdb` or
+`strace` to be affected; test each required workload before managed rollout.
+Do not roll out this managed configuration on a host that requires any of the
+failed workloads until the namespace and ptrace enforcement strategy is
+resolved.
+The hook rejects a private user namespace when invoked, but a private view
+that hides machine policy before agent startup can prevent the agent from
+invoking the hook at all. Application control must also prevent modified or
+loader-injected clients from bypassing policy registration.
 
 ## Tetragon and AI Discovery Plane C
 

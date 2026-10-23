@@ -30,6 +30,8 @@ CHECKER = SCRIPTS / "check_enterprise_lifecycle_result.py"
 REBOOT_CHECKER_TEST = SCRIPTS / "test_check_enterprise_lifecycle_reboot.py"
 UNIX_LANE = SCRIPTS / "test-enterprise-unix-install.sh"
 POSTINSTALL_REBOOT_TEST = ROOT / "packaging/linux/tests/test_postinstall_userns_reboot.sh"
+# CI selects Python modules that name the changed file's basename.
+POSTINSTALL = ROOT / "packaging/linux/postinstall.sh"
 
 
 def _result(**overrides: Any) -> dict[str, Any]:
@@ -90,6 +92,7 @@ def test_pending_reboot_contract_runs_in_ci() -> None:
 
 @pytest.mark.skipif(os.name == "nt", reason="Linux postinstall requires a POSIX shell")
 def test_postinstall_reboot_contract_runs_in_ci() -> None:
+    assert POSTINSTALL.is_file()
     result = subprocess.run(
         ["sh", str(POSTINSTALL_REBOOT_TEST)],
         cwd=ROOT, capture_output=True, text=True, timeout=60, check=False,
