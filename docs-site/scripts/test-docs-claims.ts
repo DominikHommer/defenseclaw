@@ -92,4 +92,19 @@ describe('setup and rollback recovery guides', () => {
     assert.match(rollback, /recovery command.*installer prints/i);
     assert.doesNotMatch(rollback, /agent hooks are not guarded until `defenseclaw-gateway start` succeeds/i);
   });
+
+  it('distinguishes closed hooks from a failed closure during pending Windows recovery', () => {
+    const installer = readFileSync(join(repo, 'scripts/install.ps1'), 'utf8');
+    const closeHooks = /function Close-UnfinishedInstallHooks \{([\s\S]*?)\n\}\n\nfunction Clear-SetupDataDir/.exec(installer)?.[1];
+    assert.ok(closeHooks, 'Windows installer hook closure path not found');
+    assert.match(closeHooks, /if \(Close-AllHooks \$gateways\)/);
+    assert.match(closeHooks, /every agent hook blocks tool calls until the gateway runs again/);
+    assert.match(closeHooks, /agent hooks could not be closed: until the gateway runs, they follow the outage fail mode/);
+
+    const rollback = page('get-started/upgrade.mdx').split('## Rollback', 2)[1].split('## Update notices', 1)[0];
+    assert.match(rollback, /if (?:that|hook closure) succeeds, (?:they|hooks) block tool calls until the gateway runs again/i);
+    assert.match(rollback, /if the installer warns that hooks could not be closed, they follow the configured outage fail mode.*configured open may allow tool calls/i);
+    assert.match(rollback, /stop agent activity, fix the reported cause and run the recovery command the installer prints/i);
+    assert.doesNotMatch(rollback, /hooks block tool calls until recovery finishes/i);
+  });
 });
