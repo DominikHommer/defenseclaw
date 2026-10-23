@@ -572,7 +572,7 @@ seed_upgrade_secret() {
 upgrade_secret_kept() {
     [ -n "$upgrade_secret_value" ] && [ -f "$secrets_dir/$upgrade_secret_name" ] &&
         printf '%s' "$upgrade_secret_value" |
-            "$python" -c 'import pathlib, sys; sys.exit(pathlib.Path(sys.argv[1]).read_bytes() != sys.stdin.buffer.read())' \
+            "${python:-python3}" -c 'import pathlib, sys; sys.exit(pathlib.Path(sys.argv[1]).read_bytes() != sys.stdin.buffer.read())' \
                 "$secrets_dir/$upgrade_secret_name"
 }
 
