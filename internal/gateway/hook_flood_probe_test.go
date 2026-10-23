@@ -144,6 +144,27 @@ func TestHookFloodKeepsPendingIdentityPerCall(t *testing.T) {
 			t.Fatalf("ambiguous terminal changed session %d to %s", session, got)
 		}
 	}
+	// A provider can omit the session on the start and report it on the
+	// terminal. The exact ID still names the connector-scoped start uniquely.
+	startBody, _ := json.Marshal(map[string]any{
+		"transcript_path": filepath.Join(cwd, "transcript.jsonl"),
+		"cwd":             cwd, "hook_event_name": "PreToolUse", "tool_name": "Bash",
+		"tool_use_id": "sessionless-tool", "tool_input": map[string]any{"command": "echo ok"},
+	})
+	startRecorder := httptest.NewRecorder()
+	api.handleAgentHook("claudecode").ServeHTTP(startRecorder,
+		httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook", bytes.NewReader(startBody)))
+	if startRecorder.Code != http.StatusOK {
+		t.Fatalf("sessionless start status=%d answer=%s", startRecorder.Code, startRecorder.Body.String())
+	}
+	terminal("reported-session", "sessionless-tool")
+	var sessionlessStatus string
+	if err := database.QueryRow(`SELECT status FROM correlation_pending_operations WHERE session_id IS NULL AND operation_id='sessionless-tool'`).Scan(&sessionlessStatus); err != nil {
+		t.Fatal(err)
+	}
+	if sessionlessStatus != string(audit.CorrelationOperationCompleted) {
+		t.Fatalf("sessionless start with reported-session terminal status=%s, want completed", sessionlessStatus)
+	}
 }
 
 // hookFloodMinute is one minute of a flood: the latencies of the calls

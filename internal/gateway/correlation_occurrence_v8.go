@@ -697,8 +697,9 @@ func findHookPendingOperation(
 	found := false
 	if exactOperationID != "" {
 		// An exact provider ID is sufficient only when it identifies one
-		// active operation. A reported session must match; a terminal that
-		// omits it may still recover a unique start across all sessions.
+		// active operation. A reported session must match a recorded session,
+		// or a start with no recorded session. A terminal that omits its
+		// session may still recover a unique start across all sessions.
 		seen := make(map[string]bool, len(identities))
 		for _, identity := range identities {
 			key := identity.namespace + "\x00" + string(identity.kind)
@@ -709,7 +710,8 @@ func findHookPendingOperation(
 			query := audit.CorrelationPendingQuery{
 				ConnectorInstanceID: instance, Namespace: identity.namespace, Kind: identity.kind,
 				OperationID: exactOperationID, Type: operationType,
-				SessionID: req.SessionID, Status: audit.CorrelationOperationActive, Limit: 2,
+				SessionID: req.SessionID, SessionIDOrAbsent: req.SessionID != "",
+				Status: audit.CorrelationOperationActive, Limit: 2,
 			}
 			operations, err := repo.ListPendingOperations(ctx, query)
 			if err != nil {
