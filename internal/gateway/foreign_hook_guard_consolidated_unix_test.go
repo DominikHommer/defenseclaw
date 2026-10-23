@@ -27,6 +27,7 @@ import (
 func newForeignHookRealPublishTestServer(t *testing.T) *foreignHookPublishTestServer {
 	t.Helper()
 	server := newForeignHookPublishTestServer(t, enterprisepolicy.PublishForeignHookSessionDecision)
+	server.retryExpiredFence = true
 	for _, identity := range []string{server.alice, server.bob} {
 		dir, ok := enterprisepolicy.PublishedSessionIdentityDir(server.root, identity)
 		if !ok {
