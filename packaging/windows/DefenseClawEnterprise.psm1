@@ -20229,6 +20229,28 @@ function Test-DefenseClawLocalSystemToken {
     }
 }
 
+function Get-DefenseClawSetupGatewayCandidatePath {
+    param([string]$GatewayBinary, [string]$InstallerSource)
+    if (-not [string]::IsNullOrWhiteSpace($GatewayBinary)) {
+        return [string]$GatewayBinary
+    }
+    if (-not [string]::IsNullOrWhiteSpace($InstallerSource)) {
+        try {
+            $beside = [IO.Path]::Combine(
+                [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($InstallerSource)),
+                'defenseclaw-gateway.exe'
+            )
+            if ([IO.File]::Exists($beside)) {
+                return $beside
+            }
+        }
+        catch {
+            return ''
+        }
+    }
+    return ''
+}
+
 function Set-DefenseClawRecoveryGatewayCandidate {
     <#
         Standalone only. Names the gateway a pending transaction's recovery
@@ -20258,24 +20280,9 @@ function Set-DefenseClawRecoveryGatewayCandidate {
     if (-not (Test-DefenseClawStandaloneProfile)) {
         return
     }
-    $path = ''
-    if (-not [string]::IsNullOrWhiteSpace($GatewayBinary)) {
-        $path = [string]$GatewayBinary
-    }
-    elseif (-not [string]::IsNullOrWhiteSpace($InstallerSource)) {
-        try {
-            $beside = [IO.Path]::Combine(
-                [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($InstallerSource)),
-                'defenseclaw-gateway.exe'
-            )
-            if ([IO.File]::Exists($beside)) {
-                $path = $beside
-            }
-        }
-        catch {
-            $path = ''
-        }
-    }
+    $path = Get-DefenseClawSetupGatewayCandidatePath `
+        -GatewayBinary $GatewayBinary `
+        -InstallerSource $InstallerSource
     $script:DefenseClawRecoveryGatewayCandidate = @{
         path = $path
         unsigned_scope = [bool]$AllowUnsigned
@@ -20760,66 +20767,14 @@ function Invoke-DefenseClawManagedHooksLifecycleRecoveryStep {
     return $report
 }
 
-function Get-DefenseClawCommittedRetireRefusal {
-    <#
-        Names the installed-gateway retire refusal that warrants retrying a
-        committed journal with the replacement gateway: 'invalid_bundle' (a release
-        before GAP-1322 refuses to collect the contractless Kiro bundles 1.0.1
-        wrote) or 'untrusted_folder' (a release before #1105 / GAP-0781 failed
-        the whole retire at the first per-user folder it could not trust), or
-        'legacy_open_bundle' (releases through 1.0.2 refuse an unselected
-        open-mode bundle left by a newer release after a committed downgrade);
-        '' for anything else. It reads only the error the gateway put in its
-        one validated retire report, which
-        Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand attaches to the
-        exception, never the exception text: a failure running the command,
-        reading its report, or any other step cannot match, nor can a report
-        of another phase. The error must also have the whole shape of that
-        release's generation-collection failure for one account.
-    #>
-    param([AllowNull()][Management.Automation.ErrorRecord]$Failure)
-    if ($null -eq $Failure -or $null -eq $Failure.Exception) {
-        return ''
-    }
-    $data = $Failure.Exception.Data
-    if ($null -eq $data -or
-        -not $data.Contains('DefenseClawLifecycleAction') -or
-        -not $data.Contains('DefenseClawLifecycleReportError') -or
-        [string]$data['DefenseClawLifecycleAction'] -cne 'retire') {
-        return ''
-    }
-    $reportError = [string]$data['DefenseClawLifecycleReportError']
-    $collection = '^retire [a-z0-9_-]+ managed runtime generations for SID S-1-[0-9]+(-[0-9]+)+( \([^\r\n]+?\))?: '
-    if ($reportError -cmatch ($collection +
-            'enterprise hooks: managed runtime generation directory is untrusted: \S')) {
-        return 'untrusted_folder'
-    }
-    if ($reportError -cmatch $collection -and
-        $reportError.IndexOf(
-            'refusing to collect an invalid managed runtime bundle',
-            [StringComparison]::Ordinal
-        ) -ge 0) {
-        return 'invalid_bundle'
-    }
-    if ($reportError -cmatch ($collection +
-            'enterprise hooks: managed runtime bundle does not match its protected selector$')) {
-        # The installed 1.0.0-1.0.2 gateway requires fail_mode=closed even
-        # for an unselected bundle. The replacement gateway's GC validates
-        # and collects the old bundle before the next transaction starts.
-        return 'legacy_open_bundle'
-    }
-    return ''
-}
-
 function Invoke-DefenseClawCommittedManagedHooksLifecycleRetire {
     <#
         Retires the managed-hook lifecycle journal an earlier, committed
         lifecycle left behind, with the installed gateway, before a new
-        lifecycle opens its transaction. When the installed gateway reports a
-        known old collection refusal, the authenticated replacement gateway
-        runs that same retire now. Its GC checks every target and bundle and
-        collects all eligible generations before the next transaction. An
-        incompatible generation keeps the journal and fails before commit.
+        lifecycle opens its transaction. On a validated retire failure, the
+        authenticated replacement gateway runs that same retire. Its GC is
+        the only classifier of what the earlier install left behind. A
+        failure keeps the journal and stops before the new transaction.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -20837,15 +20792,19 @@ function Invoke-DefenseClawCommittedManagedHooksLifecycleRetire {
         $failure = $_
     }
     $message = [string]$failure.Exception.Message
-    $refusal = ''
-    if (Test-DefenseClawStandaloneProfile) {
-        $refusal = Get-DefenseClawCommittedRetireRefusal -Failure $failure
-    }
-    if ([string]::IsNullOrEmpty($refusal)) {
+    $data = $failure.Exception.Data
+    if (-not (Test-DefenseClawStandaloneProfile) -or
+        $null -eq $data -or
+        -not $data.Contains('DefenseClawLifecycleAction') -or
+        -not $data.Contains('DefenseClawLifecycleReportError') -or
+        [string]$data['DefenseClawLifecycleAction'] -cne 'retire') {
         throw $failure
     }
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath) {
-        if ($refusal -ceq 'untrusted_folder') {
+        $reportError = [string]$data['DefenseClawLifecycleReportError']
+        $collection = '^retire [a-z0-9_-]+ managed runtime generations for SID S-1-[0-9]+(-[0-9]+)+( \([^\r\n]+?\))?: '
+        if ($reportError -cmatch ($collection +
+                'enterprise hooks: managed runtime generation directory is untrusted: \S')) {
             throw (
                 "gateway service $GatewayServiceName failed while retiring the managed-hook lifecycle snapshot " +
                 'because a per-user hooks folder has untrusted permissions. Have an administrator inspect the ' +
@@ -23906,6 +23865,21 @@ function Get-DefenseClawLifecycleSources {
         -Sources $sources `
         -NativeCleanupBinary $NativeCleanupBinary `
         -AllowUnsigned:$AllowUnsigned
+    if ($Action -eq 'Uninstall' -and (Test-DefenseClawStandaloneProfile)) {
+        # Setup ships this gateway beside its installer even for Uninstall.
+        # Authenticate it before entering the lifecycle so a stale committed
+        # journal can use the same current GC as Upgrade and Repair.
+        $retireGateway = Get-DefenseClawSetupGatewayCandidatePath `
+            -GatewayBinary $GatewayBinary `
+            -InstallerSource $InstallerSource
+        if (-not [string]::IsNullOrWhiteSpace($retireGateway)) {
+            $sources['gateway'] = Get-DefenseClawSourceDescriptor `
+                -Path $retireGateway `
+                -Label 'gateway executable' `
+                -Authenticode `
+                -AllowUnsigned:$AllowUnsigned
+        }
+    }
     if ($Action -notin @('Install', 'Upgrade', 'Repair')) {
         return $sources
     }

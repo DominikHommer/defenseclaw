@@ -1,47 +1,23 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
+# A previously installed gateway may refuse to retire a committed lifecycle
+# journal. This smoke checks which gateway Setup asks next and whether a
+# failure keeps the journal. The replacement is mocked here; the Go managed
+# runtime generation tests check which bundles it can actually collect.
+
 #Requires -Version 5.1
 
-# A committed lifecycle can leave its managed-hook lifecycle journal behind
-# when the installed gateway refuses to collect an old runtime generation (a
-# release before GAP-1322 refuses the contractless Kiro bundles 1.0.1 wrote).
-# Releases through 1.0.2 also refuse an unselected open-mode generation that
-# 1.0.3 or later left when the older Setup committed a downgrade (GAP-0762).
-# The replacement gateway's retire decides which old generations can be
-# collected, which target folders it can skip, and which bundles are invalid.
-# Every later Setup upgrade, ensure and uninstall then failed retiring it
-# with that same installed gateway. A standalone lifecycle now asks the
-# replacement gateway to retire the exact journal before continuing; any other retire failure, a
-# pending transaction or the Secure Client profile keeps the error. The
-# teardown journal of a refused or rolled-back uninstall goes the same way
-# (GAP-1041). So does a journal whose retire stopped at a per-user folder the
-# installed gateway could not trust, which rolled back every later upgrade
-# with 1603 (#1105, GAP-0781); with a pending transaction that refusal keeps
-# naming the remedy. Only the error in the gateway's own retire report counts:
-# the same text from another failure, another phase or another report error
-# keeps the journal and the error. The gateway command is stubbed; runs in a
-# disposable scratch directory.
-
 [CmdletBinding()]
-param(
-    [string]$ScratchRoot = [IO.Path]::GetTempPath()
-)
+param([string]$ScratchRoot = [IO.Path]::GetTempPath())
 
 Microsoft.PowerShell.Core\Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $modulePath = [IO.Path]::GetFullPath(
-    (Microsoft.PowerShell.Management\Join-Path `
-        $PSScriptRoot `
-        '..\DefenseClawEnterprise.psm1')
+    (Microsoft.PowerShell.Management\Join-Path $PSScriptRoot '..\DefenseClawEnterprise.psm1')
 )
-$module = Microsoft.PowerShell.Core\Import-Module `
-    -Name $modulePath `
-    -Force `
-    -PassThru `
-    -ErrorAction Stop
-
+$module = Microsoft.PowerShell.Core\Import-Module -Name $modulePath -Force -PassThru -ErrorAction Stop
 $root = [IO.Path]::Combine(
     [IO.Path]::GetFullPath($ScratchRoot),
     ('dc-stale-lifecycle-journal-' + [Guid]::NewGuid().ToString('N'))
@@ -55,25 +31,19 @@ try {
         $layout = @{
             ManagedHooksLifecycleJournalPath = [IO.Path]::Combine($Root, 'managed-hooks-lifecycle-journal.json')
             PendingPath = [IO.Path]::Combine($Root, 'pending.json')
+            GatewayPath = [IO.Path]::Combine($Root, 'installed', 'defenseclaw-gateway.exe')
             ManifestPath = [IO.Path]::Combine($Root, 'targets.yaml')
-            HookPath = [IO.Path]::Combine($Root, 'defenseclaw-hook.exe')
         }
-        $dataDir = [IO.Path]::Combine($Root, 'user', '.defenseclaw')
-        $hooksDir = [IO.Path]::Combine($dataDir, 'hooks')
-        [void][IO.Directory]::CreateDirectory($hooksDir)
-        $otherDataDir = [IO.Path]::Combine($Root, 'other-user', '.defenseclaw')
-        $otherHooksDir = [IO.Path]::Combine($otherDataDir, 'hooks')
-        $targetSID = 'S-1-5-21-1-2-3-1017'
-        $otherSID = 'S-1-5-21-1-2-3-1018'
-        $generationID = '0123456789abcdef0123456789abcdef'
-        # Each is the error the installed gateway puts in its retire report.
         $gcRefusal = 'retire kiro managed runtime generations for SID S-1-5-21-1-2-3-1017: enterprise hooks: refusing to collect an invalid managed runtime bundle'
-        $openGenerationRefusal = 'retire claudecode managed runtime generations for SID S-1-5-21-1-2-3-1017: enterprise hooks: managed runtime bundle does not match its protected selector'
+        $selectorRefusal = 'retire claudecode managed runtime generations for SID S-1-5-21-1-2-3-1017: enterprise hooks: managed runtime bundle does not match its protected selector'
+        $identityRefusal = 'retire claudecode managed runtime generations for SID S-1-5-21-1-2-3-1017: enterprise hooks: refusing to collect a managed runtime bundle with a foreign identity: C:\Users\stale\.defenseclaw\hooks\.managed-runtime-claudecode-0123456789abcdef0123456789abcdef.json'
+        $unknownRefusal = 'retire claudecode managed runtime generations for SID S-1-5-21-1-2-3-1017: enterprise hooks: cannot decode a newer managed runtime bundle'
         $untrustedFolder = 'retire claudecode managed runtime generations for SID S-1-5-21-1-2-3-1103 (CONTOSO\stale): enterprise hooks: managed runtime generation directory is untrusted: C:\Users\stale\.defenseclaw\hooks: access denied'
         $script:TestRetireError = ''
         $script:TestRetireShape = 'report'
         $script:TestReplacementError = ''
         $script:TestReplacementCalled = $false
+        $script:TestReplacementKeepsJournal = $false
         function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
             param([hashtable]$Layout, [string]$GatewayServiceName, [string]$Action, [hashtable]$GatewaySource)
             if ($Action -cne 'retire') {
@@ -84,14 +54,14 @@ try {
                 if ($script:TestReplacementError) {
                     throw $script:TestReplacementError
                 }
-                [IO.File]::Delete($Layout.ManagedHooksLifecycleJournalPath)
+                if (-not $script:TestReplacementKeepsJournal) {
+                    [IO.File]::Delete($Layout.ManagedHooksLifecycleJournalPath)
+                }
                 return [pscustomobject]@{ ok = $true }
             }
             if ($script:TestRetireError) {
                 $text = "managed-hook lifecycle snapshot retire failed: $($script:TestRetireError)"
                 if ($script:TestRetireShape -ceq 'plain') {
-                    # Not from a gateway report (running the command, reading
-                    # its output, another step).
                     throw $text
                 }
                 $exception = [Management.Automation.RuntimeException]::new($text)
@@ -103,142 +73,28 @@ try {
             return [pscustomobject]@{ ok = $true }
         }
         $run = {
-            param([string]$Name, [string]$EnterpriseProfile, [string]$RetireError, [bool]$Pending, [bool]$WantThrow, [bool]$WantRemoved, [string]$Shape = 'report', [string]$BundleCase = 'open', [string]$OtherTargetCase = '')
-            $script:TestRetireShape = $Shape
-            Set-DefenseClawEnterpriseProfile -EnterpriseProfile $EnterpriseProfile
-            $journal = [ordered]@{
-                schema_version = 4
-                phase = 'captured'
-                manifest_path = $layout.ManifestPath
-                hook_binary = $layout.HookPath
-                gateway_addr = '127.0.0.1:18970'
-                gateway_service_name = 'DefenseClawGateway'
-                targets = @([ordered]@{
-                    connector = 'claudecode'
-                    sid = $targetSID
-                    data_dir = $dataDir
-                })
-            }
-            if ($OtherTargetCase) {
-                $otherConnector = if ($OtherTargetCase.StartsWith('other SID')) { 'claudecode' } else { 'codex' }
-                $otherTargetSID = if ($OtherTargetCase.StartsWith('other SID')) { $otherSID } else { $targetSID }
-                $otherTargetDataDir = if ($OtherTargetCase.StartsWith('other SID')) { $otherDataDir } else { $dataDir }
-                $journal.targets += [ordered]@{
-                    connector = $otherConnector
-                    sid = $otherTargetSID
-                    data_dir = $otherTargetDataDir
-                }
-            }
-            [IO.File]::WriteAllText($layout.ManagedHooksLifecycleJournalPath, ($journal | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 5 -Compress))
-            $bundle = [ordered]@{
-                schema_version = 1
-                generation_id = $generationID
-                connector = 'claudecode'
-                target_sid = $targetSID
-                data_dir = $dataDir
-                hook_executable = $layout.HookPath
-                gateway_addr = '127.0.0.1:18970'
-                gateway_service_name = 'DefenseClawGateway'
-                fail_mode = 'open'
-                scoped_token = 'test token'
-                hook_contract_id = 'claude-hooks-v1'
-                hook_contract_lock_updated_at = '2026-10-23T00:00:00Z'
-                hook_contract_entry_updated_at = '2026-10-23T00:00:00Z'
-            }
-            switch ($BundleCase) {
-                'schema 2' { $bundle.schema_version = 2 }
-                'schema string' { $bundle.schema_version = '1' }
-                'closed' { $bundle.fail_mode = 'closed' }
-                'invalid fail mode' { $bundle.fail_mode = 'permissive' }
-                'foreign generation' { $bundle.generation_id = 'fedcba9876543210fedcba9876543210' }
-                'foreign connector' { $bundle.connector = 'cursor' }
-                'foreign SID' { $bundle.target_sid = 'S-1-5-21-1-2-3-1018' }
-                'foreign data directory' { $bundle.data_dir = [IO.Path]::Combine($Root, 'other', '.defenseclaw') }
-                'foreign hook' { $bundle.hook_executable = [IO.Path]::Combine($Root, 'other-hook.exe') }
-                'foreign gateway address' { $bundle.gateway_addr = '127.0.0.1:18971' }
-                'foreign gateway service' { $bundle.gateway_service_name = 'OtherGateway' }
-                'nonstring token' { $bundle.scoped_token = 1 }
-                'unknown field' { $bundle['unexpected'] = 'value' }
-            }
-            $bundlePath = [IO.Path]::Combine($hooksDir, ".managed-runtime-claudecode-$generationID.json")
-            if ($BundleCase -cne 'absent') {
-                $content = if ($BundleCase -ceq 'malformed') { '{' } else { $bundle | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 5 -Compress }
-                if ($BundleCase -ceq 'duplicate key') {
-                    $content = $content.Replace('"schema_version":1,', '"schema_version":1,"schema_version":1,')
-                }
-                if ($BundleCase -ceq 'noncanonical whitespace') {
-                    $content += ' '
-                }
-                if ($BundleCase -ceq 'extra newline') {
-                    $content += [char]10
-                }
-                $encoding = if ($BundleCase -ceq 'UTF-16') { [Text.Encoding]::Unicode } else { [Text.UTF8Encoding]::new($false) }
-                [IO.File]::WriteAllText($bundlePath, ($content + [char]10), $encoding)
-            }
-            if ($BundleCase -cin @('second invalid', 'second closed')) {
-                $bundle.generation_id = 'fedcba9876543210fedcba9876543210'
-                if ($BundleCase -ceq 'second invalid') {
-                    $bundle.schema_version = 2
-                }
-                else {
-                    $bundle.fail_mode = 'closed'
-                }
-                [IO.File]::WriteAllText(
-                    [IO.Path]::Combine($hooksDir, '.managed-runtime-claudecode-fedcba9876543210fedcba9876543210.json'),
-                    (($bundle | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 5 -Compress) + [char]10)
-                )
-            }
-            if ($OtherTargetCase) {
-                $otherBundle = [ordered]@{}
-                foreach ($field in $bundle.Keys) {
-                    $otherBundle[$field] = $bundle[$field]
-                }
-                $otherBundle.generation_id = 'fedcba9876543210fedcba9876543210'
-                $otherBundle.connector = $otherConnector
-                $otherBundle.target_sid = $otherTargetSID
-                $otherBundle.data_dir = $otherTargetDataDir
-                $otherBundle.fail_mode = 'closed'
-                switch ($OtherTargetCase) {
-                    'other connector schema 2' { $otherBundle.schema_version = 2 }
-                    'other connector bad mode' { $otherBundle.fail_mode = 'permissive' }
-                    'other SID schema 2' { $otherBundle.schema_version = 2 }
-                    'other SID bad mode' { $otherBundle.fail_mode = 'permissive' }
-                    'other SID prior data directory' { $otherBundle.data_dir = [IO.Path]::Combine($Root, 'prior-user', '.defenseclaw') }
-                    'other SID prior hook binary' { $otherBundle.hook_executable = [IO.Path]::Combine($Root, 'prior-hook.exe') }
-                }
-                if ($OtherTargetCase -ceq 'other SID unreadable hooks') {
-                    [void][IO.Directory]::CreateDirectory($otherTargetDataDir)
-                    [IO.File]::WriteAllText($otherHooksDir, 'not a directory')
-                }
-                elseif ($OtherTargetCase -ceq 'other SID absent hooks') {
-                    [void][IO.Directory]::CreateDirectory($otherTargetDataDir)
-                }
-                elseif ($OtherTargetCase -cne 'other SID absent data root') {
-                    [void][IO.Directory]::CreateDirectory(
-                        [IO.Path]::Combine($otherTargetDataDir, 'hooks')
-                    )
-                    $otherBundlePath = [IO.Path]::Combine(
-                        $otherTargetDataDir, 'hooks',
-                        ".managed-runtime-$otherConnector-fedcba9876543210fedcba9876543210.json"
-                    )
-                    [IO.File]::WriteAllText(
-                        $otherBundlePath,
-                        (($otherBundle | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 5 -Compress) + [char]10)
-                    )
-                }
-            }
+            param(
+                [string]$Name,
+                [string]$Profile,
+                [string]$RetireError,
+                [bool]$Pending,
+                [string]$Shape,
+                [string]$ReplacementError,
+                [bool]$ReplacementKeepsJournal,
+                [bool]$WantReplacement,
+                [bool]$WantThrow,
+                [bool]$WantRemoved,
+                [bool]$SupplySource = $true
+            )
+            Set-DefenseClawEnterpriseProfile -EnterpriseProfile $Profile
+            [IO.File]::WriteAllText($layout.ManagedHooksLifecycleJournalPath, '{}')
             if ($Pending) {
                 [IO.File]::WriteAllText($layout.PendingPath, '{}')
             }
             $script:TestRetireError = $RetireError
-            $expectedReplacement = [bool](
-                $EnterpriseProfile -ceq 'Standalone' -and
-                -not $Pending -and $Shape -ceq 'report' -and
-                $RetireError -cin @($gcRefusal, $openGenerationRefusal, $untrustedFolder)
-            )
-            $script:TestReplacementError = if ($expectedReplacement -and $WantThrow) {
-                'replacement gateway rejected an incompatible managed runtime bundle'
-            } else { '' }
+            $script:TestRetireShape = $Shape
+            $script:TestReplacementError = $ReplacementError
+            $script:TestReplacementKeepsJournal = $ReplacementKeepsJournal
             $script:TestReplacementCalled = $false
             $script:DefenseClawStaleLifecycleJournalRemoved = ''
             $threw = $false
@@ -246,107 +102,59 @@ try {
                 Invoke-DefenseClawCommittedManagedHooksLifecycleRetire `
                     -Layout $layout `
                     -GatewayServiceName 'DefenseClawGateway' `
-                    -GatewaySource @{ path = 'authenticated replacement gateway' }
+                    -GatewaySource $(if ($SupplySource) { @{ path = 'authenticated replacement gateway' } } else { $null })
             }
             catch {
                 $threw = $true
-                # A refusal may name the remedy before the gateway's error.
-                if (-not ([string]$_.Exception.Message).Contains($RetireError) -and
-                    -not ($expectedReplacement -and $WantThrow -and
-                        ([string]$_.Exception.Message).Contains($script:TestReplacementError))) {
+                $wantedError = if ($ReplacementError -and $WantReplacement) {
+                    $ReplacementError
+                }
+                elseif ($ReplacementKeepsJournal -and $WantReplacement) {
+                    'replacement gateway left the committed managed-hook lifecycle journal behind'
+                }
+                else {
+                    $RetireError
+                }
+                if (-not ([string]$_.Exception.Message).Contains($wantedError)) {
                     $failures.Add("${Name}: error changed to '$($_.Exception.Message)'")
+                }
+                if ($Pending -and $RetireError -ceq $untrustedFolder -and
+                    -not ([string]$_.Exception.Message).Contains('Have an administrator inspect')) {
+                    $failures.Add("${Name}: pending untrusted-folder remedy is missing")
                 }
             }
             $removed = -not [IO.File]::Exists($layout.ManagedHooksLifecycleJournalPath)
-            if ($threw -ne $WantThrow) {
-                $failures.Add("${Name}: threw=$threw, want $WantThrow")
-            }
-            if ($removed -ne $WantRemoved) {
-                $failures.Add("${Name}: journal removed=$removed, want $WantRemoved")
-            }
-            if ($script:TestReplacementCalled -ne $expectedReplacement) {
-                $failures.Add("${Name}: replacement called=$script:TestReplacementCalled, want $expectedReplacement")
-            }
             $recorded = -not [string]::IsNullOrEmpty($script:DefenseClawStaleLifecycleJournalRemoved)
-            $wantRecorded = $WantRemoved -and -not [string]::IsNullOrEmpty($RetireError)
-            if ($recorded -ne $wantRecorded) {
-                $failures.Add("${Name}: removal recorded=$recorded, want $wantRecorded")
+            $wantRecorded = $WantReplacement -and $WantRemoved
+            if ($script:TestReplacementCalled -ne $WantReplacement -or
+                $threw -ne $WantThrow -or
+                $removed -ne $WantRemoved -or
+                $recorded -ne $wantRecorded) {
+                $failures.Add(
+                    "${Name}: replacement=$script:TestReplacementCalled threw=$threw removed=$removed recorded=$recorded; " +
+                    "want replacement=$WantReplacement threw=$WantThrow removed=$WantRemoved recorded=$wantRecorded"
+                )
             }
             [IO.File]::Delete($layout.ManagedHooksLifecycleJournalPath)
             [IO.File]::Delete($layout.PendingPath)
-            foreach ($file in [IO.Directory]::GetFiles($hooksDir)) {
-                [IO.File]::Delete($file)
-            }
-            if ([IO.Directory]::Exists($otherHooksDir)) {
-                foreach ($file in [IO.Directory]::GetFiles($otherHooksDir)) {
-                    [IO.File]::Delete($file)
-                }
-                [IO.Directory]::Delete($otherHooksDir)
-            }
-            if ([IO.File]::Exists($otherHooksDir)) {
-                [IO.File]::Delete($otherHooksDir)
-            }
-            if ([IO.Directory]::Exists($otherDataDir)) {
-                Microsoft.PowerShell.Management\Remove-Item -LiteralPath $otherDataDir -Recurse -Force
-            }
         }
         try {
-            & $run 'retired' 'Standalone' '' $false $false $true
-            & $run 'legacy bundle refused' 'Standalone' $gcRefusal $false $false $true
-            & $run 'older gateway refuses prior open generation' 'Standalone' $openGenerationRefusal $false $false $true
-            & $run 'older gateway refuses open beside selected closed' 'Standalone' $openGenerationRefusal $false $false $true 'report' 'second closed'
-            & $run 'open with another connector closed' 'Standalone' $openGenerationRefusal $false $false $true 'report' 'open' 'other connector closed'
-            & $run 'open with another SID closed' 'Standalone' $openGenerationRefusal $false $false $true 'report' 'open' 'other SID closed'
-            foreach ($otherTargetCase in @(
-                    'other SID absent data root', 'other SID absent hooks',
-                    'other SID unreadable hooks', 'other SID prior data directory',
-                    'other SID prior hook binary'
-                )) {
-                & $run "selector mismatch with $otherTargetCase" 'Standalone' $openGenerationRefusal $false $false $true 'report' 'open' $otherTargetCase
+            & $run 'installed gateway retired' 'Standalone' '' $false 'report' '' $false $false $false $true
+            foreach ($refusal in @($gcRefusal, $selectorRefusal, $identityRefusal, $unknownRefusal, $untrustedFolder,
+                    'deployment managed-hook activation binding is invalid')) {
+                & $run "staged gateway retries $refusal" 'Standalone' $refusal $false 'report' '' $false $true $false $true
             }
-            foreach ($otherTargetCase in @(
-                    'other connector schema 2', 'other connector bad mode',
-                    'other SID schema 2', 'other SID bad mode'
-                )) {
-                & $run "selector mismatch with $otherTargetCase bundle" 'Standalone' $openGenerationRefusal $false $true $false 'report' 'open' $otherTargetCase
-            }
-            foreach ($bundleCase in @(
-                    'closed', 'foreign data directory', 'foreign hook',
-                    'foreign gateway address', 'foreign gateway service', 'absent'
-                )) {
-                & $run "selector mismatch with $bundleCase bundle" 'Standalone' $openGenerationRefusal $false $false $true 'report' $bundleCase
-            }
-            foreach ($bundleCase in @(
-                    'schema 2', 'schema string', 'invalid fail mode',
-                    'foreign generation', 'foreign connector', 'foreign SID',
-                    'nonstring token', 'unknown field', 'malformed',
-                    'second invalid', 'duplicate key', 'noncanonical whitespace',
-                    'extra newline', 'UTF-16'
-                )) {
-                & $run "selector mismatch with $bundleCase bundle" 'Standalone' $openGenerationRefusal $false $true $false 'report' $bundleCase
-            }
-            & $run 'prior open generation, pending transaction' 'Standalone' $openGenerationRefusal $true $true $false
-            & $run 'prior open generation, Secure Client' 'SecureClient' $openGenerationRefusal $false $true $false
-            & $run 'prior open generation text outside a gateway report' 'Standalone' $openGenerationRefusal $false $true $false 'plain'
-            & $run 'prior open generation text in another phase' 'Standalone' $openGenerationRefusal $false $true $false 'phase'
-            & $run 'selector mismatch outside generation collection' 'Standalone' ('deployment binding failed: ' + $openGenerationRefusal) $false $true $false
-            & $run 'selector mismatch with another failure' 'Standalone' ($openGenerationRefusal + ': selector changed') $false $true $false
-            & $run 'other retire failure' 'Standalone' 'deployment managed-hook activation binding is invalid' $false $true $false
-            & $run 'pending transaction' 'Standalone' $gcRefusal $true $true $false
-            & $run 'Secure Client' 'SecureClient' $gcRefusal $false $true $false
-            & $run 'untrusted per-user folder' 'Standalone' $untrustedFolder $false $false $true
-            & $run 'untrusted per-user folder, pending transaction' 'Standalone' $untrustedFolder $true $true $false
-            & $run 'untrusted per-user folder, Secure Client' 'SecureClient' $untrustedFolder $false $true $false
-            # The same text, but not the gateway's retire-collection refusal.
-            & $run 'untrusted text outside a gateway report' 'Standalone' $untrustedFolder $false $true $false 'plain'
-            & $run 'untrusted text in another phase' 'Standalone' $untrustedFolder $false $true $false 'phase'
-            & $run 'untrusted text in another retire error' 'Standalone' 'deployment managed-hook activation binding is invalid: enterprise hooks: managed runtime generation directory is untrusted: C:\ProgramData\x' $false $true $false
-            & $run 'untrusted text after another collection error' 'Standalone' 'retire claudecode managed runtime generations for SID S-1-5-21-1-2-3-1103: open C:\Users\x: enterprise hooks: managed runtime generation directory is untrusted: C:\Users\x' $false $true $false
-            & $run 'legacy bundle text outside a gateway report' 'Standalone' $gcRefusal $false $true $false 'plain'
+            & $run 'staged gateway failure keeps journal and Go reason' 'Standalone' $identityRefusal $false 'report' 'replacement GC rejected the bundle' $false $true $true $false
+            & $run 'staged gateway leaving journal is an error' 'Standalone' $unknownRefusal $false 'report' '' $true $true $true $false
+            & $run 'missing authenticated replacement keeps journal' 'Standalone' $identityRefusal $false 'report' '' $false $false $true $false $false
+            & $run 'pending untrusted folder keeps remedy' 'Standalone' $untrustedFolder $true 'report' '' $false $false $true $false
+            & $run 'pending foreign identity stays pending' 'Standalone' $identityRefusal $true 'report' '' $false $false $true $false
+            & $run 'Secure Client keeps installed failure' 'SecureClient' $gcRefusal $false 'report' '' $false $false $true $false
+            & $run 'command error is not a gateway report' 'Standalone' $identityRefusal $false 'plain' '' $false $false $true $false
+            & $run 'another phase is not a retire report' 'Standalone' $identityRefusal $false 'phase' '' $false $false $true $false
 
-            # GAP-1041: the teardown journal of a rolled-back uninstall goes
-            # (and -Stale reports it); another phase, or a pending
-            # transaction, keeps it.
+            # GAP-1041: only a rolled-back teardown journal without a
+            # pending transaction is stale.
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
             $layout['ManagedHooksTeardownJournalPath'] = [IO.Path]::Combine($Root, 'managed-hooks-teardown-journal.json')
             foreach ($case in @(
@@ -361,19 +169,123 @@ try {
                 $script:DefenseClawStaleTeardownJournalRemoved = ''
                 $removed = Remove-DefenseClawRolledBackTeardownJournal -Layout $layout -Stale
                 $gone = -not [IO.File]::Exists($layout.ManagedHooksTeardownJournalPath)
-                $reported = -not [string]::IsNullOrEmpty($script:DefenseClawStaleTeardownJournalRemoved)
-                if ($removed -ne $case[2] -or $gone -ne $case[2] -or $reported -ne $case[2]) {
-                    $failures.Add("teardown journal $($case[0]) pending=$($case[1]): removed=$removed gone=$gone reported=$reported, want $($case[2])")
+                $recorded = -not [string]::IsNullOrEmpty($script:DefenseClawStaleTeardownJournalRemoved)
+                if ($removed -ne $case[2] -or $gone -ne $case[2] -or $recorded -ne $case[2]) {
+                    $failures.Add("teardown $($case[0]) pending=$($case[1]): removed=$removed gone=$gone recorded=$recorded")
                 }
                 [IO.File]::Delete($layout.ManagedHooksTeardownJournalPath)
                 [IO.File]::Delete($layout.PendingPath)
             }
+
+            # Setup /uninstall supplies a protected stage beside its installer.
+            # Resolve that source through the same lifecycle entry used by
+            # production, then enter the uninstall path with a stale journal.
+            Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+            $stageRoot = [IO.Path]::Combine($Root, 'setup')
+            [void][IO.Directory]::CreateDirectory($stageRoot)
+            $installer = [IO.Path]::Combine($stageRoot, 'install-enterprise.ps1')
+            $gateway = [IO.Path]::Combine($stageRoot, 'defenseclaw-gateway.exe')
+            $manifest = [IO.Path]::Combine($stageRoot, 'payload-manifest.json')
+            [IO.File]::WriteAllText($installer, 'test installer')
+            [IO.File]::WriteAllText($gateway, 'test gateway')
+            # The source's NTFS owner/DACL contract has its own smoke. Keep
+            # the actual source descriptor, signature and hash-pin checks.
+            function script:Assert-DefenseClawTrustedSource {
+                param([string]$Path, [string]$Label)
+                return $Path
+            }
+            $sha256 = [Security.Cryptography.SHA256]::Create()
+            try {
+                $gatewayHash = ([BitConverter]::ToString(
+                    $sha256.ComputeHash([IO.File]::ReadAllBytes($gateway))
+                )).Replace('-', '').ToLowerInvariant()
+            }
+            finally {
+                $sha256.Dispose()
+            }
+            [IO.File]::WriteAllText($manifest, (
+                @{ schema_version = 1; files = @{ 'defenseclaw-gateway.exe' = ('0' * 64) } } |
+                    Microsoft.PowerShell.Utility\ConvertTo-Json -Compress
+            ))
+            Initialize-DefenseClawStandalonePayloadTrust -TrustMode HashPinned -PayloadManifest $manifest
+            try {
+                [void](Get-DefenseClawLifecycleSources -Action Uninstall -InstallerSource $installer)
+                $failures.Add('standalone Uninstall admitted a gateway without its payload hash pin')
+            }
+            catch {
+                if (-not ([string]$_.Exception.Message).Contains('not admitted by the standalone payload trust policy')) {
+                    $failures.Add("standalone Uninstall rejected an unpinned gateway for the wrong reason: $($_.Exception.Message)")
+                }
+            }
+            [IO.File]::WriteAllText($manifest, (
+                @{ schema_version = 1; files = @{ 'defenseclaw-gateway.exe' = $gatewayHash } } |
+                    Microsoft.PowerShell.Utility\ConvertTo-Json -Compress
+            ))
+            Initialize-DefenseClawStandalonePayloadTrust -TrustMode HashPinned -PayloadManifest $manifest
+            $sources = Get-DefenseClawLifecycleSources -Action Uninstall -InstallerSource $installer
+            if (-not $sources.ContainsKey('gateway') -or
+                -not [string]::Equals([string]$sources['gateway'].path, $gateway, [StringComparison]::OrdinalIgnoreCase) -or
+                -not [string]::Equals([string]$sources['gateway'].sha256, $gatewayHash, [StringComparison]::OrdinalIgnoreCase)) {
+                $failures.Add('standalone Uninstall did not authenticate the Setup gateway source')
+            }
+            $explicitSources = Get-DefenseClawLifecycleSources -Action Uninstall -GatewayBinary $gateway
+            if (-not $explicitSources.ContainsKey('gateway') -or
+                -not [string]::Equals([string]$explicitSources['gateway'].sha256, $gatewayHash, [StringComparison]::OrdinalIgnoreCase)) {
+                $failures.Add('standalone Uninstall did not authenticate an explicit gateway source')
+            }
+            Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
+            $secureClientSources = Get-DefenseClawLifecycleSources -Action Uninstall -InstallerSource $installer
+            if ($secureClientSources.ContainsKey('gateway')) {
+                $failures.Add('Secure Client Uninstall gained a staged gateway source')
+            }
+            Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+            function script:Get-DefenseClawDeploymentMetadata {
+                param([hashtable]$Layout, [switch]$Required)
+                return [pscustomobject]@{ managed_hooks_activation = [pscustomobject]@{ state = 'activated' } }
+            }
+            function script:Assert-DefenseClawMetadataIdentity { param($Metadata, $GatewayServiceName, $GuardianServiceName) }
+            function script:Test-DefenseClawMetadataInstalled { param($Metadata) return $true }
+            function script:Assert-DefenseClawManagedHooksActivationRecord { param($Record) return $Record }
+            function script:Assert-DefenseClawOwnedServiceOrAbsent { param($Name, $ExpectedGatewayPath, $ExpectedManifestPath, [switch]$Guardian) }
+            function script:Assert-DefenseClawManagedServiceConfigurations { param($Layout, $GatewayServiceName, $GuardianServiceName, [switch]$AnyStartMode) }
+            function script:Remove-DefenseClawStandaloneInstallTreeReplacementBackups { param($Layout) }
+            function script:Assert-DefenseClawStandaloneInstallTreeNotInUse { param($Layout, $GatewayServiceName, $GuardianServiceName, $SelfUninstallCallerPID) }
+            function script:Assert-DefenseClawStandaloneUninstallInstallTree { param($Layout) }
+            function script:Assert-DefenseClawRecordedArtifactHashes { param($Metadata, $Layout, $Action) }
+            function script:Assert-DefenseClawUninstallStateTreeNoReparse { param($Layout) }
+            function script:Remove-DefenseClawRolledBackTeardownJournal { param($Layout, [switch]$Stale) throw 'uninstall reached teardown after stale journal retirement' }
+            foreach ($refusal in @($gcRefusal, $selectorRefusal, $identityRefusal, $unknownRefusal, $untrustedFolder)) {
+                [IO.File]::WriteAllText($layout.ManagedHooksLifecycleJournalPath, '{}')
+                $script:TestRetireError = $refusal
+                $script:TestRetireShape = 'report'
+                $script:TestReplacementError = ''
+                $script:TestReplacementKeepsJournal = $false
+                $script:TestReplacementCalled = $false
+                $threwTeardown = $false
+                try {
+                    [void](Invoke-DefenseClawUninstallLifecycle `
+                        -Layout $layout `
+                        -GatewayServiceName 'DefenseClawGateway' `
+                        -GuardianServiceName 'DefenseClawHookGuardian' `
+                        -GatewaySource $sources['gateway'])
+                }
+                catch {
+                    $threwTeardown = ([string]$_.Exception.Message).Contains(
+                        'uninstall reached teardown after stale journal retirement')
+                    if (-not $threwTeardown) {
+                        $failures.Add("Uninstall $refusal failed before teardown: $($_.Exception.Message)")
+                    }
+                }
+                if (-not $threwTeardown -or -not $script:TestReplacementCalled -or
+                    [IO.File]::Exists($layout.ManagedHooksLifecycleJournalPath)) {
+                    $failures.Add("Uninstall $refusal did not retire the stale journal with the Setup gateway")
+                }
+                [IO.File]::Delete($layout.ManagedHooksLifecycleJournalPath)
+            }
         }
         finally {
-            $script:TestRetireShape = 'report'
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile $originalProfile
             $script:DefenseClawStaleLifecycleJournalRemoved = ''
-            $script:DefenseClawStaleTeardownJournalRemoved = ''
         }
         return , $failures
     } $root
