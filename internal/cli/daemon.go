@@ -2954,7 +2954,15 @@ func printDaemonStartResult(pid int, snap gateway.HealthSnapshot) {
 // failed during this start. The gateway runs without it, so "OK" alone hid
 // that the connector is not enforced (GAP-1860).
 func printConnectorsNotStarted(snap gateway.HealthSnapshot) {
+	refusedByAgentSettings := guardrailAgentSettingsRefusals(snap.Guardrail.Details)
 	for _, name := range guardrailConnectorsNotStarted(snap.Guardrail.Details) {
+		if reason := refusedByAgentSettings[name]; reason != "" {
+			// Its agent's own settings refused the hooks; the reason names
+			// their fix (GAP-0578).
+			fmt.Printf("  %s %s (%s) was skipped, so it is not enforced: %s\n",
+				Style("!", "fg=yellow", "bold"), friendlyConnectorName(name), name, reason)
+			continue
+		}
 		fmt.Printf("  %s %s (%s) was skipped: its setup failed, so it is not enforced. "+
 			"See gateway.log for the reason, then run: defenseclaw setup %s\n",
 			Style("!", "fg=yellow", "bold"), friendlyConnectorName(name), name, name)

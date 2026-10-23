@@ -1225,3 +1225,93 @@ def test_hermes_summary_skips_reload_advice_when_no_host_runs(monkeypatch, capsy
     running = summary()
     assert "unverified; reload/restart required" in running
     assert "Reload/restart every running Hermes" in running
+
+
+def _agent_settings_refusal_runtime(monkeypatch, tmp_path: Path) -> str:
+    """Codex refused by its own settings, Claude Code running (GAP-0578)."""
+    cfg = _config(tmp_path)
+    entries = {name: _entry(name, tmp_path) for name in ("claudecode", "codex")}
+    (tmp_path / "hook_contract_lock.json").write_text(
+        json.dumps({"version": 2, "connectors": entries}),
+        encoding="utf-8",
+    )
+    (tmp_path / "active_connector.json").write_text(
+        json.dumps({"version": 3, "names": ["claudecode"], "inactive_names": []}),
+        encoding="utf-8",
+    )
+    reason = (
+        "Codex hooks are turned off in /home/u/.codex/config.toml ([features] hooks = false), "
+        "so Codex runs no DefenseClaw hook; turn them back on with: codex features enable hooks"
+    )
+    health = {
+        "started_at": "2026-10-22T18:22:00Z",
+        "guardrail": {"state": "running", "details": {
+            "connectors": ["claudecode"],
+            "connectors_not_started": ["codex"],
+            "connectors_refused_by_agent_settings": {"codex": reason},
+        }},
+    }
+    monkeypatch.setattr(cmd_setup, "_read_gateway_health", lambda *_args, **_kwargs: health)
+    monkeypatch.setattr(cmd_setup, "load_config", lambda **_kwargs: cfg)
+    monkeypatch.setattr(
+        cmd_doctor, "connector_setup_readiness", lambda _cfg, name: cmd_doctor.ConnectorSetupReadiness(True, name, "ready")
+    )
+    return reason
+
+
+def test_setup_wait_fails_at_once_with_the_agent_settings_reason(monkeypatch, tmp_path: Path) -> None:
+    """GAP-0578: `setup codex` with Codex hooks off fails with the fix, not a timeout."""
+    reason = _agent_settings_refusal_runtime(monkeypatch, tmp_path)
+    started = time.monotonic()
+    result = cmd_setup._wait_for_connector_runtime(
+        str(tmp_path), ["claudecode", "codex"], None, None, timeout=2.0,
+        require_gateway_health=True, required={"codex"},
+    )
+    assert not result
+    assert (result.connector, result.invariant, result.detail) == ("codex", "agent-settings", reason)
+    assert time.monotonic() - started < 1.5
+
+
+def test_setup_wait_skips_a_peer_with_the_agent_settings_reason(monkeypatch, tmp_path: Path, capsys) -> None:
+    """GAP-0578: `setup claude-code` while Codex hooks are off converges for Claude Code."""
+    _agent_settings_refusal_runtime(monkeypatch, tmp_path)
+    result = cmd_setup._wait_for_connector_runtime(
+        str(tmp_path), ["claudecode", "codex"], None, None, timeout=2.0,
+        require_gateway_health=True, required={"claudecode"},
+    )
+    assert result
+    assert result.skipped == frozenset({"codex"})
+    assert "skipping codex: Codex hooks are turned off" in capsys.readouterr().out
+
+
+def test_rollback_wait_accepts_a_connector_its_agent_settings_refused(monkeypatch, tmp_path: Path, capsys) -> None:
+    """GAP-0578: the rollback restart restores that exact registration, so the
+    gateway that runs the other connectors is not reported as down."""
+    _agent_settings_refusal_runtime(monkeypatch, tmp_path)
+    result = cmd_setup._wait_for_connector_runtime(
+        str(tmp_path), ["claudecode", "codex"], None, None, timeout=2.0,
+        require_gateway_health=True, required={"codex"}, accept_agent_settings_refusals=True,
+    )
+    assert result
+    assert result.skipped == frozenset({"codex"})
+    assert "skipping codex: Codex hooks are turned off" in capsys.readouterr().out
+
+
+def test_only_the_rollback_restart_accepts_agent_settings_refusals(monkeypatch, tmp_path: Path) -> None:
+    """GAP-0578: a forward setup still fails for the connector it sets up."""
+    seen: list[bool] = []
+    monkeypatch.setattr(cmd_setup, "_restart_defense_gateway", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(cmd_setup, "_hook_runtime_wait_targets", lambda *_args: ["claudecode", "codex"])
+    monkeypatch.setattr(cmd_setup, "_unverified_setup_peers", frozenset)
+    monkeypatch.setattr(cmd_setup, "_wait_for_defense_gateway_api", lambda *_args, **_kwargs: True)
+
+    def wait(*_args, **kwargs):
+        seen.append(kwargs.get("accept_agent_settings_refusals", False))
+        return cmd_setup._ConnectorRuntimeReadiness(True)
+
+    monkeypatch.setattr(cmd_setup, "_wait_for_connector_runtime", wait)
+    cmd_setup._restart_services(str(tmp_path), connector="codex", wait_for_connector_ready=True)
+    cmd_setup._restart_services(
+        str(tmp_path), connector="codex", wait_for_connector_ready=True, title=cmd_setup._ROLLBACK_RESTART_TITLE
+    )
+    assert seen == [False, True]
