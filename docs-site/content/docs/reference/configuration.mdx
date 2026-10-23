@@ -736,12 +736,12 @@ always dials and `disabled` never does. With `auto`, the default:
 - `codex` and `claudecode` dial only when `gateway.host` is not loopback;
 - every other connector, and an install with no connector, does not dial.
 
-`claw.mode` defaults to `openclaw`, so an install that never picked a
-connector (a sandbox-only install, for example) names OpenClaw without having
-it. When only `claw.mode` names OpenClaw (`guardrail.connector` is empty and
-`guardrail.connectors` has no `openclaw` entry), `gateway.host` is loopback,
-`fleet_mode` is unset or `auto`, and OpenClaw is not installed, the gateway
-does not dial. OpenClaw counts as installed when an `openclaw.json` exists at
+The stored `claw.mode` default is `openclaw` for older configs. When only that
+default names OpenClaw (`guardrail.connector` and `guardrail.connectors` are
+empty) and OpenClaw is not installed,
+the gateway and CLI resolve no agent connector. With a loopback `gateway.host`
+and `fleet_mode` unset or `auto`, the gateway does not dial. OpenClaw counts as
+installed when an `openclaw.json` exists at
 `claw.config_file` or in `claw.home_dir`, or an `openclaw` binary is on `PATH`
 or in `/usr/local/bin`, `/opt/homebrew/bin`, `~/.npm-global/bin` or
 `~/.local/bin`. Instead of reconnecting forever, `defenseclaw-gateway status`
@@ -751,6 +751,9 @@ shows the Gateway subsystem `DISABLED` with
 show the same text, and `OPENCLAW_GATEWAY_TOKEN` is not required. The gateway
 checks when it starts, so restart it after installing OpenClaw, or set
 `fleet_mode: enabled` to dial regardless.
+
+When `guardrail.connectors` lists agents, the active connector comes from that
+roster. An older `claw.mode` default does not add OpenClaw to it.
 
 ### Routing and observability behavior
 

@@ -113,7 +113,7 @@ class StepResult:
 class FirstRunOptions:
     """Structured input for the guided first-run backend."""
 
-    connector: str = "codex"
+    connector: str = "none"
     rerun_command: str = "defenseclaw init"
     # Complete ordered connector selection for this first-run transaction.
     # ``None`` preserves single-connector callers by using ``connector``.
@@ -1204,11 +1204,11 @@ def _normalize_connector(raw: str | None) -> str:
     if value == "none":
         return "none"
     if value == "":
-        value = "codex"
+        return "none"
     try:
         return connector_paths.normalize(value)
     except Exception:
-        return value or "openclaw"
+        return value
 
 
 def _normalize_profile(raw: str, connector: str) -> str:

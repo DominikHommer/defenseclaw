@@ -4046,7 +4046,7 @@ class Config:
             self.active_connector(),
             openclaw_home=self.claw.home_dir,
             workspace_dir=self.connector_workspace_dir(),
-        ) or _expand(self.claw.home_dir)
+        )
 
     def connector_workspace_dir(self) -> str:
         """Return the explicitly pinned connector workspace, if any."""
@@ -4073,16 +4073,26 @@ class Config:
         """Return the canonical connector name for this config.
 
         Mirrors ``Config.activeConnector`` in claw.go: precedence is
-        ``guardrail.connector`` → ``claw.mode`` → ``"openclaw"``,
-        whitespace-trimmed and lowercased. Public so cmd_doctor /
+        ``guardrail.connector`` → configured ``claw.mode`` → the roster,
+        whitespace-trimmed and lowercased. An unconfigured install returns
+        ``""``. Public so cmd_doctor /
         cmd_uninstall can answer "which framework is this install
         running against?" without recomputing the rule.
         """
+        if not self.has_connector_configured():
+            return ""
         if self.guardrail.connector.strip():
             return connector_paths.normalize(self.guardrail.connector)
+        if self.guardrail.connectors:
+            roster = sorted(
+                {connector_paths.normalize(name) for name in self.guardrail.connectors if name.strip()}
+            )
+            if roster:
+                mode = connector_paths.normalize(self.claw.mode)
+                return mode if mode in roster else roster[0]
         if self.claw.mode.strip():
             return connector_paths.normalize(self.claw.mode)
-        return "openclaw"
+        return ""
 
     def effective_webhooks(self, connector: str = "") -> list[WebhookConfig]:
         """Resolve which webhooks ``connector``'s events route to (D5b).
@@ -4111,7 +4121,7 @@ class Config:
         OpenClaw the machine does not have configures nothing (GAP-0568,
         :func:`_mark_openclaw_not_installed`).
         """
-        if self.guardrail.connectors or self.guardrail.connector.strip():
+        if any(name.strip() for name in self.guardrail.connectors) or self.guardrail.connector.strip():
             return True
         if getattr(self, "_openclaw_not_installed", False) and openclaw_only_implied(self):
             return False
@@ -4133,9 +4143,8 @@ class Config:
         ``["openclaw"]`` — callers that fan out over connectors (``status``,
         ``aibom``, the shared list/scan resolver) then render an explicit
         "no connector configured" empty state instead of a phantom
-        openclaw. :meth:`active_connector` keeps its singular ``"openclaw"``
-        default untouched, so path resolution and other single-connector
-        callers are unaffected.
+        openclaw. :meth:`active_connector` also returns ``""`` so path
+        resolution does not invent an agent.
         """
         if self.guardrail.connectors:
             # Dedupe after normalization so two alias keys (e.g. "claude-code"
@@ -4172,8 +4181,7 @@ class Config:
         Polymorphic — when ``guardrail.connector`` is set, the
         connector-specific layout (for Codex, project and personal
         ``.agents/skills`` layers) is
-        returned; otherwise falls back to OpenClaw paths derived
-        from ``claw.home_dir`` and ``claw.config_file``.
+        returned; an unconfigured install has no agent paths.
 
         ``connector`` overrides the resolved connector so multi-connector
         callers (e.g. the TUI catalog focus selector via

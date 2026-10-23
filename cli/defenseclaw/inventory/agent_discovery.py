@@ -1304,8 +1304,8 @@ def _keep_versions_of_slow_unchanged_agents(
 
 
 def first_installed(disc: AgentDiscovery, fallback: str = "codex") -> str:
-    """Return the preferred installed connector, or *fallback* when none match."""
-    fallback = _normalize_connector(fallback) or "codex"
+    """Return the preferred installed connector, or no connector when none match."""
+    fallback = _normalize_connector(fallback)
     preferred = disc.agents.get(fallback)
     if preferred and preferred.installed:
         return fallback
@@ -1315,7 +1315,7 @@ def first_installed(disc: AgentDiscovery, fallback: str = "codex") -> str:
         if signal and signal.installed:
             return name
 
-    return fallback if fallback in DISCOVERABLE_CONNECTORS else "codex"
+    return ""
 
 
 def apply_config_state(disc: AgentDiscovery, cfg: Any) -> AgentDiscovery:
