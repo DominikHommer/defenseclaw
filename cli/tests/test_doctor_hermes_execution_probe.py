@@ -22,7 +22,6 @@ from defenseclaw import fail_mode
 from defenseclaw.commands import cmd_doctor
 from defenseclaw.doctor_hooks import _HERMES_REQUIRED_HOOKS, WindowsHookCheck
 
-
 # What the gateway seals for Hermes on Unix, in its order: the shared
 # inspect-*.sh runtime, Hermes' own script and the _hardening.sh it sources
 # (connector.hookRuntimeArtifactPaths). Go pins the same list in
