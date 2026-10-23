@@ -6166,6 +6166,9 @@ def _check_windows_native_hooks(
     if check.state == CODEX_PROBE_TIMEOUT_STATE:
         _emit("warn", label, f"{check.state}: {check.detail}", r=r, remediation=_CODEX_PROBE_TIMEOUT_STEP)
         return
+    if _hermes_passive_unverified(check, r):
+        _emit("warn", label, f"{check.state}: {check.detail}", r=r, remediation=_HERMES_PASSIVE_STEP)
+        return
     status = "pass" if check.healthy else "fail"
     _emit(status, label, f"{check.state}: {check.detail}", r=r, remediation=check.repair)
 
@@ -6627,6 +6630,19 @@ def _hermes_windows_execution_probe(check: WindowsHookCheck) -> WindowsHookCheck
 
 
 _CODEX_PROBE_TIMEOUT_STEP = "rerun defenseclaw doctor in a minute; Codex answers faster once the host is less busy"
+_HERMES_PASSIVE_STEP = (
+    "run 'defenseclaw doctor' without --passive to check for running Hermes hosts; "
+    "restart any running Hermes host so it loads the hooks"
+)
+
+
+def _hermes_passive_unverified(check: WindowsHookCheck | None, r: _DoctorResult) -> bool:
+    """A valid Hermes registration --passive could not check for running hosts.
+
+    --passive does not list processes, so an idle Hermes is unknown there,
+    not a failure; the full doctor checks it, as on Unix (GAP-0660).
+    """
+    return check is not None and check.state == "pending-reload" and not r.list_processes
 
 
 def _windows_native_hook_check(
@@ -9187,10 +9203,7 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                         f"on-disk registration is present at {path}; running Hermes hosts are unverified "
                         "because --passive does not check processes; live=false",
                         r=r,
-                        remediation=(
-                            "run 'defenseclaw doctor' without --passive to check for running Hermes hosts; "
-                            "restart any running Hermes host so it loads the hooks"
-                        ),
+                        remediation=_HERMES_PASSIVE_STEP,
                     )
                     return
                 _emit(
@@ -15686,6 +15699,8 @@ def _check_hook_contract_lock(
         _emit("fail", "Hook contract", detail, r=r)
     elif native_runtime is not None and native_runtime.state == CODEX_PROBE_TIMEOUT_STATE:
         _emit("warn", "Hook contract", detail, r=r, remediation=_CODEX_PROBE_TIMEOUT_STEP)
+    elif _hermes_passive_unverified(native_runtime, r) and status in {"known", "unversioned"}:
+        _emit("warn", "Hook contract", detail, r=r, remediation=_HERMES_PASSIVE_STEP)
     elif native_runtime is not None and not native_runtime.healthy:
         _emit("fail", "Hook contract", detail, r=r, remediation=native_runtime.repair)
     elif status == "unknown":

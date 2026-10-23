@@ -275,6 +275,16 @@ func TestStandaloneGatewayConfigCheckNamesInlineSecrets(t *testing.T) {
 	}
 }
 
+// GAP-0647: a managed API bind the gateway refuses at start was installed,
+// failed the transaction and left it pending; it is refused before any change.
+func TestStandaloneGatewayConfigCheckRefusesANonLoopbackAPIBind(t *testing.T) {
+	body := strings.Replace(standaloneGatewayCheckConfig, "  api_bind: 127.0.0.1\n", "  api_bind: 0.0.0.0\n", 1)
+	err := validateStandaloneGatewayConfig(writeStandaloneGatewayCheckConfig(t, body), t.TempDir(), "")
+	if err == nil || !strings.Contains(err.Error(), "0.0.0.0") {
+		t.Fatalf("api_bind 0.0.0.0 = %v, want a refusal", err)
+	}
+}
+
 // An unresolved service token must not bypass the JSONL path preflight.
 func TestStandaloneGatewayConfigCheckRefusesJSONLDirectoryWithMissingToken(t *testing.T) {
 	t.Setenv("DC_TEST_UNSET_HEC_TOKEN", "")

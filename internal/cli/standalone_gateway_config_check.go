@@ -108,6 +108,12 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 		if err := runtimeConfig.Scanners.CheckPinnedFiles(); err != nil {
 			return fmt.Errorf("the gateway cannot use a scanner file that %s pins: %v", configPath, err)
 		}
+		// The inspection decode skips the listener check the gateway runs
+		// at start: api_bind 0.0.0.0 was installed and failed the
+		// transaction (GAP-0647).
+		if err := config.ValidateManagedEnterpriseListenerBindings(runtimeConfig); err != nil {
+			return fmt.Errorf("the gateway cannot use %s: %v", configPath, err)
+		}
 	}
 	if runtimeConfig == nil || !runtimeConfig.Guardrail.Enabled {
 		return nil

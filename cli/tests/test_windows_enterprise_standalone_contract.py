@@ -955,6 +955,79 @@ def test_timeout_recovery_reports_settled_only_when_no_lifecycle_record_remains(
     assert "existing pending transaction" in cases["replay kept pending"]["purge"]
 
 
+_STATUS_ARTIFACT_HARNESS = r"""
+# The status collaborators are healthy; any other one is a no-op.
+$ExecutionContext.InvokeCommand.CommandNotFoundAction = {
+    param($name, $event)
+    $event.CommandScriptBlock = {}
+    $event.StopSearch = $true
+}
+function Get-DefenseClawServiceState { 'running' }
+function Test-DefenseClawMetadataInstalled { $true }
+function Test-DefenseClawStandaloneProfile { $true }
+function Test-DefenseClawAdministrator { $true }
+function Test-DefenseClawGatewayReady { $true }
+function Test-DefenseClawGuardianReady { $true }
+function Invoke-DefenseClawCodexRequirementsCommand { [pscustomobject]@{ ok = $true } }
+$root = '__ROOT__'
+$layout = @{ PendingPath = (Join-Path $root 'pending.json') }
+$hashes = [ordered]@{}
+foreach ($name in 'cli', 'gateway') {
+    $path = Join-Path $root "$name.exe"
+    [IO.File]::WriteAllText($path, $name)
+    $layout[$(if ($name -eq 'cli') { 'CLIPath' } else { 'GatewayPath' })] = $path
+    $hashes[$name] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+}
+$global:Metadata = [pscustomobject]@{ hashes = [pscustomobject]$hashes }
+function Get-DefenseClawDeploymentMetadata { $global:Metadata }
+function Get-Case([string]$Name) {
+    $status = Get-DefenseClawLifecycleStatus -Action Status -Layout $layout -GatewayServiceName gateway -GuardianServiceName guardian
+    [pscustomobject]@{ name = $Name; ok = [bool]$status.ok; errors = [string[]]@($status.errors) } | ConvertTo-Json -Compress
+}
+Get-Case 'healthy'
+[IO.File]::WriteAllText($layout.GatewayPath, 'replaced')
+Get-Case 'gateway replaced'
+[IO.File]::WriteAllText($layout.GatewayPath, 'gateway')
+[IO.File]::Move($layout.CLIPath, "$($layout.CLIPath).quarantined")
+Get-Case 'cli missing'
+"""
+
+
+def test_standalone_status_fails_while_a_recorded_payload_file_is_missing(tmp_path: Path) -> None:
+    """GAP-0665: with bin\\defenseclaw.exe quarantined, verify failed naming
+    cli while status stayed ok. Status checks every payload file the metadata
+    records, as verify does."""
+    import json
+
+    engine = _portable_pwsh()
+    if engine is None:
+        pytest.skip("PowerShell 7 (pwsh) is not installed")
+    module = _text(MODULE)
+    names = ["Get-DefenseClawLifecycleStatus", "Assert-DefenseClawInstalledArtifacts"]
+    functions = "\n".join(_function_body(module, name) for name in names if f"function {name} {{\n" in module)
+    harness = tmp_path / "status-artifacts.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        + functions
+        + "\n"
+        + _STATUS_ARTIFACT_HARNESS.replace("__ROOT__", str(tmp_path)),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [engine, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    cases = {case["name"]: case for case in map(json.loads, completed.stdout.strip().splitlines())}
+    assert cases["healthy"]["ok"] is True and not cases["healthy"]["errors"], cases["healthy"]
+    for name, artifact in (("gateway replaced", "gateway"), ("cli missing", "cli")):
+        assert cases[name]["ok"] is False, cases[name]
+        assert any(error.endswith(f": {artifact}") for error in cases[name]["errors"]), cases[name]
+
+
 _FAKE_RENAME_NATIVE = r"""
 class FakeNative {
     static [object[]] GetFileHolders([string[]]$Paths) {
@@ -1068,6 +1141,64 @@ Invoke-Case 'a window on InstallRoot with a holder' 'denied' @($hook) @() $false
     uninstall = _function_body(module, "Invoke-DefenseClawUninstallLifecycle")
     call = uninstall.index("$retirementDeferred = Invoke-DefenseClawCommittedInstallRootRetirement `")
     assert "-SelfUninstallCallerPID $SelfUninstallCallerPID" in uninstall[call : call + 300]
+
+
+def test_an_uninstall_refuses_a_lasting_install_root_holder_before_its_commit(tmp_path) -> None:
+    # GAP-0625: a program that held bin\defenseclaw-hook.exe open past the
+    # rename retry made the CLI uninstall fail after its commit, with the
+    # services and hooks already removed. The standalone uninstall now looks
+    # for InstallRoot holders before it changes anything, while the services
+    # and hooks still enforce, and refuses only a holder seen at every look;
+    # the services, hook calls with new pids and a holder that exits pass.
+    source = tmp_path / "DefenseClaw"
+    _run_lifecycle_functions(
+        tmp_path,
+        [
+            "Format-DefenseClawProcessInUse",
+            "Get-DefenseClawInstallRootHolders",
+            "Assert-DefenseClawStandaloneInstallRootNotHeld",
+        ],
+        _FAKE_RENAME_NATIVE
+        + r"""
+function Initialize-DefenseClawNativeSecurity { return [FakeNative] }
+function Test-DefenseClawStandaloneProfile { return $true }
+function Get-DefenseClawUninstallOwnProcessIds { return , [Collections.Generic.HashSet[int]]@([int]$PID, 777, 900) }
+$script:StateFileInUseCheckLimit = 16384
+$script:InstallRootRetirementRetryMilliseconds = 400
+$script:InstallTreeUseRecheckMilliseconds = 20
+$layout = @{ InstallRoot = '""" + str(source) + r"""' }
+[void][IO.Directory]::CreateDirectory([IO.Path]::Combine($layout.InstallRoot, 'bin'))
+[IO.File]::WriteAllText([IO.Path]::Combine($layout.InstallRoot, 'bin', 'defenseclaw-hook.exe'), 'stand-in')
+$global:RmThrows = $false
+function Get-DefenseClawProcessImages {
+    $global:Look++
+    $global:RmHolders = [object[]]@(& $global:Holders $global:Look | Where-Object { $_.ProcessId })
+    return @(& $global:Holders $global:Look | Where-Object { $_.Path })
+}
+function Invoke-Case([string]$Name, [scriptblock]$Holders, [string]$Expect) {
+    $global:Look = 0
+    $global:Holders = $Holders
+    $outcome = 'passed'
+    try { Assert-DefenseClawStandaloneInstallRootNotHeld -Layout $layout -GatewayServiceName gateway -GuardianServiceName guardian -SelfUninstallCallerPID 777 }
+    catch { $outcome = $_.Exception.Message }
+    if ($outcome -notlike $Expect) { throw "${Name}: '$outcome' (want $Expect)" }
+    Write-Host "${Name}: $outcome"
+}
+$hook = $layout.InstallRoot + '\bin\defenseclaw-hook.exe'
+Invoke-Case 'no holder' { param($n) } 'passed'
+Invoke-Case 'only the caller' { param($n) [pscustomobject]@{ ProcessId = 777; AppName = 'defenseclaw' } } 'passed'
+Invoke-Case 'a service' { param($n) [pscustomobject]@{ ProcessId = 900; AppName = 'DefenseClawGateway' } } 'passed'
+Invoke-Case 'hook calls' { param($n) [pscustomobject]@{ Id = 4000 + $n; Path = $hook; UserName = 'CORP\alice'; Parent = 'claude' } } 'passed'
+Invoke-Case 'a holder that exits' { param($n) if ($n -lt 4) { [pscustomobject]@{ ProcessId = 5151; AppName = 'Scanner' } } } 'passed'
+Invoke-Case 'a lasting holder' { param($n) [pscustomobject]@{ ProcessId = 5151; AppName = 'pwsh' } } 'uninstall_in_use: pwsh (pid 5151)*nothing was changed*'
+""",
+    )
+    uninstall = _function_body(_text(MODULE), "Invoke-DefenseClawUninstallLifecycle")
+    check = uninstall.index("Assert-DefenseClawStandaloneInstallRootNotHeld `")
+    assert check < uninstall.index("$snapshot = New-DefenseClawTransaction")
+    assert check < uninstall.index("Invoke-DefenseClawManagedHooksTeardownCommand")
+    assert check < uninstall.index("Remove-DefenseClawService -Name")
+    assert "-SelfUninstallCallerPID $SelfUninstallCallerPID" in uninstall[check : check + 300]
 
 
 def test_the_deferred_retirement_stops_at_once_on_a_rename_this_account_may_not_do(tmp_path) -> None:
@@ -1258,3 +1389,112 @@ foreach ($rollback in @($false, $true)) {
             ("Microsoft.PowerShell.Management\\Remove-Item -LiteralPath $directory", "Remove-Item -LiteralPath $directory"),
         ],
     )
+
+
+def test_repair_rebuilds_deployment_metadata_that_is_not_json(tmp_path: Path) -> None:
+    """GAP-0629: deployment.json overwritten with text. Reading it refused
+    nothing: it ran takeown + icacls /reset, which left the file's DACL
+    inherited, and reported no deployment, after which every status, ensure
+    and repair refused the DACL. The read now refuses the file as unreadable,
+    with its DACL as found or drifted, and Repair from Setup rebuilds it with
+    the canonical DACL. A drifted file that parses is still refused."""
+    import json
+
+    engine = _portable_pwsh()
+    if engine is None:
+        pytest.skip("PowerShell 7 (pwsh) is not installed")
+    module = _text(MODULE)
+    functions = "\n".join(
+        _function_body(module, name)
+        for name in (
+            "ConvertFrom-DefenseClawDeploymentMetadataText",
+            "Get-DefenseClawDeploymentMetadata",
+            "Repair-DefenseClawUnreadableDeploymentMetadata",
+            "Write-DefenseClawJsonAtomic",
+        )
+    )
+    harness = tmp_path / "unreadable-metadata.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\nSet-StrictMode -Version Latest\n"
+        + functions
+        + r"""
+$script:SchemaVersion = 1
+$script:AdministratorsSID = 'S-1-5-32-544'
+$script:UnreadableMetadataMessage = 'could not read the installed deployment metadata'
+$script:System32 = '__ROOT__'
+$global:Resets = 0
+$script:IcaclsExe = { $global:Resets++ }
+$root = '__ROOT__'
+$Layout = @{
+    MetadataPath = Join-Path $root 'deployment.json'; PendingPath = Join-Path $root 'pending.json'
+    InstallRoot = Join-Path $root 'install'; StateRoot = Join-Path $root 'state'
+    CLIPath = Join-Path $root 'defenseclaw.exe'; GatewayPath = Join-Path $root 'gateway.exe'
+    CertificationCodexHome = ''; CoreHardeningCertification = $false
+}
+foreach ($key in @('CodexMachinePolicyPath', 'CodexManagedHooksDirectory', 'CodexManagedHooksStatePath',
+        'CodexRequirementsOwnershipPath', 'CodexRequirementsAclBackupPath',
+        'AgentApplicationControlAttestationPath', 'ManagedHooksTeardownJournalPath')) {
+    $Layout[$key] = Join-Path $root $key
+}
+function Assert-DefenseClawNoReparsePath { param([string]$Path) }
+function New-DefenseClawDirectory { param([string]$Path) }
+function New-DefenseClawCanonicalPathAcl { return 'canonical' }
+function Assert-DefenseClawCanonicalPathAcl {
+    param([string]$Path, $Expected)
+    if ($global:Drifted) { throw "managed DACL is not protected after exact ACL replacement: $Path" }
+}
+function Set-DefenseClawPathAcl { param([string]$Path, [string]$Kind, [string]$GatewayServiceSID) $global:Drifted = $false; $global:Stamps++ }
+function Test-DefenseClawTrustStrictAncestors { return $false }
+function Write-DefenseClawAclSelfHealAdvisory { param($Path, $Reason) }
+function Test-DefenseClawMetadataInstalled { param($Metadata) return [bool]$Metadata.installed }
+function Resolve-DefenseClawCertificationCodexHome { param($Path, $GatewayServiceName, $GuardianServiceName) return $Path }
+function Test-DefenseClawLayoutBrokerEnabled { param($Layout) return $false }
+function Test-DefenseClawServiceExists { param([string]$Name) return $true }
+function Assert-DefenseClawOwnedServiceOrAbsent { param($Name, $ExpectedGatewayPath) }
+$full = @('gateway', 'acp', 'hook', 'sensor_helper', 'installer', 'module')
+function Invoke-Case([string]$Name, [string]$Text, [bool]$Drifted, [string[]]$Sources) {
+    [IO.File]::WriteAllText($Layout.MetadataPath, $Text)
+    $global:Drifted = $Drifted
+    $global:Stamps = 0
+    $global:Resets = 0
+    $sourceTable = @{}
+    foreach ($source in $Sources) { $sourceTable[$source] = @{} }
+    $read = ''
+    try { $read = [string]((Get-DefenseClawDeploymentMetadata -Layout $Layout -Required) -ne $null) }
+    catch { $read = $_.Exception.Message }
+    $repair = ''
+    try {
+        $rebuilt = Repair-DefenseClawUnreadableDeploymentMetadata -Layout $Layout -Sources $sourceTable `
+            -GatewayServiceName 'DefenseClawGateway' -GuardianServiceName 'DefenseClawHookGuardian' -WarningAction SilentlyContinue
+        $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout -Required
+        $repair = "rebuilt=$rebuilt installed=$($metadata.installed) stamps=$($global:Stamps) drifted=$($global:Drifted)"
+    }
+    catch { $repair = $_.Exception.Message }
+    [pscustomobject]@{ name = $Name; read = $read; repair = $repair; resets = $global:Resets } | ConvertTo-Json -Compress
+}
+$valid = '{"schema_version":1,"installed":true,"install_root":"' + $Layout.InstallRoot.Replace('\', '\\') +
+    '","state_root":"' + $Layout.StateRoot.Replace('\', '\\') + '","profile":"standalone","hashes":{}}'
+Invoke-Case 'garbage' 'this is not json at all, 30 b' $false $full
+Invoke-Case 'garbage drifted' 'this is not json at all, 30 b' $true $full
+Invoke-Case 'empty' '' $false $full
+Invoke-Case 'garbage without payload' 'this is not json at all, 30 b' $false @('gateway')
+Invoke-Case 'valid drifted' $valid $true $full
+""".replace("__ROOT__", str(tmp_path)),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [engine, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    cases = {case["name"]: case for case in map(json.loads, completed.stdout.strip().splitlines())}
+    for name in ("garbage", "garbage drifted", "empty"):
+        assert cases[name]["read"].startswith("could not read the installed deployment metadata"), cases[name]
+        assert cases[name]["resets"] == 0, cases[name]
+        assert cases[name]["repair"] == "rebuilt=True installed=True stamps=1 drifted=False", cases[name]
+    assert "only Setup /repair" in cases["garbage without payload"]["repair"]
+    assert cases["valid drifted"]["read"].startswith("managed DACL is not protected")
+    assert cases["valid drifted"]["repair"].startswith("managed DACL is not protected")

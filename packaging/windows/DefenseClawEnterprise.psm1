@@ -156,6 +156,9 @@ $script:AclSelfHealMarker = 'managed_acl_self_heal'
 # misleading when triaging logs - nuclear teardown isn't a DACL repair.
 $script:NuclearUninstallMarker = 'managed_nuclear_uninstall'
 $script:SchemaVersion = 1
+# Prefix of the refusal for a deployment.json that is not a JSON object; the
+# CLI maps it to ensure_refused and Repair rebuilds the file (GAP-0629).
+$script:UnreadableMetadataMessage = 'could not read the installed deployment metadata'
 $script:AgentApplicationControlAttestationSchemaVersion = 2
 $script:AgentApplicationControlPrerequisite = 'wdac_or_applocker_approved_agent_client_rules'
 $trustedMachineRoots = Get-DefenseClawTrustedMachineRoots
@@ -10571,6 +10574,92 @@ function New-DefenseClawManagedHooksActivationRecord {
         -ExpectedDeploymentGenerationID $DeploymentGenerationID
 }
 
+function ConvertFrom-DefenseClawDeploymentMetadataText {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [AllowNull()][AllowEmptyString()][string]$Text
+    )
+    $reason = 'it is not a JSON object'
+    $metadata = $null
+    try {
+        $metadata = $Text | Microsoft.PowerShell.Utility\ConvertFrom-Json
+    }
+    catch {
+        $reason = $_.Exception.Message
+    }
+    if ($metadata -isnot [pscustomobject]) {
+        throw "$($script:UnreadableMetadataMessage) $Path ($reason); run Setup /repair to rebuild it"
+    }
+    return $metadata
+}
+
+function Repair-DefenseClawUnreadableDeploymentMetadata {
+    <#
+        Repair rebuilds a deployment.json that is not JSON, whatever its DACL,
+        from the machine's own record: the layout roots, the registered
+        services and the authenticated payload that replaces every recorded
+        artifact. The rebuilt record has the pre-activation legacy shape, so
+        the Repair transaction re-derives the activation, target and hash
+        results from the host as it migrates such a deployment, and writes
+        the full record. A pending transaction keeps its snapshot instead.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][hashtable]$Sources,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.MetadataPath -PathType Leaf) -or
+        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath)) {
+        return $false
+    }
+    try {
+        [void](Get-DefenseClawDeploymentMetadata -Layout $Layout -Required)
+        return $false
+    }
+    catch {
+        if (-not ([string]$_.Exception.Message).StartsWith(
+                $script:UnreadableMetadataMessage,
+                [StringComparison]::Ordinal)) {
+            throw
+        }
+        $unreadable = [string]$_.Exception.Message
+    }
+    $required = @('gateway', 'acp', 'hook', 'sensor_helper', 'installer', 'module')
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.CLIPath -PathType Leaf) {
+        $required += 'cli'
+    }
+    $missing = @($required | Microsoft.PowerShell.Core\Where-Object { -not $Sources.ContainsKey($_) })
+    if ($missing.Count -ne 0) {
+        throw "$unreadable; only Setup /repair carries every artifact it must re-record ($($missing -join ', '))"
+    }
+    if (-not (Test-DefenseClawServiceExists -Name $GatewayServiceName)) {
+        throw "$unreadable; no $GatewayServiceName service is registered, so run Setup /install or /uninstall PURGE=1"
+    }
+    Assert-DefenseClawOwnedServiceOrAbsent `
+        -Name $GatewayServiceName `
+        -ExpectedGatewayPath $Layout.GatewayPath
+    Write-DefenseClawJsonAtomic -Path $Layout.MetadataPath -Value ([ordered]@{
+        schema_version = $script:SchemaVersion
+        deployment_mode = 'managed_enterprise'
+        installed = $true
+        install_root = $Layout.InstallRoot
+        state_root = $Layout.StateRoot
+        gateway_service = $GatewayServiceName
+        guardian_service = $GuardianServiceName
+        hashes = [ordered]@{}
+        profile = 'standalone'
+    })
+    Set-DefenseClawPathAcl `
+        -Path $Layout.MetadataPath `
+        -Kind AdminFile `
+        -GatewayServiceSID $script:AdministratorsSID
+    Microsoft.PowerShell.Utility\Write-Warning -Message (
+        "DefenseClaw enterprise repair: rebuilding the deployment metadata: $unreadable"
+    )
+    return $true
+}
+
 function Get-DefenseClawDeploymentMetadata {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -10587,11 +10676,29 @@ function Get-DefenseClawDeploymentMetadata {
         -IsDirectory:$false `
         -Kind AdminFile `
         -GatewayServiceSID $script:AdministratorsSID
-    Assert-DefenseClawCanonicalPathAcl `
-        -Path $Layout.MetadataPath `
-        -Expected $expectedMetadataAcl
     try {
-        $metadata = Microsoft.PowerShell.Management\Get-Content -LiteralPath $Layout.MetadataPath -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+        Assert-DefenseClawCanonicalPathAcl `
+            -Path $Layout.MetadataPath `
+            -Expected $expectedMetadataAcl
+    }
+    catch {
+        # A file that is not JSON records nothing a drifted DACL could have
+        # let someone forge: report it as unreadable, which Repair rebuilds.
+        # A drifted file that parses stays refused for its DACL.
+        $aclError = $_
+        try {
+            $driftedText = Microsoft.PowerShell.Management\Get-Content -LiteralPath $Layout.MetadataPath -Raw
+        }
+        catch {
+            throw $aclError
+        }
+        [void](ConvertFrom-DefenseClawDeploymentMetadataText `
+            -Path $Layout.MetadataPath `
+            -Text $driftedText)
+        throw $aclError
+    }
+    try {
+        $metadataText = Microsoft.PowerShell.Management\Get-Content -LiteralPath $Layout.MetadataPath -Raw
     }
     catch {
         # Bulldoze: a prior scoped uninstall cycle on this box may have
@@ -10606,7 +10713,7 @@ function Get-DefenseClawDeploymentMetadata {
         # Strict mode (DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1)
         # preserves the pre-change throw.
         if (Test-DefenseClawTrustStrictAncestors) {
-            throw "cannot parse DefenseClaw enterprise deployment metadata: $($_.Exception.Message)"
+            throw "cannot read DefenseClaw enterprise deployment metadata: $($_.Exception.Message)"
         }
         $initialReadError = $_.Exception.Message
         Write-DefenseClawAclSelfHealAdvisory `
@@ -10619,10 +10726,9 @@ function Get-DefenseClawDeploymentMetadata {
         try {
             $null = & $takeownExe '/F' $Layout.MetadataPath '/A' 2>&1
             $null = & $script:IcaclsExe $Layout.MetadataPath '/reset' '/C' '/L' 2>&1
-            $metadata = Microsoft.PowerShell.Management\Get-Content `
+            $metadataText = Microsoft.PowerShell.Management\Get-Content `
                 -LiteralPath $Layout.MetadataPath `
-                -Raw |
-                Microsoft.PowerShell.Utility\ConvertFrom-Json
+                -Raw
         }
         catch {
             # Recovery read also denied. In non-strict mode this is
@@ -10645,6 +10751,9 @@ function Get-DefenseClawDeploymentMetadata {
             return $null
         }
     }
+    $metadata = ConvertFrom-DefenseClawDeploymentMetadataText `
+        -Path $Layout.MetadataPath `
+        -Text $metadataText
     if ([int]$metadata.schema_version -ne $script:SchemaVersion) {
         throw "unsupported DefenseClaw enterprise deployment metadata schema: $($metadata.schema_version)"
     }
@@ -22806,6 +22915,39 @@ function Sync-DefenseClawStandaloneManagedHooksActivationBinding {
     return $true
 }
 
+function Assert-DefenseClawInstalledArtifacts {
+    <#
+        Every payload file the deployment metadata records is present and
+        matches its recorded hash. Verify and status share it.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Metadata
+    )
+    foreach ($property in $Metadata.hashes.PSObject.Properties) {
+        # Must cover every key the hash writer emits.
+        $path = switch ($property.Name) {
+            'broker' { if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) { $Layout.BrokerPath } else { $null } }
+            'gateway' { $Layout.GatewayPath }
+            'acp' { $Layout.ACPPath }
+            'hook' { $Layout.HookPath }
+            'sensor_helper' { $Layout.SensorHelperPath }
+            'compiler' { Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath }
+            'cli' { $Layout.CLIPath }
+            'installer' { $Layout.InstallerPath }
+            'module' { $Layout.ModulePath }
+            default { $null }
+        }
+        if ($null -eq $path -or -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "installed artifact recorded in metadata is missing: $($property.Name)"
+        }
+        $actualHash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actualHash -cne ([string]$property.Value).ToLowerInvariant()) {
+            throw "installed artifact hash drift: $($property.Name)"
+        }
+    }
+}
+
 function Assert-DefenseClawEnterpriseDeployment {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -23469,28 +23611,7 @@ function Assert-DefenseClawEnterpriseDeployment {
         $null -eq $metadata.hashes.PSObject.Properties['cli']) {
         throw 'deployment metadata is missing the installed CLI artifact hash'
     }
-    foreach ($property in $metadata.hashes.PSObject.Properties) {
-        # Must cover every key the hash writer emits.
-        $path = switch ($property.Name) {
-            'broker' { if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) { $Layout.BrokerPath } else { $null } }
-            'gateway' { $Layout.GatewayPath }
-            'acp' { $Layout.ACPPath }
-            'hook' { $Layout.HookPath }
-            'sensor_helper' { $Layout.SensorHelperPath }
-            'compiler' { Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath }
-            'cli' { $Layout.CLIPath }
-            'installer' { $Layout.InstallerPath }
-            'module' { $Layout.ModulePath }
-            default { $null }
-        }
-        if ($null -eq $path -or -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {
-            throw "installed artifact recorded in metadata is missing: $($property.Name)"
-        }
-        $actualHash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($actualHash -cne ([string]$property.Value).ToLowerInvariant()) {
-            throw "installed artifact hash drift: $($property.Name)"
-        }
-    }
+    Assert-DefenseClawInstalledArtifacts -Layout $Layout -Metadata $metadata
 
     $gatewayEnvironment = [Collections.Generic.List[string]]::new()
     foreach ($value in @(
@@ -24255,6 +24376,14 @@ function Get-DefenseClawLifecycleStatus {
             Assert-DefenseClawGatewayServiceAccess `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName
+        }
+        catch {
+            $errors.Add($_.Exception.Message)
+        }
+        # Status said ok while verify failed on a missing payload file such
+        # as a quarantined bin\defenseclaw.exe (GAP-0665).
+        try {
+            Assert-DefenseClawInstalledArtifacts -Layout $Layout -Metadata $metadata
         }
         catch {
             $errors.Add($_.Exception.Message)
@@ -29311,16 +29440,21 @@ function Move-DefenseClawInstallRootForRetirement {
 # lifecycle and the installed CLI that asked for its own removal do not
 # count: the CLI's own image does not keep the folder from being renamed
 # (the uninstall moved its working folder out of InstallRoot first), and
-# the finalizer waits for it to exit anyway. Restart Manager failing finds
-# no holder. Each holder is one string, "name (pid N, ...)".
+# the finalizer waits for it to exit anyway, nor do the processes in
+# ExcludedProcessIds (the running services an uninstall stops itself). Restart Manager
+# failing finds no holder. Each holder is one string, "name (pid N, ...)".
 function Get-DefenseClawInstallRootHolders {
     param(
         [Parameter(Mandatory)][string]$InstallRoot,
-        [int]$SelfUninstallCallerPID
+        [int]$SelfUninstallCallerPID,
+        [AllowNull()][int[]]$ExcludedProcessIds
     )
     $root = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\') + '\'
     $excluded = [Collections.Generic.HashSet[int]]::new()
     [void]$excluded.Add([int]$PID)
+    foreach ($id in @($ExcludedProcessIds)) {
+        [void]$excluded.Add([int]$id)
+    }
     if ($SelfUninstallCallerPID -gt 0) {
         [void]$excluded.Add([int]$SelfUninstallCallerPID)
     }
@@ -29392,6 +29526,59 @@ function Get-DefenseClawInstallRootHolders {
         }
     }
     return [string[]]@($named.Values)
+}
+
+# Standalone uninstall refuses, before it changes anything, while a program
+# other than this lifecycle, the self-uninstall caller and the DefenseClaw
+# services holds a file in InstallRoot: a process that held
+# bin\defenseclaw-hook.exe open without delete sharing past the retirement
+# retry made the committed uninstall fail with the services and hooks
+# already gone (GAP-0625). It waits that retry window and refuses only a
+# holder seen at every look, so a hook call (a new pid each time) or a short
+# scan does not. The services and hooks stay in place while it waits. A
+# holder Restart Manager does not report still meets the committed
+# retirement.
+function Assert-DefenseClawStandaloneInstallRootNotHeld {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [int]$SelfUninstallCallerPID
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    $own = Get-DefenseClawUninstallOwnProcessIds `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -SelfUninstallCallerPID $SelfUninstallCallerPID
+    $services = [int[]]@($own)
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $still = $null
+    while ($true) {
+        $seen = @(Get-DefenseClawInstallRootHolders `
+                -InstallRoot $Layout.InstallRoot `
+                -SelfUninstallCallerPID $SelfUninstallCallerPID `
+                -ExcludedProcessIds $services)
+        if ($null -ne $still) {
+            $seen = @($still | Microsoft.PowerShell.Core\Where-Object { $seen -contains $_ })
+        }
+        $still = $seen
+        if ($still.Count -eq 0) {
+            return
+        }
+        if ($clock.ElapsedMilliseconds -ge $script:InstallRootRetirementRetryMilliseconds) {
+            break
+        }
+        Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds $script:InstallTreeUseRecheckMilliseconds
+    }
+    $root = [IO.Path]::GetFullPath([string]$Layout.InstallRoot).TrimEnd('\')
+    $seconds = [int][Math]::Ceiling($script:InstallRootRetirementRetryMilliseconds / 1000)
+    throw (
+        'uninstall_in_use: ' + ($still -join '; ') + " held a file in $root for $seconds seconds, so DefenseClaw " +
+        'cannot remove that folder; nothing was changed. ' +
+        'Close the program, then run the uninstall again'
+    )
 }
 
 # Why this account may not rename InstallRoot aside whichever program
@@ -34121,6 +34308,11 @@ function Invoke-DefenseClawUninstallLifecycle {
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
         -SelfUninstallCallerPID $SelfUninstallCallerPID
+    Assert-DefenseClawStandaloneInstallRootNotHeld `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -SelfUninstallCallerPID $SelfUninstallCallerPID
     if ($Purge) {
         Assert-DefenseClawStandaloneStateFilesNotInUse `
             -Layout $Layout `
@@ -35610,8 +35802,19 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -not $recoverProductionUninstallAcl) {
         # Protected metadata, not a caller-supplied certification path, is the
         # authority for continuing an existing core-hardening certification
-        # deployment.
-        $entryMetadata = Get-DefenseClawDeploymentMetadata -Layout $layout
+        # deployment. Repair rebuilds an unreadable one under the lock.
+        try {
+            $entryMetadata = Get-DefenseClawDeploymentMetadata -Layout $layout
+        }
+        catch {
+            if ($Action -ne 'Repair' -or
+                -not ([string]$_.Exception.Message).StartsWith(
+                    $script:UnreadableMetadataMessage,
+                    [StringComparison]::Ordinal)) {
+                throw
+            }
+            $entryMetadata = $null
+        }
         if ((Test-DefenseClawStandaloneProfile) -and
             $null -ne $entryMetadata -and
             [string]::IsNullOrWhiteSpace($PayloadManifest)) {
@@ -35817,6 +36020,13 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         if ($Action -in @('Install', 'Upgrade', 'Repair') -and
             $GatewayServiceName -ceq 'DefenseClawGateway') {
             Assert-DefenseClawNoOtherProfileDeployment
+        }
+        if ($Action -eq 'Repair' -and (Test-DefenseClawStandaloneProfile)) {
+            [void](Repair-DefenseClawUnreadableDeploymentMetadata `
+                -Layout $layout `
+                -Sources $sources `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName)
         }
 
         if ($Action -eq 'Install') {
