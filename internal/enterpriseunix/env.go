@@ -175,6 +175,9 @@ const (
 	// TrustRulePack is an administrator rule pack: its folders above, and
 	// every folder and file in it (see rulePackTrust).
 	TrustRulePack
+	// TrustAdminDir is an administrator-owned directory and all its
+	// ancestors. Host security files are written only below such a path.
+	TrustAdminDir
 )
 
 // Env binds the lifecycle to one host. Zero values are replaced by
@@ -467,6 +470,8 @@ func defaultTrust(path string, kind TrustKind) error {
 		return managed.ValidateTrustedRuntimeDir(path, "managed runtime directory")
 	case TrustRulePack:
 		return rulePackTrust(path)
+	case TrustAdminDir:
+		return managed.ValidateTrustedInstallMarkerDir(path, "managed host security directory")
 	}
 	return fmt.Errorf("unknown trust kind %d", kind)
 }

@@ -121,6 +121,13 @@ case "$status" in
         echo "  Apply this package with: sudo $gateway enterprise linux ensure --from-package$downgrade" >&2
         ;;
     *)
+        if [ -n "$(message_of unprivileged_user_namespaces)" ] &&
+           printf '%s\n' "$result" | grep -Eq '"installed":[[:space:]]*true'; then
+            echo "defenseclaw-enterprise: a managed deployment is installed, but policy protection is incomplete until this host reboots." >&2
+            echo "  Reboot, then run: sudo $gateway enterprise linux verify --json" >&2
+            echo "  Review $state/last-package-result.json for any other errors." >&2
+            exit 0
+        fi
         # Name the cause (the first error of the JSON result, one line) so
         # the administrator does not have to open the file (GAP-1744).
         cause=$(printf '%s\n' "$result" |
