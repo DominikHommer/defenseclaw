@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 func writeSwapSourceForTest(t *testing.T, dir string, data string) string {
@@ -156,3 +158,154 @@ func TestRemoveFileIfUnchanged(t *testing.T) {
 }
 
 func swapTestString(value string) *string { return &value }
+
+func posixRenameForTest(t *testing.T, source, destination string) {
+	t.Helper()
+	if err := renameReplace(source, destination, windows.FileRenameInfoEx,
+		fileRenameReplaceIfExists|fileRenamePOSIXSemantics); err != nil {
+		t.Fatalf("POSIX rename %s over %s: %v", source, destination, err)
+	}
+}
+
+// After the comparison the swap still refuses writers, so the compared bytes
+// cannot change. Another process can still replace the file with a POSIX
+// rename, delete it or rename it away until the swap's own rename: the swap
+// then keeps that newer state and reports a race.
+func TestCompareAndSwapFileRefusesAFileChangedBeforeTheReplace(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(t *testing.T, dir, destination string)
+		want   map[string]string
+	}{
+		{
+			name: "replaced with a POSIX rename",
+			change: func(t *testing.T, dir, destination string) {
+				newer := filepath.Join(dir, "newer.tmp")
+				if err := os.WriteFile(newer, []byte("newer save"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				posixRenameForTest(t, newer, destination)
+			},
+			want: map[string]string{"hooks.json": "newer save", "source.tmp": "new"},
+		},
+		{
+			name: "deleted",
+			change: func(t *testing.T, _, destination string) {
+				if err := os.Remove(destination); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: map[string]string{"source.tmp": "new"},
+		},
+		{
+			name: "renamed away",
+			change: func(t *testing.T, _, destination string) {
+				if err := os.Rename(destination, destination+".moved"); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: map[string]string{"hooks.json.moved": "old", "source.tmp": "new"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			destination := filepath.Join(dir, "hooks.json")
+			if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			source := writeSwapSourceForTest(t, dir, "new")
+			previous := swapBeforeReplace
+			swapBeforeReplace = func(path string) { test.change(t, dir, path) }
+			defer func() { swapBeforeReplace = previous }()
+			result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
+			if !errors.Is(err, ErrSwapRaced) || result.Swapped {
+				t.Fatalf("swap over a changed file: %+v err=%v", result, err)
+			}
+			requireSwapDirForTest(t, dir, test.want)
+		})
+	}
+}
+
+// Between the comparison and the rename, writes in place and ordinary
+// replacements stay refused, so the swap publishes over exactly the file it
+// compared.
+func TestCompareAndSwapFileRefusesWritersUntilItReplaces(t *testing.T) {
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "hooks.json")
+	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(dir, "other.tmp")
+	if err := os.WriteFile(other, []byte("other"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := writeSwapSourceForTest(t, dir, "new")
+	previous := swapBeforeReplace
+	swapBeforeReplace = func(path string) {
+		if writer, err := os.OpenFile(path, os.O_WRONLY, 0); err == nil {
+			_ = writer.Close()
+			t.Error("another process opened the file for writing before the replace")
+		}
+		if err := os.Rename(other, path); err == nil {
+			t.Error("another process replaced the file with MoveFileEx before the replace")
+		}
+		if data, err := os.ReadFile(path); err != nil || string(data) != "old" {
+			t.Errorf("read before the replace: %q err=%v", data, err)
+		}
+	}
+	defer func() { swapBeforeReplace = previous }()
+	result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
+	if err != nil || !result.Swapped || !result.Replaced {
+		t.Fatalf("swap: %+v err=%v", result, err)
+	}
+	requireSwapDirForTest(t, dir, map[string]string{"hooks.json": "new", "other.tmp": "other"})
+}
+
+// On a volume without POSIX renames the swap replaces the file in one
+// ordinary rename after releasing its hold, and still refuses a file that
+// changed first.
+func TestCompareAndSwapFileWithoutPOSIXRenames(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change bool
+		want   map[string]string
+	}{
+		{name: "unchanged", want: map[string]string{"hooks.json": "new"}},
+		{name: "replaced first", change: true, want: map[string]string{"hooks.json": "newer save", "source.tmp": "new"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			destination := filepath.Join(dir, "hooks.json")
+			if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			source := writeSwapSourceForTest(t, dir, "new")
+			classic := 0
+			previous := swapRenameReplace
+			swapRenameReplace = func(from, to string, class uint32, flags uint32) error {
+				if class == windows.FileRenameInfoEx {
+					if test.change {
+						newer := filepath.Join(dir, "newer.tmp")
+						if err := os.WriteFile(newer, []byte("newer save"), 0o600); err != nil {
+							t.Fatal(err)
+						}
+						posixRenameForTest(t, newer, to)
+					}
+					return windows.ERROR_INVALID_PARAMETER
+				}
+				classic++
+				return renameReplace(from, to, class, flags)
+			}
+			defer func() { swapRenameReplace = previous }()
+			result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
+			if test.change {
+				if !errors.Is(err, ErrSwapRaced) || result.Swapped || classic != 0 {
+					t.Fatalf("swap over a changed file: %+v classic=%d err=%v", result, classic, err)
+				}
+			} else if err != nil || !result.Swapped || classic != 1 {
+				t.Fatalf("swap: %+v classic=%d err=%v", result, classic, err)
+			}
+			requireSwapDirForTest(t, dir, test.want)
+		})
+	}
+}
