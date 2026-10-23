@@ -279,10 +279,10 @@ func removedConnectorsUnderTest() []removedOnlyConnector {
 // Review fixes (G-deadcode loop round 1, simplified teardown): the teardown
 // put back, removed or deleted agent configs, import paths, policy modules,
 // runtime records (.hookcfg, even one that was not DefenseClaw's), backups
-// and records. It now changes only the script, which becomes the stub, and
-// the tokens; every other file, link and folder of the host stays byte for
-// byte, in both modes and on a second run.
-func TestRemovedTeardownChangesOnlyTheScriptAndTokens(t *testing.T) {
+// and records. It now changes only the script, the tokens, and a private
+// saved copy of a marked OpenHands hook; every other file, link and folder
+// stays byte for byte in both modes and on a second run.
+func TestRemovedTeardownChangesOnlyTheScriptTokensAndSavedHook(t *testing.T) {
 	runtimeRecords := map[string]func(t *testing.T, path string){
 		"DefenseClaw's runtime record": func(*testing.T, string) {},
 		"a user file":                  func(t *testing.T, path string) { writeRemovedFile(t, path, "my settings\n", 0o600) },
@@ -317,6 +317,9 @@ func TestRemovedTeardownChangesOnlyTheScriptAndTokens(t *testing.T) {
 					}
 					h.opts.ManagedEnterprise = managed
 					skip := append([]string{h.script(c)}, h.tokens(c)...)
+					if c.name == removedOpenHandsID {
+						skip = append(skip, c.editedCopyPath(h.dataDir, []byte(removedOpenHands103Script)))
+					}
 					before := h.snapshot(t, skip...)
 					conn, _ := RetiredConnector(c.name)
 					for run := 1; run <= 2; run++ {
@@ -326,6 +329,9 @@ func TestRemovedTeardownChangesOnlyTheScriptAndTokens(t *testing.T) {
 						requireRemovedSame(t, "teardown", h.snapshot(t, skip...), before)
 						h.requireStub(t, c)
 						h.requireRevoked(t, c)
+						if c.name == removedOpenHandsID {
+							h.requireEditedSaved(t, c, removedOpenHands103Script)
+						}
 					}
 					if err := conn.VerifyClean(h.opts); err != nil {
 						t.Fatalf("VerifyClean after the teardown: %v", err)
@@ -415,7 +421,11 @@ func TestRemovedTeardownFailuresRemainRetryable(t *testing.T) {
 			h := newRemovedHost(t)
 			h.stage(t, c)
 			hooks := filepath.Join(h.dataDir, "hooks")
-			before := h.snapshot(t)
+			skip := []string{}
+			if c.name == removedOpenHandsID {
+				skip = append(skip, c.editedCopyPath(h.dataDir, []byte(removedOpenHands103Script)))
+			}
+			before := h.snapshot(t, skip...)
 			if err := os.Chmod(h.script(c), 0o400); err != nil {
 				t.Fatal(err)
 			}
@@ -433,7 +443,7 @@ func TestRemovedTeardownFailuresRemainRetryable(t *testing.T) {
 			if err := os.Chmod(h.script(c), c.mode); err != nil {
 				t.Fatal(err)
 			}
-			requireRemovedSame(t, "a teardown that could not write the stub", h.snapshot(t), before)
+			requireRemovedSame(t, "a teardown that could not write the stub", h.snapshot(t, skip...), before)
 			if err := conn.VerifyClean(h.opts); err == nil {
 				t.Fatal("VerifyClean passed with the old hook in place")
 			}
@@ -449,6 +459,9 @@ func TestRemovedTeardownFailuresRemainRetryable(t *testing.T) {
 			h.stage(t, c)
 			hooks := filepath.Join(h.dataDir, "hooks")
 			skip := append([]string{h.script(c)}, h.tokens(c)...)
+			if c.name == removedOpenHandsID {
+				skip = append(skip, c.editedCopyPath(h.dataDir, []byte(removedOpenHands103Script)))
+			}
 			before := h.snapshot(t, skip...)
 			if err := os.Chmod(hooks, 0o500); err != nil {
 				t.Fatal(err)
@@ -542,12 +555,12 @@ func TestRemovedTeardownReplacesOnlyScriptsDefenseClawWrote(t *testing.T) {
 	}
 	cases := map[string][]variant{
 		removedOpenHandsID: append([]variant{
-			{name: "the 1.0.3 hook", plant: write(removedOpenHands103Script), replace: true},
-			{name: "the hook edited, marker kept", plant: write(removedOpenHands103Script + "echo edited\n"), replace: true},
-			{name: "the hook with CRLF lines", plant: write(strings.ReplaceAll(removedOpenHands103Script, "\n", "\r\n")), replace: true},
-			{name: "the 1.0.x stub that exits 0", plant: write(disabledHookTombstone(removedOpenHandsID)), replace: true},
-			{name: "an earlier 1.0.4 stub that exits 0", plant: write(disabledHookTombstone("OpenHands")), replace: true},
-			{name: "an earlier 1.0.4 stub without -p", plant: write(strings.Replace(removedOpenHandsTombstone, "#!/bin/sh -p\n", "#!/bin/sh\n", 1)), replace: true},
+			{name: "the 1.0.3 hook", plant: write(removedOpenHands103Script), replace: true, saved: removedOpenHands103Script},
+			{name: "the hook edited, marker kept", plant: write(removedOpenHands103Script + "echo edited\n"), replace: true, saved: removedOpenHands103Script + "echo edited\n"},
+			{name: "the hook with CRLF lines", plant: write(strings.ReplaceAll(removedOpenHands103Script, "\n", "\r\n")), replace: true, saved: strings.ReplaceAll(removedOpenHands103Script, "\n", "\r\n")},
+			{name: "the 1.0.x stub that exits 0", plant: write(disabledHookTombstone(removedOpenHandsID)), replace: true, saved: disabledHookTombstone(removedOpenHandsID)},
+			{name: "an earlier 1.0.4 stub that exits 0", plant: write(disabledHookTombstone("OpenHands")), replace: true, saved: disabledHookTombstone("OpenHands")},
+			{name: "an earlier 1.0.4 stub without -p", plant: write(strings.Replace(removedOpenHandsTombstone, "#!/bin/sh -p\n", "#!/bin/sh\n", 1)), replace: true, saved: strings.Replace(removedOpenHandsTombstone, "#!/bin/sh -p\n", "#!/bin/sh\n", 1)},
 		}, common("# defenseclaw-managed-hook v")...),
 		removedOmnigentID: append([]variant{
 			{name: "the 1.0.3 module", plant: setup(""), replace: true},
@@ -765,6 +778,7 @@ func TestRemovedConnectorLeftoversListWhatIsLeft(t *testing.T) {
 			}
 			if c.name == removedOpenHandsID {
 				want[filepath.Join(h.dataDir, "hooks", hookConfigSidecarName+".openhands")] = "delete it"
+				want[c.editedCopyPath(h.dataDir, []byte(removedOpenHands103Script))] = "copy back what you need"
 				// The hook token stays (keepHookToken), with when it may go.
 				want[removedTokenPath(t, h.dataDir, c.name)] = c.keptTokenStep()
 			} else {

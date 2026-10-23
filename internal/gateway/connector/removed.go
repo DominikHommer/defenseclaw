@@ -35,8 +35,8 @@ package connector
 //     its exact bytes are saved first, synced and read back, under
 //     connector_backups/omnigent/ (removedOnlyConnector.keepEdited), and the
 //     stub replaces it only once they are; the older teardown kept such a
-//     module. The OpenHands script never had that record, and the older
-//     teardown wrote its stub over it whatever its bytes.
+//     module. The OpenHands script never had that record, so its marked bytes
+//     are saved before any in-place write too.
 //  2. It revokes the DefenseClaw tokens issued for the connector, but only
 //     once nothing but the stub is left at the script path. An old hook that
 //     may still run (a hard-linked file the stub could not be written into;
@@ -461,13 +461,6 @@ func (c removedOnlyConnector) replaceScript(dataDir string) error {
 	}
 	inPlace := c.writeStubInPlace(path, keep)
 	if inPlace != nil && links > 1 {
-		// The save may have replaced one of the names (a hard link at the
-		// saved copy's name, keepEdited), so they are counted again.
-		if _, now, _, err := c.scriptStateAndLinks(path); err == nil && now <= 1 {
-			links = now
-		}
-	}
-	if inPlace != nil && links > 1 {
 		return fmt.Errorf("%s is the hook script an older DefenseClaw wrote and has %d names (hard links), and the stub could not be written into it: %w. To finish: %s",
 			path, links, inPlace, c.hardLinkStep(path))
 	}
@@ -491,59 +484,82 @@ func (c removedOnlyConnector) replaceScript(dataDir string) error {
 	return nil
 }
 
-// removedEditedInfix names the saved copy of an edited script:
+// removedEditedInfix names the saved copy of a marked script:
 // connector_backups/<connector>/<script>.edited-<first 16 hex digits of its
-// SHA-256>. The name does not end in .py or .sh, so nothing imports or runs
-// it by its name.
+// SHA-256>, with -2, -3, ... on a collision. The name does not end in .py or
+// .sh, so nothing imports or runs it by its name.
 const removedEditedInfix = ".edited-"
 
-// removedKeepEditedWrite writes the saved copy; tests replace it to fail.
-var removedKeepEditedWrite = atomicReplaceFileNoFollow
+// removedKeepEditedWrite publishes a new saved copy without replacing an
+// existing file; tests replace it to fail.
+var removedKeepEditedWrite = atomicCreateFileNoFollow
 
 // keepEdited saves the exact bytes of the script at path before the teardown
 // replaces them, when they may be the user's edit: the connector records the
 // hash of what its setup wrote (editLogical), and data is not that. A record
 // for another file, or none, proves nothing, so data is saved then too. The
-// copy is written to a temporary file, synced, renamed into place (the
-// folder synced) and read back; an error means it is not saved, and the
-// caller must not replace the script. The same bytes are saved once.
+// copy is written to a temporary file, synced, published without replacement
+// (the folder synced) and read back; an error means it is not saved, and the
+// caller must not replace the script. The same bytes are saved once. OpenHands
+// has no post-setup hash, so every marked hook is saved before a write.
 //
 // live is the file data was read from (nil: the file at path now). A copy
 // counts as saved only when it is a file of its own (removedSavedCopy): a
 // name of the live file (a hard link), a link to it, or a file that another
 // name or other accounts can change is no copy, since the stub written into
-// the live file, or a later change, would reach it too. Such a name is
-// replaced with a copy of its own; a link or folder there is never written
-// through, so the save fails.
+// the live file, or a later change, would reach it too. Such a name is left
+// in place and a new numbered copy is made instead; a link or folder at the
+// hash-derived name stops the save for manual recovery.
 func (c removedOnlyConnector) keepEdited(dataDir, path string, live os.FileInfo, data []byte) error {
-	if c.editLogical == "" {
-		return nil
-	}
-	record, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, c.name, c.editLogical))
-	if err == nil && record.Connector == c.name && record.LogicalName == c.editLogical &&
-		sameManagedTargetPath(record.Path, path) && record.PostSHA256 == sha256Hex(data) {
-		return nil
+	if c.editLogical != "" {
+		record, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, c.name, c.editLogical))
+		if err == nil && record.Connector == c.name && record.LogicalName == c.editLogical &&
+			sameManagedTargetPath(record.Path, path) && record.PostSHA256 == sha256Hex(data) {
+			return nil
+		}
 	}
 	if live == nil {
+		var err error
 		if live, err = os.Lstat(path); err != nil {
 			return fmt.Errorf("save the edited %s before replacing it: %w", path, err)
 		}
 	}
-	saved := c.editedCopyPath(dataDir, data)
-	if err := ensureManagedBackupDirRestricted(filepath.Dir(saved)); err != nil {
+	base := c.editedCopyPath(dataDir, data)
+	if err := ensureManagedBackupDirRestricted(filepath.Dir(base)); err != nil {
 		return fmt.Errorf("save the edited %s before replacing it: %w", path, err)
 	}
-	if removedSavedCopy(saved, live, data) == nil {
+	for i := 0; i < 1000; i++ {
+		saved := base
+		if i > 0 {
+			saved = fmt.Sprintf("%s-%d", base, i+1)
+		}
+		if removedSavedCopy(saved, live, data) == nil {
+			return nil
+		}
+		info, err := os.Lstat(saved)
+		switch {
+		case err == nil && !info.Mode().IsRegular():
+			return fmt.Errorf("save the edited %s: %s is not a regular file; move it out of the way, then run %s",
+				path, saved, c.teardownCommand())
+		case err == nil:
+			// It may contain an operator's later edit. Never replace it.
+			continue
+		case err != nil && !errors.Is(err, os.ErrNotExist):
+			return fmt.Errorf("inspect saved copy %s before replacing %s: %w", saved, path, err)
+		}
+		if err := removedKeepEditedWrite(saved, data, 0o600); errors.Is(err, os.ErrExist) {
+			continue
+		} else if err != nil {
+			return fmt.Errorf("save the edited %s to %s before replacing it: %w; move %s out of the way, then run %s",
+				path, saved, err, saved, c.teardownCommand())
+		}
+		if err := removedSavedCopy(saved, live, data); err != nil {
+			return fmt.Errorf("save the edited %s: %s is not a copy of its own that reads back as it: %w", path, saved, err)
+		}
 		return nil
 	}
-	if err := removedKeepEditedWrite(saved, data, 0o600); err != nil {
-		return fmt.Errorf("save the edited %s to %s before replacing it: %w; move %s out of the way, then run %s",
-			path, saved, err, saved, c.teardownCommand())
-	}
-	if err := removedSavedCopy(saved, live, data); err != nil {
-		return fmt.Errorf("save the edited %s: %s is not a copy of its own that reads back as it: %w", path, saved, err)
-	}
-	return nil
+	return fmt.Errorf("save the edited %s: all saved-copy names beginning %s are occupied; move one out of the way, then run %s",
+		path, base, c.teardownCommand())
 }
 
 // removedSavedCopy returns nil when saved is a copy of data of its own: a
@@ -581,7 +597,7 @@ func removedSavedCopy(saved string, live os.FileInfo, data []byte) error {
 	if links != 1 {
 		return fmt.Errorf("%s has %d names (hard links)", saved, links)
 	}
-	if err := removedSavedCopyPrivate(opened); err != nil {
+	if err := removedSavedCopyPrivate(file, opened); err != nil {
 		return fmt.Errorf("%s: %w", saved, err)
 	}
 	got, err := io.ReadAll(io.LimitReader(file, int64(len(data))+1))
@@ -598,11 +614,8 @@ func (c removedOnlyConnector) editedCopyPath(dataDir string, data []byte) string
 	return filepath.Join(dataDir, "connector_backups", c.name, c.script+removedEditedInfix+sha256Hex(data)[:16])
 }
 
-// editedCopies lists the saved copies of an edited script (keepEdited).
+// editedCopies lists the saved copies of a marked script (keepEdited).
 func (c removedOnlyConnector) editedCopies(dataDir string) []string {
-	if c.editLogical == "" {
-		return nil
-	}
 	matches, _ := filepath.Glob(filepath.Join(dataDir, "connector_backups", c.name, c.script+removedEditedInfix+"*"))
 	return matches
 }
@@ -914,7 +927,11 @@ func (c removedOnlyConnector) leftovers(opts SetupOpts) []RemovedLeftover {
 			"copy back what you need, then delete this folder")
 	}
 	for _, saved := range c.editedCopies(opts.DataDir) {
-		add(saved, "your edited "+c.script+", as it was when the teardown replaced it with the stub that blocks every call",
+		what := "your edited " + c.script
+		if c.name == removedOpenHandsID {
+			what = "the prior " + c.script + " (including any edits)"
+		}
+		add(saved, what+", as it was when the teardown replaced it with the stub that blocks every call",
 			"copy back what you need (not into DefenseClaw's hooks folder), then delete it")
 	}
 	if kept := c.keptTokenPath(opts.DataDir); kept != "" {

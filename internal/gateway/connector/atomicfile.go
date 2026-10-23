@@ -72,6 +72,12 @@ func atomicReplaceFileNoFollow(path string, data []byte, perm os.FileMode) error
 	return atomicWriteFileAt(path, path, data, perm, atomicFilePublish, true)
 }
 
+// atomicCreateFileNoFollow publishes a new private file without replacing any
+// directory entry already at path. A collision remains the caller's to handle.
+func atomicCreateFileNoFollow(path string, data []byte, perm os.FileMode) error {
+	return atomicWriteFileAt(path, path, data, perm, atomicFilePublishNoReplace, true)
+}
+
 // atomicWriteFileAt writes data to writePath, path or the file a link at path
 // leads to. A writePath that already holds data and perm is left as it is,
 // unless always is set.

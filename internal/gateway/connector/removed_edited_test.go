@@ -24,7 +24,11 @@ const removedOmnigentEditedModule = removedOmnigent103Module + "\n# my change: a
 // listed with their step.
 func (h *removedHost) requireEditedSaved(t *testing.T, c removedOnlyConnector, body string) {
 	t.Helper()
-	saved := c.editedCopyPath(h.dataDir, []byte(body))
+	h.requireEditedSavedAt(t, c, c.editedCopyPath(h.dataDir, []byte(body)), body)
+}
+
+func (h *removedHost) requireEditedSavedAt(t *testing.T, c removedOnlyConnector, saved, body string) {
+	t.Helper()
 	data, err := os.ReadFile(saved)
 	if err != nil || string(data) != body {
 		t.Fatalf("the edited module saved at %s = %q, %v; want its exact bytes %q", saved, data, err, body)
@@ -35,9 +39,13 @@ func (h *removedHost) requireEditedSaved(t *testing.T, c removedOnlyConnector, b
 		}
 	}
 	leftovers, _ := RemovedConnectorLeftovers(c.name, h.opts)
+	wantWhat := "your edited " + c.script
+	if c.name == removedOpenHandsID {
+		wantWhat = "the prior " + c.script + " (including any edits)"
+	}
 	for _, item := range leftovers {
 		if item.Path == saved {
-			if !strings.Contains(item.What, "your edited "+c.script) || !strings.Contains(item.Step, "copy back what you need") {
+			if !strings.Contains(item.What, wantWhat) || !strings.Contains(item.Step, "copy back what you need") {
 				t.Fatalf("the saved module is listed as %+v", item)
 			}
 			return
@@ -142,19 +150,18 @@ func TestRemovedTeardownSavesAnEditedOmnigentModule(t *testing.T) {
 		})
 	}
 
-	// OpenHands never had the record, and its older teardown wrote its stub
-	// over the script whatever its bytes: nothing is saved.
+	// OpenHands never had a post-setup record. Save every marked hook before
+	// writing its stub so an edit under another hard-linked name survives.
 	t.Run("openhands", func(t *testing.T) {
 		h := newRemovedHost(t)
 		h.stage(t, removedOpenHands)
-		writeRemovedFile(t, h.script(removedOpenHands), removedOpenHands103Script+"# mine\n", 0o700)
+		body := removedOpenHands103Script + "# mine\n"
+		writeRemovedFile(t, h.script(removedOpenHands), body, 0o700)
 		if err := removedOpenHands.Teardown(context.Background(), h.opts); err != nil {
 			t.Fatal(err)
 		}
 		h.requireStub(t, removedOpenHands)
-		if matches, _ := filepath.Glob(filepath.Join(h.dataDir, "connector_backups", "openhands", "*"+removedEditedInfix+"*")); len(matches) != 0 {
-			t.Fatalf("an OpenHands script was saved: %v", matches)
-		}
+		h.requireEditedSaved(t, removedOpenHands, body)
 	})
 }
 
@@ -308,9 +315,9 @@ func TestRemovedConnectorNamesStayReserved(t *testing.T) {
 // the module (the stub written into the module reached it too), a link to
 // the module, a hard link to another file, or a file other accounts can
 // change. The teardown now counts a copy as saved only when it is a private
-// regular file with one name that is not the module; it replaces any other
-// file there with a copy of its own, and never writes through a link: the
-// save fails, and the module and its tokens stay as they are.
+// regular file with one name that is not the module; it leaves occupied
+// names in place and saves under a new name. A link at the hash-derived name
+// stops the save, leaving the module and its tokens as they are.
 func TestRemovedTeardownSavesTheEditToACopyOfItsOwn(t *testing.T) {
 	c := removedOmnigent
 	edit := []byte(removedOmnigentEditedModule)
@@ -326,6 +333,9 @@ func TestRemovedTeardownSavesTheEditToACopyOfItsOwn(t *testing.T) {
 		failSave bool
 	}{
 		"a hard link to the module": {
+			// Windows cannot write the stub into a hard-linked module. It
+			// leaves the module and its tokens for manual cleanup instead.
+			unixOnly: true,
 			prepare: func(t *testing.T, h *removedHost, saved string) prepared {
 				removedLinkOrSkip(t, h.script(c), saved)
 				return prepared{}
@@ -409,8 +419,9 @@ func TestRemovedTeardownSavesTheEditToACopyOfItsOwn(t *testing.T) {
 			}
 			h.requireStub(t, c)
 			h.requireRevoked(t, c)
-			h.requireEditedSaved(t, c, string(edit))
-			requireRemovedCopyOfItsOwn(t, saved, module)
+			newSaved := saved + "-2"
+			h.requireEditedSavedAt(t, c, newSaved, string(edit))
+			requireRemovedCopyOfItsOwn(t, newSaved, module)
 			if got.other != "" {
 				info, err := os.Stat(got.other)
 				if err != nil || !os.SameFile(info, got.otherInfo) {
@@ -419,14 +430,17 @@ func TestRemovedTeardownSavesTheEditToACopyOfItsOwn(t *testing.T) {
 				if data, _ := os.ReadFile(got.other); string(data) != string(edit) {
 					t.Fatalf("%s was changed: %q", got.other, data)
 				}
-				requireRemovedCopyOfItsOwn(t, saved, got.otherInfo)
+				if atBase, err := os.Stat(saved); err != nil || !os.SameFile(atBase, got.otherInfo) {
+					t.Fatalf("occupied saved-copy name %s was replaced: %v", saved, err)
+				}
+				requireRemovedCopyOfItsOwn(t, newSaved, got.otherInfo)
 			}
 			// A second run keeps the copy it made.
-			before, _ := os.Stat(saved)
+			before, _ := os.Stat(newSaved)
 			if err := c.Teardown(context.Background(), h.opts); err != nil {
 				t.Fatalf("second Teardown: %v", err)
 			}
-			if after, err := os.Stat(saved); err != nil || !os.SameFile(before, after) {
+			if after, err := os.Stat(newSaved); err != nil || !os.SameFile(before, after) {
 				t.Fatalf("the second run replaced the saved copy: %v", err)
 			}
 		})
@@ -485,5 +499,105 @@ func requireRemovedCopyOfItsOwn(t *testing.T, saved string, not os.FileInfo) {
 	defer file.Close()
 	if links, err := atomicTransformBoundLinkCountPlatform(file); err != nil || links != 1 {
 		t.Fatalf("%s has %d names (%v), want one", saved, links, err)
+	}
+}
+
+// An OpenHands hook may have another name outside the hooks folder. Writing
+// the stub into its inode must not destroy edits at that other name.
+func TestRemovedOpenHandsHardLinkEditIsSavedBeforeInPlaceWrite(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not write the stub into a hard-linked script")
+	}
+	c := removedOpenHands
+	for _, failSave := range []bool{false, true} {
+		t.Run(map[bool]string{false: "saved", true: "save fails"}[failSave], func(t *testing.T) {
+			h := newRemovedHost(t)
+			h.stage(t, c)
+			body := removedOpenHands103Script + "# operator's edit\n"
+			writeRemovedFile(t, h.script(c), body, c.mode)
+			outside := filepath.Join(h.home, "elsewhere", c.script)
+			removedLinkOrSkip(t, h.script(c), outside)
+			oldInfo, err := os.Stat(outside)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if failSave {
+				write := removedKeepEditedWrite
+				t.Cleanup(func() { removedKeepEditedWrite = write })
+				removedKeepEditedWrite = func(string, []byte, os.FileMode) error { return syscall.ENOSPC }
+			}
+			err = c.Teardown(context.Background(), h.opts)
+			if failSave {
+				if err == nil || !strings.Contains(err.Error(), "save the edited") {
+					t.Fatalf("Teardown = %v, want a failed save", err)
+				}
+				for _, name := range []string{h.script(c), outside} {
+					if got, readErr := os.ReadFile(name); readErr != nil || string(got) != body {
+						t.Fatalf("failed save changed %s to %q: %v", name, got, readErr)
+					}
+				}
+				h.requireTokensKept(t, c)
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.requireStub(t, c)
+			h.requireStubUnderEveryName(t, c, oldInfo, []string{outside})
+			h.requireEditedSaved(t, c, body)
+		})
+	}
+}
+
+// Model an interruption after saving an edited module but before replacing it.
+// A retry must retain a later operator edit to the first saved copy.
+func TestRemovedOmnigentRetryDoesNotReplaceAnEditedSavedCopy(t *testing.T) {
+	c := removedOmnigent
+	h := newRemovedHost(t)
+	h.stage(t, c)
+	body := removedOmnigentEditedModule
+	writeRemovedFile(t, h.script(c), body, c.mode)
+	if err := c.keepEdited(h.dataDir, h.script(c), nil, []byte(body)); err != nil {
+		t.Fatal(err)
+	}
+	first := c.editedCopyPath(h.dataDir, []byte(body))
+	operatorEdit := body + "# operator's later note\n"
+	writeRemovedFile(t, first, operatorEdit, 0o600)
+	// The destination can be occupied after the teardown's last check.
+	// Publication itself must refuse replacement in that case.
+	if err := removedKeepEditedWrite(first, []byte(body), 0o600); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("publish over the operator's saved copy = %v, want os.ErrExist", err)
+	}
+	if got, err := os.ReadFile(first); err != nil || string(got) != operatorEdit {
+		t.Fatalf("publication changed the operator's saved copy to %q: %v", got, err)
+	}
+
+	if err := c.Teardown(context.Background(), h.opts); err != nil {
+		t.Fatal(err)
+	}
+	h.requireStub(t, c)
+	h.requireRevoked(t, c)
+	if got, err := os.ReadFile(first); err != nil || string(got) != operatorEdit {
+		t.Fatalf("retry changed the operator's saved copy to %q: %v", got, err)
+	}
+	copies := h.editedCopies(t, c)
+	if len(copies) != 2 {
+		t.Fatalf("saved copies = %v, want the operator's copy and a new private copy", copies)
+	}
+	var second string
+	for _, copy := range copies {
+		if copy != first {
+			second = copy
+		}
+	}
+	if second == "" {
+		t.Fatalf("no new saved copy: %v", copies)
+	}
+	if got, err := os.ReadFile(second); err != nil || string(got) != body {
+		t.Fatalf("new saved copy = %q, %v; want %q", got, err, body)
+	}
+	leftovers, _ := RemovedConnectorLeftovers(c.name, h.opts)
+	if !removedListsPath(leftovers, first) || !removedListsPath(leftovers, second) {
+		t.Fatalf("leftovers %+v omit one of the saved copies", leftovers)
 	}
 }
