@@ -494,6 +494,33 @@ def test_okta_profile_verifier_refuses_a_diagnostic_candidate(tmp_path: Path) ->
     answer["refused"] = False
     answer.pop("refused_reason")
     answer.pop("lookup_error")
+    answer["match"] = "user"
+    for cache in (
+        {"refused": True, "refused_reason": "cached group membership is unconfirmed", "differs": True},
+        {"refused": False, "refused_reason": "cached group membership is unconfirmed", "differs": True},
+    ):
+        answer["cache"] = cache
+        explain.write_text(json.dumps(answer), encoding="ascii")
+        for extra in (["--expect-profile", "okta-strict"], []):
+            run = subprocess.run(["bash", str(script), "--user", "alice", "--defenseclaw",
+                                  str(bin_dir / "defenseclaw"), *extra], env=env, capture_output=True, text=True)
+            assert run.returncode == 1
+            assert ("FAIL  DefenseClaw refuses requests for alice right now: cached group membership is unconfirmed "
+                    "(the gateway's directory lookup is failing)") in run.stdout
+            assert "PASS  DefenseClaw picks profile okta-strict" not in run.stdout
+
+    answer["cache"] = {"refused": True, "differs": True}
+    explain.write_text(json.dumps(answer), encoding="ascii")
+    without_reason = subprocess.run(["bash", str(script), "--user", "alice", "--defenseclaw",
+                                     str(bin_dir / "defenseclaw"), "--expect-profile", "okta-strict"],
+                                    env=env, capture_output=True, text=True)
+    assert without_reason.returncode == 1
+    assert ("FAIL  DefenseClaw refuses requests for alice right now: "
+            "the gateway did not name the missing identity fact "
+            "(the gateway's directory lookup is failing)") in without_reason.stdout
+
+    answer.pop("cache")
+    answer["match"] = "default_lookup_failed"
     answer.pop("warnings")
     explain.write_text(json.dumps(answer), encoding="ascii")
     settled = subprocess.run(["bash", str(script), "--user", "alice", "--defenseclaw", str(bin_dir / "defenseclaw")],

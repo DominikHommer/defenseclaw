@@ -257,9 +257,12 @@ except ValueError:
     print("unreadable")
     sys.exit(0)
 s = d.get("subject") or {}
+cache = d.get("cache") or {}
 print("|".join([
     str(d.get("refused") is True or bool(d.get("refused_reason"))),
     d.get("refused_reason") or "the gateway did not name the missing identity fact",
+    str(cache.get("refused") is True or bool(cache.get("refused_reason"))),
+    cache.get("refused_reason") or "the gateway did not name the missing identity fact",
     "ok", str(d.get("profiles_configured")), d.get("profile") or "", d.get("match") or "",
     d.get("matched_group") or "", str(s.get("group_count", 0)), d.get("lookup_error") or "",
     "; ".join(d.get("warnings") or []),
@@ -271,10 +274,14 @@ print("|".join([
     fail "DefenseClaw's answer for $user is not JSON: $(head -c 200 <<< "$out" | tr '\n' ' ')"
     return
   fi
-  local refused refused_reason _ok configured profile match matched groups lookup_error warnings
-  IFS='|' read -r refused refused_reason _ok configured profile match matched groups lookup_error warnings <<< "$summary"
+  local refused refused_reason cache_refused cache_refused_reason _ok configured profile match matched groups lookup_error warnings
+  IFS='|' read -r refused refused_reason cache_refused cache_refused_reason _ok configured profile match matched groups lookup_error warnings <<< "$summary"
   if [[ $refused == True ]]; then
     fail "DefenseClaw refuses requests for $user: $refused_reason"
+    return
+  fi
+  if [[ $cache_refused == True ]]; then
+    fail "DefenseClaw refuses requests for $user right now: $cache_refused_reason (the gateway's directory lookup is failing)"
     return
   fi
   if [[ -n $lookup_error ]]; then
