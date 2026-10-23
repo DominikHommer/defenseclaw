@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -206,5 +207,220 @@ func TestTrustedActionRecursiveFunctionFailsClosed(t *testing.T) {
 	if finding := findingWithID(findings, "ACTION-COMPOUND-UNPROVEN"); finding == nil || !finding.contributesToEnforcement() ||
 		buildVerdict(findings, "tool_call").Action != guardrailActionBlock {
 		t.Fatalf("recursive function was not blocked: %v", FindingStrings(findings))
+	}
+}
+
+func TestTrustedActionFunctionCallSpellingsMatchBody(t *testing.T) {
+	const connector = "compound-function-spellings-test"
+	installDefaultProfileConnector(t, connector)
+	for _, command := range []string{
+		"f() { rm -rf /; }; 'f'",
+		`f() { rm -rf /; }; "f"; true`,
+		`f() { rm -rf /; }; \f`,
+		"f() { rm -rf /; }; command f",
+		"f() { rm -rf /; }; builtin f",
+		"f() { rm -rf /; }; time f",
+		"f() { rm -rf /; }; eval f",
+		"f() { rm -rf /; }; x=f; $x",
+		"f() { rm -rf /; }; trap f EXIT",
+	} {
+		t.Run(command, func(t *testing.T) {
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input:      actionfacts.Input{Tool: "shell", Command: command, CWD: "/repo", DialectHint: actionfacts.DialectPOSIX},
+				LegacyText: command, Connector: connector, EnforcementCapable: true,
+			})
+			if buildVerdict(findings, "tool_call").Action != guardrailActionBlock {
+				t.Errorf("function call was not blocked: %v", FindingStrings(findings))
+			}
+		})
+	}
+	command := "f() { rm -rf /; }; x=f; $x"
+	findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+		Input:      actionfacts.Input{Tool: "shell", Command: command, CWD: "/repo", DialectHint: actionfacts.DialectPOSIX},
+		LegacyText: command, Connector: connector, EnforcementCapable: true,
+	})
+	if got := findingWithID(findings, "ACTION-COMPOUND-UNPROVEN"); got == nil || !got.contributesToEnforcement() {
+		t.Errorf("dynamic function call did not fail closed: %v", FindingStrings(findings))
+	}
+	for _, command := range []string{
+		"f() { cat ~/.ssh/id_rsa; }; 'f'",
+		"f() { cat ~/.ssh/id_rsa; }; command f",
+		"f() { cat ~/.ssh/id_rsa; }; eval f",
+		"f() { cat ~/.ssh/id_rsa; }; eval 'true; f'",
+		"f() { cat ~/.ssh/id_rsa; }; trap f EXIT",
+	} {
+		t.Run(command, func(t *testing.T) {
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input:      actionfacts.Input{Tool: "shell", Command: command, CWD: "/repo", ActiveHome: "/home/alice", DialectHint: actionfacts.DialectPOSIX},
+				LegacyText: command, Connector: connector, EnforcementCapable: true,
+			})
+			if got := findingWithID(findings, "PATH-SSH-KEY"); got == nil || !got.contributesToEnforcement() {
+				t.Errorf("function credential read was not enforced: %v", FindingStrings(findings))
+			}
+		})
+	}
+}
+
+func TestTrustedActionNestedShellListsMatchStandalone(t *testing.T) {
+	const connector = "nested-shell-list-test"
+	installDefaultProfileConnector(t, connector)
+	for _, command := range []string{
+		"sh -c 'true && rm -rf /'",
+		"bash -c 'false || rm -rf /'",
+		"zsh -c 'true; rm -rf /'",
+		"sh -c 'rm -rf / | cat'",
+		"eval 'true && rm -rf /'",
+		"sh -c 'cd /home/alice; cat .ssh/id_rsa; rm -rf /'",
+	} {
+		t.Run(command, func(t *testing.T) {
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input:      actionfacts.Input{Tool: "shell", Command: command, CWD: "/repo", DialectHint: actionfacts.DialectPOSIX},
+				LegacyText: command, Connector: connector, EnforcementCapable: true,
+			})
+			if got := findingWithID(findings, "CMD-RM-RF"); got == nil || !got.contributesToEnforcement() {
+				t.Errorf("nested command was not enforced: %v", FindingStrings(findings))
+			}
+		})
+	}
+	for _, command := range []string{
+		"sh -c 'true && cat ~/.ssh/id_rsa'",
+		"bash -c 'false || cat ~/.ssh/id_rsa'",
+		"eval 'true; cat ~/.ssh/id_rsa'",
+		"sh -c 'cd /home/alice; cat .ssh/id_rsa'",
+		"eval 'cd /home/alice; cat .ssh/id_rsa'",
+		"eval\t'cat ~/.ssh/id_rsa'",
+	} {
+		t.Run(command, func(t *testing.T) {
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input:      actionfacts.Input{Tool: "shell", Command: command, CWD: "/repo", ActiveHome: "/home/alice", DialectHint: actionfacts.DialectPOSIX},
+				LegacyText: command, Connector: connector, EnforcementCapable: true,
+			})
+			if got := findingWithID(findings, "PATH-SSH-KEY"); got == nil || !got.contributesToEnforcement() {
+				t.Errorf("nested credential read was not enforced: %v", FindingStrings(findings))
+			}
+		})
+	}
+	for _, command := range []string{
+		"curl https://webhook.site/example",
+		"bash -c 'cat <(curl https://webhook.site/example)'",
+	} {
+		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input:      actionfacts.Input{Tool: "shell", Command: command, CWD: "/repo", DialectHint: actionfacts.DialectPOSIX},
+			LegacyText: command, Connector: connector, EnforcementCapable: true,
+		})
+		if got := findingWithID(findings, "C2-WEBHOOK-SITE"); got == nil || !got.contributesToEnforcement() {
+			t.Errorf("%q: nested network command did not match standalone: %v", command, FindingStrings(findings))
+		}
+	}
+}
+
+func TestTrustedActionDirectoryBuiltinsMatchStandalone(t *testing.T) {
+	const connector = "directory-builtins-test"
+	installDefaultProfileConnector(t, connector)
+	for _, tt := range []struct{ command, cwd string }{
+		{"cd -P /home/alice && cat .ssh/id_rsa", "/repo"},
+		{"cd -L -- /home/alice; cat .ssh/id_rsa", "/repo"},
+		{"cd -eP /home/alice; cat .ssh/id_rsa", "/repo"},
+		{"pushd /home/alice && cat .ssh/id_rsa", "/repo"},
+		{"pushd /tmp; popd; cat .ssh/id_rsa", "/home/alice"},
+	} {
+		t.Run(tt.command, func(t *testing.T) {
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input:      actionfacts.Input{Tool: "shell", Command: tt.command, CWD: tt.cwd, ActiveHome: "/home/alice", DialectHint: actionfacts.DialectPOSIX},
+				LegacyText: tt.command, Connector: connector, EnforcementCapable: true,
+			})
+			if got := findingWithID(findings, "PATH-SSH-KEY"); got == nil || !got.contributesToEnforcement() {
+				t.Errorf("relative credential read was not enforced: %v", FindingStrings(findings))
+			}
+		})
+	}
+	for _, command := range []string{
+		"cd -Z /unknown; cat .ssh/id_rsa",
+		"cd -Z /unknown; cat id_rsa",
+		"cd -Z /unknown; > .ssh/id_rsa",
+		"CDPATH=/home; cd alice; cat .ssh/id_rsa",
+	} {
+		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input:      actionfacts.Input{Tool: "shell", Command: command, CWD: "/repo", ActiveHome: "/home/alice", DialectHint: actionfacts.DialectPOSIX},
+			LegacyText: command, Connector: connector, EnforcementCapable: true,
+		})
+		if got := findingWithID(findings, "ACTION-COMPOUND-UNPROVEN"); got == nil || !got.contributesToEnforcement() {
+			t.Errorf("%q: unknown directory and relative path did not fail closed: %v", command, FindingStrings(findings))
+		}
+	}
+}
+
+func TestTrustedActionCStyleLoopBodyMatchesStandalone(t *testing.T) {
+	const connector = "c-style-loop-test"
+	installDefaultProfileConnector(t, connector)
+	for _, tt := range []struct {
+		command string
+		block   bool
+	}{
+		{"for ((i=0;i<3;i++)); do echo $i; done", false},
+		{"for ((i=0;i<3;i++)); do rm -rf /; done", true},
+	} {
+		t.Run(tt.command, func(t *testing.T) {
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input:      actionfacts.Input{Tool: "shell", Command: tt.command, CWD: "/repo", DialectHint: actionfacts.DialectPOSIX},
+				LegacyText: tt.command, Connector: connector, EnforcementCapable: true,
+			})
+			blocked := buildVerdict(findings, "tool_call").Action == guardrailActionBlock
+			if blocked != tt.block {
+				t.Errorf("block=%v, want %v: %v", blocked, tt.block, FindingStrings(findings))
+			}
+			if tt.block {
+				if got := findingWithID(findings, "CMD-RM-RF"); got == nil || !got.contributesToEnforcement() {
+					t.Errorf("loop body not enforced: %v", FindingStrings(findings))
+				}
+			}
+		})
+	}
+}
+
+func TestTrustedActionWindowsCompoundMatchesStandalone(t *testing.T) {
+	const connector = "windows-compound-test"
+	installDefaultProfileConnector(t, connector)
+	for _, tt := range []struct {
+		name, command, alone string
+		dialect              actionfacts.Dialect
+	}{
+		{"powershell semicolon", `Write-Output a; Remove-Item -Recurse -Force C:\`, `Remove-Item -Recurse -Force C:\`, actionfacts.DialectPowerShell},
+		{"powershell pipeline", `Write-Output a | Remove-Item -Recurse -Force C:\`, `Remove-Item -Recurse -Force C:\`, actionfacts.DialectPowerShell},
+		{"cmd ampersand", `echo a & rmdir /s /q C:\`, `rmdir /s /q C:\`, actionfacts.DialectCMD},
+		{"cmd and", `echo a && rmdir /s /q C:\`, `rmdir /s /q C:\`, actionfacts.DialectCMD},
+		{"cmd or", `echo a || rmdir /s /q C:\`, `rmdir /s /q C:\`, actionfacts.DialectCMD},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			check := func(command string) []RuleFinding {
+				return dispatchTrustedAction(t.Context(), trustedActionRequest{
+					Input:      actionfacts.Input{Tool: "shell", Command: command, CWD: `C:\repo`, DialectHint: tt.dialect},
+					LegacyText: command, Connector: connector, EnforcementCapable: true,
+				})
+			}
+			alone := findingWithID(check(tt.alone), "CMD-RM-RF")
+			got := findingWithID(check(tt.command), "CMD-RM-RF")
+			if alone == nil || !alone.contributesToEnforcement() {
+				t.Fatal("standalone command did not enforce")
+			}
+			if got == nil || !got.contributesToEnforcement() {
+				t.Errorf("compound command did not enforce: %+v", got)
+			}
+			tool := "powershell"
+			if tt.dialect == actionfacts.DialectCMD {
+				tool = "cmd"
+			}
+			args, err := json.Marshal(map[string]string{"command": tt.command})
+			if err != nil {
+				t.Fatal(err)
+			}
+			structured := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input:      actionfacts.Input{Tool: tool, Args: args, CWD: `C:\repo`, DialectHint: tt.dialect},
+				LegacyText: string(args), Connector: connector, EnforcementCapable: true,
+			})
+			if got := findingWithID(structured, "CMD-RM-RF"); got == nil || !got.contributesToEnforcement() {
+				t.Errorf("structured compound command did not enforce: %v", FindingStrings(structured))
+			}
+		})
 	}
 }

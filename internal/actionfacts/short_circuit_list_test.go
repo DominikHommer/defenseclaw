@@ -17,6 +17,7 @@
 package actionfacts
 
 import (
+	"encoding/json"
 	"slices"
 	"strings"
 	"testing"
@@ -69,6 +70,111 @@ func TestSimpleCommands(t *testing.T) {
 	}
 }
 
+func TestSimpleCommandsNestedShell(t *testing.T) {
+	for _, tt := range []struct{ command, want string }{
+		{"sh -c 'true && rm -rf /'", "rm -rf /"},
+		{"bash -c 'false || rm -rf /'", "rm -rf /"},
+		{"zsh -c 'true; rm -rf /'", "rm -rf /"},
+		{"eval 'true && rm -rf /'", "rm -rf /"},
+		{"eval\t'cat ~/.ssh/id_rsa'", "cat '/home/alice/.ssh/id_rsa'"},
+	} {
+		input := Input{Tool: "shell", Command: tt.command, CWD: "/repo", ActiveHome: "/home/alice", DialectHint: DialectPOSIX}
+		facts := Analyze(input)
+		got := SimpleCommands(input, facts)
+		if !slices.ContainsFunc(got, func(simple SimpleCommand) bool { return simple.Text == tt.want }) {
+			t.Errorf("%q: nested simple commands = %#v", tt.command, got)
+		}
+	}
+}
+
+func TestSimpleCommandsDynamicEvalKeepsStandaloneDisposition(t *testing.T) {
+	for _, command := range []string{
+		`eval "$(echo true)"`,
+		`echo done && eval $(echo true)`,
+		`echo done && eval "$(echo true)"`,
+	} {
+		input := Input{Tool: "shell", Command: command, CWD: "/repo", DialectHint: DialectPOSIX}
+		for _, child := range SimpleCommands(input, Analyze(input)) {
+			if child.EvaluationFailure != "" {
+				t.Errorf("%q: runtime eval invented a parse failure: %#v", command, child)
+			}
+		}
+	}
+}
+
+func TestSimpleCommandsCStyleLoopAndWindowsBoundaries(t *testing.T) {
+	for _, command := range []string{
+		"for ((i=$(rm -rf /); i<3; i++)); do echo ok; done",
+		"for ((i=0; i<$(rm -rf /); i++)); do echo ok; done",
+		"for ((i=0; i<3; i+=$(rm -rf /))); do echo ok; done",
+	} {
+		input := Input{Tool: "shell", Command: command, CWD: "/repo", DialectHint: DialectPOSIX}
+		got := SimpleCommands(input, Analyze(input))
+		if !slices.ContainsFunc(got, func(simple SimpleCommand) bool { return simple.Text == "rm -rf /" }) {
+			t.Errorf("%q: arithmetic substitution not exposed: %#v", command, got)
+		}
+	}
+	for _, tt := range []struct {
+		command string
+		dialect Dialect
+		want    []string
+	}{
+		{`Write-Output 'a; b'; Remove-Item -Recurse -Force C:\`, DialectPowerShell,
+			[]string{`Write-Output 'a; b'`, `Remove-Item -Recurse -Force C:\`}},
+		{`Write-Output a | Remove-Item -Recurse -Force C:\`, DialectPowerShell,
+			[]string{`Write-Output a`, `Remove-Item -Recurse -Force C:\`}},
+		{`echo "a & b" & rmdir /s /q C:\`, DialectCMD,
+			[]string{`echo "a & b"`, `rmdir /s /q C:\`}},
+		{`Write-Output ok;`, DialectPowerShell, []string{`Write-Output ok`}},
+		{`$output = Join-Path $HOME 'report.txt'; Add-Content -LiteralPath $output -Value 'dummy-key'`, DialectPowerShell,
+			[]string{`$output = Join-Path $HOME 'report.txt'`, `Add-Content -LiteralPath 'C:/Users/alice/report.txt' -Value 'dummy-key'`}},
+		{`$output = Join-Path $HOME 'report.txt'; Add-Content -LiteralPath "$output" -Value 'dummy-key'`, DialectPowerShell,
+			[]string{`$output = Join-Path $HOME 'report.txt'`, `Add-Content -LiteralPath 'C:/Users/alice/report.txt' -Value 'dummy-key'`}},
+		{`$output = Join-Path $HOME '.ssh'; $target = Join-Path $output 'authorized_keys'; Add-Content -LiteralPath $target -Value 'dummy-key'`, DialectPowerShell,
+			[]string{`$output = Join-Path $HOME '.ssh'`, `$target = Join-Path $output 'authorized_keys'`, `Add-Content -LiteralPath 'C:/Users/alice/.ssh/authorized_keys' -Value 'dummy-key'`}},
+	} {
+		input := Input{Tool: "shell", Command: tt.command, CWD: `C:\repo`, ActiveHome: `C:\Users\alice`, DialectHint: tt.dialect}
+		var got []string
+		for _, simple := range SimpleCommands(input, Analyze(input)) {
+			got = append(got, simple.Text)
+		}
+		if !slices.Equal(got, tt.want) {
+			t.Errorf("%q: Windows simple commands = %#v, want %#v", tt.command, got, tt.want)
+		}
+		tool := "powershell"
+		if tt.dialect == DialectCMD {
+			tool = "cmd"
+		}
+		args, err := json.Marshal(map[string]string{"command": tt.command})
+		if err != nil {
+			t.Fatal(err)
+		}
+		input = Input{Tool: tool, Args: args, CWD: `C:\repo`, ActiveHome: `C:\Users\alice`, DialectHint: tt.dialect}
+		got = nil
+		for _, simple := range SimpleCommands(input, Analyze(input)) {
+			got = append(got, simple.Text)
+		}
+		if !slices.Equal(got, tt.want) {
+			t.Errorf("%q: structured Windows simple commands = %#v, want %#v", tt.command, got, tt.want)
+		}
+	}
+}
+
+func TestSimpleCommandsKeepsStaticRelativeRedirects(t *testing.T) {
+	for _, input := range []Input{
+		{Tool: "shell", Command: "tar -C scope -xf pkg.tar; echo hi > ../project/ordinary/n",
+			CWD: "/home/alice/project", DialectHint: DialectPOSIX},
+		{Tool: "Bash", Args: []byte(`{"command":"tar -C scope -xf pkg.tar; echo hi > ../project/ordinary/n"}`),
+			CWD: "/home/alice/project"},
+		{Tool: "Bash", Args: []byte(`{"command":"tar -C scope -xf pkg.tar; echo hi > ../project/ordinary/n","description":"Review fixture"}`)},
+	} {
+		got := SimpleCommands(input, Analyze(input))
+		if len(got) != 2 || got[0].EvaluationFailure != "" || got[1].EvaluationFailure != "" {
+			t.Errorf("static relative redirect = %#v for %+v", got, input)
+		}
+	}
+}
+
 func TestCompoundCommandReductionMovesRedirectsAndSubshellExit(t *testing.T) {
 	tests := []struct {
 		command string
@@ -115,9 +221,11 @@ func TestSimpleCommandsFailsClosedAtEvaluationBound(t *testing.T) {
 }
 
 func TestSimpleCommandsFailsClosedOnRecursiveFunction(t *testing.T) {
-	input := Input{Tool: "shell", Command: "f() { f; }; f", CWD: "/repo", DialectHint: DialectPOSIX}
-	commands := SimpleCommands(input, Analyze(input))
-	if len(commands) != 1 || commands[0].EvaluationFailure != "parse" {
-		t.Fatalf("recursive function = %#v", commands)
+	for _, command := range []string{"f() { f; }; f", "f() { eval 'f'; }; f"} {
+		input := Input{Tool: "shell", Command: command, CWD: "/repo", DialectHint: DialectPOSIX}
+		commands := SimpleCommands(input, Analyze(input))
+		if len(commands) != 1 || commands[0].EvaluationFailure != "parse" {
+			t.Errorf("%q: recursive function = %#v", command, commands)
+		}
 	}
 }

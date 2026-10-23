@@ -1796,6 +1796,7 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 			},
 			legacyText:  "for ((i=0; i<1; i++)); do " + dangerous + " ; done",
 			wantFinding: true,
+			wantEnforce: true,
 		},
 		{
 			name: "inert function definition",
@@ -2357,11 +2358,6 @@ func TestTrustedActionEmbeddedExecutionRemainsShadowUntilOuterComplete(t *testin
 		{
 			name:    "stdin interpreter network action",
 			command: `echo 'curl ` + webhook + `' | bash`,
-			ruleID:  "C2-WEBHOOK-SITE",
-		},
-		{
-			name:    "static wrapper Bash-only network action",
-			command: `bash -c 'cat <(curl ` + webhook + `)'`,
 			ruleID:  "C2-WEBHOOK-SITE",
 		},
 	} {

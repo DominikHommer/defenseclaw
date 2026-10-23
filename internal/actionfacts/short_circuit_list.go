@@ -17,6 +17,7 @@
 package actionfacts
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 
@@ -343,6 +344,11 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 			return true, childScope(false, func() bool { return flattenAll(typed.Stmts) })
 		case *syntax.Block:
 			return true, flattenAll(typed.Stmts)
+		case *syntax.TimeClause:
+			if !allSimple || typed.Stmt == nil {
+				return true, false
+			}
+			return true, flatten(typed.Stmt)
 		case *syntax.IfClause:
 			for clause := typed; clause != nil; clause = clause.Else {
 				if !flattenAll(clause.Cond) || !childScope(true, func() bool { return flattenAll(clause.Then) }) {
@@ -354,9 +360,19 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 			return true, flattenAll(typed.Cond) &&
 				childScope(true, func() bool { return flattenAll(typed.Do) })
 		case *syntax.ForClause:
-			iteration, isWords := typed.Loop.(*syntax.WordIter)
-			if !isWords || !allSimple && !inertPOSIXWords(iteration.Items...) ||
-				allSimple && !flattenSubstitutions(iteration) {
+			switch iteration := typed.Loop.(type) {
+			case *syntax.WordIter:
+				if !allSimple && !inertPOSIXWords(iteration.Items...) ||
+					allSimple && !flattenSubstitutions(iteration) {
+					return true, false
+				}
+			case *syntax.CStyleLoop:
+				// Arithmetic can contain command substitutions. Those run while
+				// evaluating the loop header, before its body.
+				if !allSimple || !flattenSubstitutions(iteration) {
+					return true, false
+				}
+			default:
 				return true, false
 			}
 			return true, childScope(true, func() bool { return flattenAll(typed.Do) })
@@ -439,13 +455,33 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 		}
 		if allSimple {
 			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) != 0 {
-				if body, found := functions[call.Args[0].Lit()]; found {
+				name, known := simpleFunctionCallName(call)
+				if !known && len(functions) != 0 {
+					// A runtime program word may name any function defined in
+					// this action. No complete per-command view exists.
+					return false
+				}
+				var bodies []*syntax.Stmt
+				if body, found := functions[name]; found {
+					bodies = append(bodies, body)
+				}
+				program, _ := simpleStaticWord(call.Args[0], nil)
+				if program == "eval" && len(functions) != 0 {
+					called, ok := simpleEvalFunctionNames(call)
+					if !ok {
+						return false
+					}
+					for _, calledName := range called {
+						if body, found := functions[calledName]; found && !slices.Contains(bodies, body) {
+							bodies = append(bodies, body)
+						}
+					}
+				}
+				if len(bodies) != 0 {
 					if functionDepth >= 8 || !keep(stmt.Cmd, stmt.Redirs...) {
 						return false
 					}
 					reduced = true
-					functionDepth++
-					defer func() { functionDepth-- }()
 					if len(stmt.Redirs) != 0 {
 						moved, ok := text(stmt.Redirs[0].Pos(), stmt.Redirs[len(stmt.Redirs)-1].End())
 						if !ok {
@@ -455,7 +491,18 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 						redirects = append(redirects[:len(redirects):len(redirects)], moved)
 						defer func() { redirects = saved }()
 					}
-					return flatten(body)
+					for _, body := range bodies {
+						if functionDepth >= 8 {
+							return false
+						}
+						functionDepth++
+						ok := flatten(body)
+						functionDepth--
+						if !ok {
+							return false
+						}
+					}
+					return true
 				}
 			}
 		}
@@ -467,6 +514,65 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 		return nil, false, false
 	}
 	return statements, reduced, true
+}
+
+// eval parses its static script in the caller's shell. Function definitions
+// from the enclosing action remain visible to calls inside that script.
+func simpleEvalFunctionNames(call *syntax.CallExpr) ([]string, bool) {
+	script, _, nested, static := simpleNestedScript(call, nil)
+	if !nested || !static {
+		return nil, false
+	}
+	file, ok := shellparse.Parse(script)
+	if !ok {
+		return nil, false
+	}
+	var names []string
+	known := true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if _, definition := node.(*syntax.FuncDecl); definition {
+			return false
+		}
+		inner, call := node.(*syntax.CallExpr)
+		if !call || len(inner.Args) == 0 {
+			return true
+		}
+		name, ok := simpleFunctionCallName(inner)
+		if !ok {
+			known = false
+			return false
+		}
+		names = append(names, name)
+		return true
+	})
+	return names, known
+}
+
+// simpleFunctionCallName resolves literal spellings and the shell builtins
+// that can run a name supplied after them. Their interpretation can differ
+// among shells, so including the body is the conservative policy view.
+func simpleFunctionCallName(call *syntax.CallExpr) (string, bool) {
+	name, ok := simpleStaticWord(call.Args[0], nil)
+	if !ok {
+		return "", false
+	}
+	switch name {
+	case "command", "builtin", "eval", "time":
+		index := 1
+		for index < len(call.Args) && strings.HasPrefix(call.Args[index].Lit(), "-") {
+			index++
+		}
+		if index == len(call.Args) {
+			return name, true
+		}
+		return simpleStaticWord(call.Args[index], nil)
+	case "trap":
+		if len(call.Args) < 2 {
+			return name, true
+		}
+		return simpleStaticWord(call.Args[1], nil)
+	}
+	return name, true
 }
 
 // pipelineHasCompoundCommand keeps an ordinary pipeline intact. Its data
