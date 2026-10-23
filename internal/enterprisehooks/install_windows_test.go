@@ -1046,6 +1046,52 @@ func TestInstallWindowsClaudeAutoHealsDeletedManagedPolicyFromExactState(t *test
 	}
 }
 
+func TestEnsureWindowsClaudeRestoresDeletedPolicyForEnrolledTargets(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(
+		t,
+		map[string]interface{}{"allowManagedHooksOnly": true},
+	)
+	previousStandalone := windowsEnterpriseStandaloneProcess
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
+	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previousStandalone })
+	if _, err := Install(context.Background(), windowsManagedInstallOptions(fixture)); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(filepath.Dir(fixture.policyPath), windowsClaudeManagedStateFile)
+	expectedPolicy, err := os.ReadFile(fixture.policyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedState, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(fixture.policyPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ReadWindowsClaudeManagedPolicyTargets(); err == nil {
+		t.Fatal("missing policy with enrolled ownership state was accepted as inactive")
+	}
+	if err := EnsureWindowsStandaloneClaudeManagedPolicy(connector.SetupOpts{
+		APIAddr:        "127.0.0.1:18970",
+		HookExecutable: fixture.hookExe,
+	}); err != nil {
+		t.Fatalf("restore configured policy with enrolled targets: %v", err)
+	}
+	policy, err := os.ReadFile(fixture.policyPath)
+	if err != nil || !bytes.Equal(policy, expectedPolicy) {
+		t.Fatalf("restored policy differs: read error = %v", err)
+	}
+	state, err := os.ReadFile(statePath)
+	if err != nil || !bytes.Equal(state, expectedState) {
+		t.Fatalf("restored enrollment changed: read error = %v", err)
+	}
+	targets, active, err := ReadWindowsClaudeManagedPolicyTargets()
+	if err != nil || !active || len(targets) != 1 || targets[0] != fixture.targetSID.String() {
+		t.Fatalf("restored targets = %v, active = %t, error = %v", targets, active, err)
+	}
+}
+
 func TestInstallWindowsClaudeDeletedPolicyRejectsMismatchedState(t *testing.T) {
 	tests := []struct {
 		name                 string

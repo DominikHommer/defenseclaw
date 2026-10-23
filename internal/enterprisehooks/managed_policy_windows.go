@@ -1872,7 +1872,10 @@ func validateWindowsClaudeMissingPolicyRecovery(
 			"enterprise hooks: missing-policy recovery gateway service identity mismatch",
 		)
 	}
-	targetEnrolled := targetSID == nil && len(canonicalTargets) == 0
+	// A machine-policy ensure has no target SID. Its authority is limited to
+	// restoring the exact authenticated set in this ownership state; the
+	// caller below also rejects any change to that set during recovery.
+	targetEnrolled := targetSID == nil
 	if targetSID != nil {
 		for _, sid := range canonicalTargets {
 			if sid == targetSID.String() {

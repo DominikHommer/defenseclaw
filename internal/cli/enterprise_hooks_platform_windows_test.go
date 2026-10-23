@@ -166,6 +166,74 @@ func TestWindowsConfiguredMachinePolicyRepairsLegacyEmptyEnrollment(t *testing.T
 	}
 }
 
+func TestWindowsClaudeDeletedPolicyReconcileRetainsEnrolledTargets(t *testing.T) {
+	const aliceSID = "S-1-12-1-1111111111-2222222222-3333333333-4000000000"
+	previousCfg := cfg
+	previousClaudeReader, previousClaudePublisher := enterpriseHookClaudePolicyTargetsReader, enterpriseHookClaudePolicyTargetsPublisher
+	previousClaudeEnsurer := enterpriseHookClaudePolicyEnsurer
+	previousCodexLayout, previousCodexReader := enterpriseHookCodexRequirementsLayoutResolver, enterpriseHookCodexRuntimeRegistryReader
+	previousCursorReader, previousCursorPublisher := enterpriseHookCursorPolicyTargetsReader, enterpriseHookCursorPolicyTargetsPublisher
+	t.Cleanup(func() {
+		cfg = previousCfg
+		enterpriseHookClaudePolicyTargetsReader, enterpriseHookClaudePolicyTargetsPublisher = previousClaudeReader, previousClaudePublisher
+		enterpriseHookClaudePolicyEnsurer = previousClaudeEnsurer
+		enterpriseHookCodexRequirementsLayoutResolver, enterpriseHookCodexRuntimeRegistryReader = previousCodexLayout, previousCodexReader
+		enterpriseHookCursorPolicyTargetsReader, enterpriseHookCursorPolicyTargetsPublisher = previousCursorReader, previousCursorPublisher
+	})
+	cfg = &config.Config{
+		DeploymentMode: managed.DeploymentModeManagedEnterprise,
+		Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileStandalone},
+		Guardrail:      config.GuardrailConfig{Connector: "claudecode"},
+	}
+	manifest := enterprisehooks.Manifest{Targets: []enterprisehooks.ManifestTarget{{
+		SID: aliceSID, UserHome: `C:\Users\alice`, Connector: "claudecode",
+	}}}
+	policyPresent := false
+	ensures := 0
+	published := 0
+	enterpriseHookClaudePolicyTargetsReader = func() ([]string, bool, error) {
+		if !policyPresent {
+			return nil, false, errors.New("ownership metadata is incomplete")
+		}
+		return []string{aliceSID}, true, nil
+	}
+	enterpriseHookClaudePolicyEnsurer = func(opts connector.SetupOpts) error {
+		if opts.ManagedTargetSID != "" {
+			t.Fatalf("machine-policy repair enrolled a new SID: %s", opts.ManagedTargetSID)
+		}
+		ensures++
+		policyPresent = true
+		return nil
+	}
+	enterpriseHookClaudePolicyTargetsPublisher = func(targets []string) error {
+		published++
+		if len(targets) != 1 || targets[0] != aliceSID {
+			t.Fatalf("reconcile published %v, want Alice retained", targets)
+		}
+		return nil
+	}
+	enterpriseHookCodexRequirementsLayoutResolver = func(string) (connector.WindowsCodexMachineRequirementsOptions, error) {
+		return connector.WindowsCodexMachineRequirementsOptions{
+			HookBinary: `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`,
+		}, nil
+	}
+	enterpriseHookCodexRuntimeRegistryReader = func(string) (connector.WindowsCodexManagedRuntimeRegistry, error) {
+		return connector.WindowsCodexManagedRuntimeRegistry{}, nil
+	}
+	enterpriseHookCursorPolicyTargetsReader = func() ([]enterprisehooks.WindowsCursorManagedRuntimeTarget, bool, error) {
+		return nil, false, nil
+	}
+	enterpriseHookCursorPolicyTargetsPublisher = func([]enterprisehooks.WindowsCursorManagedRuntimeTarget) error { return nil }
+	for _, publishExact := range []bool{false, true} {
+		if err := syncEnterpriseHookManagedMachineEnrollments(manifest, "127.0.0.1:32109", publishExact); err != nil {
+			t.Fatalf("reconcile publication (exact=%t): %v", publishExact, err)
+		}
+	}
+	if ensures != 1 || published != 2 {
+		t.Fatalf("reconcile ensured policy %d times and published targets %d times", ensures, published)
+	}
+}
+
 func TestDeferredTargetSessionAvailabilityDowngradesOnlyTypedAbsence(t *testing.T) {
 	previous := enterpriseHookWindowsTargetSessionCheck
 	previousPending := enterpriseHookWindowsDeferredPendingCheck

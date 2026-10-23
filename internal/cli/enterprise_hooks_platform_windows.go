@@ -258,8 +258,13 @@ func syncEnterpriseHookManagedMachineEnrollments(
 			}); err != nil {
 				return fmt.Errorf("ensure configured Claude machine policy: %w", err)
 			}
-			currentClaude = nil
-			claudeActive = true
+			currentClaude, claudeActive, err = enterpriseHookClaudePolicyTargetsReader()
+			if err != nil {
+				return fmt.Errorf("read ensured Claude machine policy: %w", err)
+			}
+			if !claudeActive {
+				return errors.New("configured Claude machine policy did not become active")
+			}
 		case !configured["claudecode"] && claudeActive:
 			if err := enterpriseHookClaudePolicyDeactivator(); err != nil {
 				return fmt.Errorf("deactivate removed Claude connector: %w", err)
