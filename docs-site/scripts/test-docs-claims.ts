@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -29,6 +29,14 @@ function page(name: string): string {
 
 function source(name: string): string {
   return readFileSync(join(repo, name), 'utf8');
+}
+
+function docsPages(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) return docsPages(path);
+    return entry.isFile() && /\.mdx?$/.test(entry.name) ? [path] : [];
+  });
 }
 
 describe('Cursor observe outage mode', () => {
@@ -62,6 +70,27 @@ describe('Cursor observe outage mode', () => {
 });
 
 describe('Observe mode policy findings and gateway outages', () => {
+  it('qualifies Antigravity reference verdict mapping for a gateway outage', () => {
+    const hooks = source('internal/gateway/connector/subprocess.go');
+    assert.match(hooks, /const defaultHookFailMode = "closed"/);
+    const antigravity = source('internal/gateway/connector/hooks/antigravity-hook.sh');
+    assert.match(antigravity, /PreToolUse\)[\s\S]*?if \[ "\$closed" = "1" \]; then[\s\S]*?"decision":"deny"/);
+    const mapping = page('reference/connectors/antigravity.mdx').split('## Verdict mapping')[1]?.split('## Native ask')[0] ?? '';
+    assert.match(mapping, /`observe` records policy findings without blocking on those findings/i);
+    assert.match(mapping, /default fail mode `closed`.{0,120}gateway is unreachable.{0,80}denies `PreToolUse`/i);
+    assert.ok(!/always permits tool execution/i.test(mapping));
+  });
+
+  it('does not pair observe with blocks nothing on any content page', () => {
+    const content = join(site, 'content');
+    const offenders = docsPages(content).flatMap((path) => {
+      const paragraphs = readFileSync(path, 'utf8').split(/\n\s*\n/);
+      return paragraphs.some((paragraph) => /\bobserve\b[\s\S]*?\bblocks nothing\b/i.test(paragraph))
+        ? [path.slice(content.length + 1)] : [];
+    });
+    assert.deepEqual(offenders, []);
+  });
+
   it('qualifies hook connector claims for Claude Code and Antigravity', () => {
     const outage = source('internal/gateway/connector/subprocess.go').split('func OutageHookFailMode(')[1]?.split('\n}')[0] ?? '';
     assert.match(outage, /return mode/);
