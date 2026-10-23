@@ -37,6 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -78,12 +79,15 @@ var (
 	// (ValidateTrustedFilePath). The hot path checks the same, so whether a
 	// standard user's edit is installed does not depend on which keys it
 	// changed (GAP-0312).
-	windowsEnterpriseHotConfigSourceCheck = managed.ValidateTrustedConfigPath
-	windowsEnterpriseHotConfigRestart     = restartWindowsStandaloneGateway
-	windowsEnterpriseHotConfigRecover     = startWindowsStandaloneGatewayIfStopped
-	windowsEnterpriseHotBundleReload      = reloadWindowsStandaloneBundlePolicy
+	windowsEnterpriseHotConfigSourceCheck  = managed.ValidateTrustedConfigPath
+	windowsEnterpriseHotConfigRestart      = restartWindowsStandaloneGateway
+	windowsEnterpriseHotConfigRecover      = startWindowsStandaloneGatewayIfStopped
+	windowsEnterpriseHotBundleReload       = reloadWindowsStandaloneBundlePolicy
+	windowsEnterpriseHotConfigCloseHooks   = enterprisehooks.CloseWindowsStandaloneHooksForUnprovenUndo
+	windowsEnterpriseHotConfigHooksHeld    = enterprisehooks.WindowsStandaloneHooksHeldClosed
+	windowsEnterpriseHotConfigReleaseHooks = enterprisehooks.ReleaseWindowsStandaloneHookClosure
 	// windowsEnterpriseHotConfigFailClosed stops the gateway after an undo
-	// that could not be proven, and returns nil only once it is stopped.
+	// that could not be proven, once its hooks are durably closed.
 	windowsEnterpriseHotConfigFailClosed = stopWindowsStandaloneGatewayFailClosed
 )
 
@@ -421,11 +425,13 @@ func windowsEnterpriseHotConfigApply(
 		}
 		opts.hotConfigRestoreFailed = true
 		installed := windowsEnterpriseHotConfigUndoState(layout.ConfigPath, previous, next, targetsRefreshed, targetsRepublished)
-		gateway := "the gateway service was stopped, so no hook is decided by a policy that was not verified: " +
-			"every enrolled user's hook fails closed (or as the administrator's outage setting says) until a repair starts it on a verified config"
-		if err := windowsEnterpriseHotConfigFailClosed(); err != nil {
-			gateway = "the gateway service could not be stopped (" + windowsEnterpriseBoundedDiagnostic(err.Error()) +
-				"), so it may still enforce the config that was not applied"
+		gateway := "the gateway service was stopped after every standalone hook was durably forced closed; rerun ensure after repair to prove the live policy and release that closure"
+		if err := windowsEnterpriseHotConfigCloseHooks(layout); err != nil {
+			gateway = "the gateway service was left running because its hooks could not be durably forced closed (" +
+				windowsEnterpriseBoundedDiagnostic(err.Error()) + "); it may still enforce an unproven config"
+		} else if err := windowsEnterpriseHotConfigFailClosed(); err != nil {
+			gateway = "the hooks remain forced closed, but the gateway service could not be stopped (" +
+				windowsEnterpriseBoundedDiagnostic(err.Error()) + "); it may still enforce an unproven config"
 		}
 		switch {
 		case restoreErr != nil:

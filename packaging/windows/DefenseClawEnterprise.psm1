@@ -13757,6 +13757,14 @@ function Remove-DefenseClawStandaloneHookRuntimeLeftovers {
         Remove-DefenseClawManagedHooksSerializationLock `
             -Path ([IO.Path]::Combine($Directory, 'machine-policy.json')) `
             -Label 'public machine policy summary'
+        # A failed hot-config undo keeps this closure across repair retries.
+        # Purge may remove it only once no connector runtime remains here.
+        $remaining = @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $Directory -Force)
+        if ($remaining.Count -eq 1 -and $remaining[0].Name -eq '.defenseclaw-hot-config-undo-closed') {
+            Remove-DefenseClawManagedHooksSerializationLock `
+                -Path $remaining[0].FullName `
+                -Label 'hot-config undo hook closure'
+        }
         if ($null -ne (Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $Directory -Force |
                 Microsoft.PowerShell.Utility\Select-Object -First 1)) {
             "${Directory}: kept: it still holds per-user connector folders"

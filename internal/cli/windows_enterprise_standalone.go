@@ -3229,6 +3229,11 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 				code = windowsEnterpriseFailureCodeFor(result)
 			}
 		}
+		if err := windowsEnterpriseReleaseHotConfigClosureIfProven(ctx, result, code); err != nil {
+			result.AddError("hook_closure_release_failed", "standalone hooks remain closed after the unproven config undo: "+
+				windowsEnterpriseBoundedDiagnostic(err.Error())+"; rerun ensure after repairing the gateway")
+			code = windowsEnterpriseFailureCodeFor(result)
+		}
 		return finishWindowsEnterpriseStandalone(cmd, opts, result, code)
 	}
 	configStateRepaired, stateErr := windowsEnterpriseConfigGenerationRepair(ctx, opts, statusReport)
@@ -3622,6 +3627,27 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	}
 	result.AddWarning("ensure_"+plan.Action, "ensure ran "+plan.Action+": "+reason)
 	return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+}
+
+func windowsEnterpriseReleaseHotConfigClosureIfProven(ctx context.Context, result *enterprisestatus.Result, code int) error {
+	if code != 0 || !result.OK || !result.Installed {
+		return nil
+	}
+	// A failed hot-config undo left this administrator-owned closure across
+	// runs. A successful repair or no-op Verify may release it only after the
+	// live gateway proves the installed policy again.
+	held, err := windowsEnterpriseHotConfigHooksHeld()
+	if err != nil || !held {
+		return err
+	}
+	if !windowsEnterpriseHotConfigEnforcesInstalled(ctx, windowsEnterpriseHotConfigTimeout) {
+		return errors.New("the gateway has not proven the installed config's policy")
+	}
+	layout, err := windowsEnterpriseHotConfigLayout()
+	if err != nil {
+		return err
+	}
+	return windowsEnterpriseHotConfigReleaseHooks(layout)
 }
 
 // windowsEnterpriseStandaloneProfilesPreflight refuses a first install, in

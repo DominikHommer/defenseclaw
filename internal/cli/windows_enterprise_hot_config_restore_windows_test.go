@@ -338,7 +338,7 @@ func TestWindowsEnterpriseHotConfigUnprovenUndoIsNotRestarted(t *testing.T) {
 		}
 		want := "gateway service was stopped"
 		if stopErr != nil {
-			want = "could not be stopped (access denied), so it may still enforce"
+			want = "could not be stopped (access denied); it may still enforce"
 		}
 		if !strings.Contains(message, want) {
 			t.Fatalf("stop error %v: errors %s do not say %q", stopErr, message, want)
