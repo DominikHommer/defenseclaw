@@ -56,8 +56,8 @@
     "/usr/local/lib/defenseclaw/hooks/claude-code-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 11337,
-      "sha256": "8ab5121633523a3a27ab18f8ad5b4c100294e7bef18b452bde059618e70c0230"
+      "size": 12641,
+      "sha256": "abdb15d1f07a523ca2b040dbb5cb4cefd6d76e1af62420354154c87ffe97a7b7"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",
