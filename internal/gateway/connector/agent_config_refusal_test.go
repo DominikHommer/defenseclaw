@@ -406,3 +406,29 @@ func TestClaudeCodeUserSettingsReadPathKeepsWindowsBehavior(t *testing.T) {
 		t.Fatalf("Windows settings read path = %q, %v; want %q", got, err, path)
 	}
 }
+
+func TestCheckAgentSettingsAllowsLinkedWindowsCodexHome(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows resolves the linked parent through its native path rules")
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	outside := filepath.Join(root, "dotfiles")
+	for _, dir := range []string{home, outside} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("USERPROFILE", home)
+	if err := os.Symlink(outside, filepath.Join(home, ".codex")); err != nil {
+		t.Skipf("directory symlinks are unavailable: %v", err)
+	}
+	path := filepath.Join(home, ".codex", "config.toml")
+	if err := os.WriteFile(filepath.Join(outside, "config.toml"), []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pointCodexConfig(t, path)
+	if err := CheckAgentSettings(NewCodexConnector(), SetupOpts{DataDir: filepath.Join(home, ".defenseclaw")}); err != nil {
+		t.Fatalf("Windows Codex precheck refused readable settings through linked home: %v", err)
+	}
+}
