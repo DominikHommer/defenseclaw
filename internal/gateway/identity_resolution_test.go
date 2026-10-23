@@ -303,6 +303,21 @@ func TestProvenMeetCoversUncertainSandboxProfile(t *testing.T) {
 			t.Fatalf("uncertain stronger sandbox assignment = %+v; want account-only refusal", got)
 		}
 	}
+	// The same floor rule applies when one proven assignment selected the
+	// stricter sandbox profile without needing a combined profile.
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"sandboxed": {Mode: "action", BlockAt: "LOW", Sandbox: &config.OpenShellAdminConfig{RequiredFor: []string{"codex", "claudecode"}}},
+		"weaker":    {Mode: "observe", Sandbox: &config.OpenShellAdminConfig{RequiredFor: []string{"codex"}}},
+	}
+	cfg.Guardrail.DefaultProfile = "weaker"
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{group, unknown}
+	set := newGuardrailProfileSetFor(t, cfg)
+	got := set.match(&subject, profileSubjectVerified, "codex", "")
+	if got.Name != "sandboxed" || got.Refused != "" || len(got.Unproven) != 0 {
+		t.Fatalf("proven sandbox profile = %+v; want sandboxed without refusal", got)
+	}
 }
 
 // The default is a fallback, not a proven assignment. Two profiles that

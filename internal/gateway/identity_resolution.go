@@ -388,7 +388,7 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 	connectors := profileCoverConnectors(connectorName)
 	var needed []string
 	for i, name := range maybe {
-		if len(yes) == 0 && name == set.defaultProfile || len(yes) > 0 && set.profileCovers(proven, name, connectors) {
+		if len(yes) == 0 && name == set.defaultProfile || len(yes) > 0 && set.provenProfileCovers(proven, name, connectors) {
 			continue
 		}
 		for _, fact := range maybeNeeds[i] {
@@ -688,21 +688,40 @@ func profileCoverConnectors(connectorName string) []string {
 	return []string{connectorName, ""}
 }
 
-// profileCovers reports whether profile a enforces at least what profile b
-// enforces for a request decided for connectors: a sandbox floor at least as
-// strict as b's, and wherever b blocks (action, by the hook mode or by the
-// inspect and proxy mode) a blocks too, with b's rule pack and rules, from a block
-// level at or below b's, and with a HILT that asks wherever b's asks. Where
-// b only observes it blocks nothing, so a's guardrail settings there do not
-// matter. A name that is not a profile is the base configuration. alert_at
-// and block_message enforce nothing and are not compared.
+// profileCovers compares candidates when choosing a profile. Equal sandbox
+// sections keep an unproven fallback under a combined name instead of
+// disclosing one candidate's profile as if its assignment were proven.
 func (set *guardrailProfileSet) profileCovers(a, b string, connectors []string) bool {
+	return set.profileCoverage(a, b, connectors, false)
+}
+
+// provenProfileCovers asks whether an already proven selection covers an
+// uncertain assignment. Its effective sandbox floor may be stricter than the
+// uncertain profile's floor, including when it is a combination of profiles.
+func (set *guardrailProfileSet) provenProfileCovers(a, b string, connectors []string) bool {
+	return set.profileCoverage(a, b, connectors, true)
+}
+
+// profileCoverage checks sandbox enforcement and wherever b blocks by hook,
+// inspect or proxy mode: a blocks there too, with b's rule pack and rules,
+// from a block level at or below b's and a HILT that asks wherever b's asks.
+// Where b only observes, its guardrail settings do not matter. A name that
+// is not a profile is the base configuration. alert_at and block_message do
+// not enforce anything and are not compared.
+func (set *guardrailProfileSet) profileCoverage(a, b string, connectors []string, effectiveSandbox bool) bool {
 	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
 	if a == b {
 		return true
 	}
 	ca, cb := set.profileConfig(a), set.profileConfig(b)
-	if ca == nil || cb == nil || !set.sandboxFloorCovers(a, b) {
+	if ca == nil || cb == nil {
+		return false
+	}
+	if effectiveSandbox {
+		if !set.sandboxFloorCovers(a, b) {
+			return false
+		}
+	} else if !reflect.DeepEqual(set.profileSandbox(a), set.profileSandbox(b)) {
 		return false
 	}
 	for _, name := range connectors {
@@ -761,6 +780,15 @@ func (set *guardrailProfileSet) sandboxFloorCovers(a, b string) bool {
 	}
 	tightened, err := config.TightenOpenShellAdmin(fa, &fb)
 	return err == nil && reflect.DeepEqual(tightened, fa)
+}
+
+// profileSandbox is the raw sandbox section of a named profile. A combined
+// profile has no raw section; its effective floor is checked separately.
+func (set *guardrailProfileSet) profileSandbox(name string) *config.OpenShellAdminConfig {
+	if set.base == nil {
+		return nil
+	}
+	return set.base.Guardrail.Profiles[name].Sandbox
 }
 
 // profileStricter orders profiles that do not cover each other: a blocks
