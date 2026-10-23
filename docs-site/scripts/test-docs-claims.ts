@@ -172,8 +172,37 @@ describe('managed outage documentation', () => {
     assert.match(modes, /Other events use their event-specific outcomes/);
     assert.match(modes, /Secure Client hooks have no separate no-answer deadline and keep their whole request budget/);
     assert.match(modes, /a request that times out before headers follows its effective fail mode/);
-    assert.match(modes, /a successful response cut off after headers blocks/);
     assert.doesNotMatch(modes, /no-answer deadline[^.]*including Secure Client/i);
+  });
+
+  it('limits Secure Client truncated-response blocks to connectors that can deliver one', () => {
+    const hook = readFileSync(join(repo, 'internal/gateway/connector/hookexec/hookexec.go'), 'utf8');
+    const readFailure = hook.match(/if readErr != nil \{([\s\S]*?)\n\t\}/)?.[1] ?? '';
+    assert.match(readFailure, /return (?:failNoAnswer\(opts, sp, failMode\)|failAfterErrorStatus\(opts, sp, failMode, knownStatus\))/);
+    if (readFailure.includes('failAfterErrorStatus')) {
+      assert.match(hook, /func failAfterErrorStatus[\s\S]*?if status == 0 \|\| !managedNativeDecision\(opts\) \{\s*return failNoAnswer\(opts, sp, failMode\)/);
+    }
+    assert.match(hook, /blocked := !sp\.failOpenOnly && \(opts\.StrictAvailability \|\| failMode == "closed"\)/);
+
+    const hermes = readFileSync(join(repo, 'internal/gateway/connector/hookexec/managed_hermes.go'), 'utf8');
+    assert.match(hermes, /if opts\.ManagedEnterprise && !managedNativeDecision\(opts\) \{\s*return false/);
+    const shell = readFileSync(join(repo, 'internal/gateway/connector/hooks/hermes-hook.sh'), 'utf8');
+    const shellTransport = shell.split('fail_unreachable() {').pop()?.split('\n}')[0] ?? '';
+    assert.match(shellTransport, /defenseclaw_log_hook_delivery_failure hermes hermes-hook/);
+    assert.match(shellTransport, /if defenseclaw_should_fail_closed_on_unreachable; then[\s\S]*?exit 2[\s\S]*?fi\s*exit 0/);
+
+    const matrix = JSON.parse(readFileSync(join(site, 'data/capability-matrix.json'), 'utf8'));
+    for (const id of ['hermes', 'copilot', 'antigravity']) {
+      const row = matrix.connectors.find((connector: { id: string }) => connector.id === id);
+      assert.equal(row?.outage.secureClientClosed, 'runs', id);
+    }
+
+    const secure = page('reference/configuration/fail-modes.mdx').split('### Secure Client')[1]?.split('### Connector limits')[0] ?? '';
+    assert.match(secure, /For native Secure Client hooks that can block a delivery failure, a successful response cut off after headers is blocked\./);
+    assert.match(secure, /Hermes[^.]*default `open`[^.]*allows the tool call[^.]*records the failure/i);
+    for (const path of docPages()) {
+      assert.doesNotMatch(readFileSync(path, 'utf8').split(/\s+/).join(' '), /a successful response cut off after headers blocks\./i, path);
+    }
   });
 
   it('scopes an unreadable Windows listener table to a stopped service', () => {
