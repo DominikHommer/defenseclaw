@@ -187,6 +187,24 @@ if ($script:asserted -or -not $Run.RestorePending -or
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_in_memory_lifecycle_record_keeps_its_binary_baseline() -> None:
+    # GAP-0702: early restore sees the ordered record before JSON readback.
+    script = """
+$ErrorActionPreference = 'Stop'
+__GET_FIELD__
+$record = [ordered]@{ Bins = [ordered]@{ 'defenseclaw-hook.exe' = 'old-sha' }; Connectors = @('codex') }
+$bins = Get-Field $record 'Bins'
+if (-not $bins -or $bins['defenseclaw-hook.exe'] -ne 'old-sha') { throw 'lost in-memory binary baseline' }
+if (@(Get-Field $record 'Connectors') -join ',' -ne 'codex') { throw 'lost in-memory connector roster' }
+$readback = $record | ConvertTo-Json -Depth 3 | ConvertFrom-Json
+if ((Get-Field $readback 'Bins').'defenseclaw-hook.exe' -ne 'old-sha') { throw 'lost JSON binary baseline' }
+'OK'
+""".replace("__GET_FIELD__", _ps1_function("Get-Field"))
+    result = _run_powershell(script)
+    assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
 def test_outlived_recovery_keeps_connector_named_by_external_config(tmp_path: Path) -> None:
     # rel-1-0-4:GAP-0679: a changed external config can still require the hook.
     external = tmp_path / "external.yaml"
@@ -3137,8 +3155,8 @@ Write-Output "ATOMIC=$script:atomic"
 
 @pytest.mark.skipif(sys.platform != "win32" or POWERSHELL is None, reason="requires a running Windows executable")
 def test_native_running_hook_is_replaced_at_its_canonical_path(tmp_path: Path) -> None:
-    # The old image keeps running while a fresh invocation resolves the new
-    # image through the same name. This is the 1/s upgrade failure in GAP-0732.
+    # Windows retains an executable image section while it runs. A refusal
+    # leaves the canonical name and staged copy intact for the next retry.
     system32 = Path(os.environ["SystemRoot"]) / "System32"
     hook = tmp_path / "defenseclaw-hook.exe"
     staged = tmp_path / "defenseclaw-hook.exe.new"
@@ -3149,15 +3167,21 @@ def test_native_running_hook_is_replaced_at_its_canonical_path(tmp_path: Path) -
     running = subprocess.Popen([str(hook), "/c", "ping -n 120 127.0.0.1 >nul"],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        script = _ps_functions("Invoke-AtomicReplace") + f"\nInvoke-AtomicReplace '{staged}' '{hook}'\n"
+        script = (
+            "$ErrorActionPreference = 'Stop'\n" + _ps_functions("Invoke-AtomicReplace")
+            + f"\ntry {{ Invoke-AtomicReplace '{staged}' '{hook}'; 'REPLACED' }} catch {{ 'REFUSED' }}\n"
+        )
         result = _run_powershell(script)
-        assert result.returncode == 0, result.stdout + result.stderr
+        assert result.returncode == 0 and "REFUSED" in result.stdout, result.stdout + result.stderr
         assert running.poll() is None
-        assert hook.read_bytes() == new and hook.read_bytes() != old
-        assert not staged.exists()
+        assert hook.read_bytes() == old and staged.read_bytes() == new
     finally:
         running.kill()
         running.wait(timeout=30)
+    script = "$ErrorActionPreference = 'Stop'\n" + _ps_functions("Invoke-AtomicReplace") + f"\nInvoke-AtomicReplace '{staged}' '{hook}'\n"
+    result = _run_powershell(script)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert hook.read_bytes() == new and not staged.exists()
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
@@ -3225,6 +3249,36 @@ Write-Output "REPLACES=$script:replaces CHECKS=$script:checks"
     assert ("REFUSED:" if held else "INSTALLED") in out, out
     assert dest.read_text(encoding="ascii") == ("old" if held else "new")
     assert not list(tmp_path.glob("*.new"))
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_one_per_second_hook_traffic_leaves_a_short_safe_swap_window(tmp_path: Path) -> None:
+    # GAP-0732: each registered hook call holds its image for 900 ms of every
+    # second. A 500 ms retry stays in phase with busy intervals forever.
+    staged, hook = tmp_path / "staged.exe", tmp_path / "defenseclaw-hook.exe"
+    staged.write_text("new", encoding="ascii")
+    hook.write_text("old", encoding="ascii")
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$script:elapsedMs = 0
+$script:attempts = 0
+function Start-Sleep {{
+    param([int]$Milliseconds)
+    if ([IO.File]::ReadAllText('{hook}') -cne 'old') {{ throw 'canonical hook changed during retry' }}
+    $script:elapsedMs += $Milliseconds
+}}
+function Invoke-AtomicReplace([string]$New, [string]$Destination) {{
+    $script:attempts++
+    if (($script:elapsedMs % 1000) -lt 900) {{ throw 'image is mapped' }}
+    [IO.File]::Copy($New, $Destination, $true)
+    Remove-Item -LiteralPath $New -Force
+}}
+{_ps1_function('Switch-InPlace')}
+try {{ Switch-InPlace '{staged}' '{hook}'; 'SWAPPED' }} catch {{ 'REFUSED' }}
+"""
+    result = _run_powershell(script)
+    assert result.returncode == 0 and "SWAPPED" in result.stdout, result.stdout + result.stderr
+    assert hook.read_text(encoding="ascii") == "new" and not staged.exists()
 
 
 # ── 1.0.4 (W4b loop round 1) ────────────────────────────────────────────────
@@ -3556,9 +3610,9 @@ def test_a_failed_run_closes_unfinished_hooks_while_it_still_holds_the_lock() ->
 
 
 @pytest.mark.skipif(sys.platform != "win32" or POWERSHELL is None, reason="requires Windows executable replacement")
-def test_native_a_running_hook_does_not_block_snapshot_restore(tmp_path: Path) -> None:
-    # A mapped old image continues to run while its canonical name is
-    # restored atomically. The snapshot can then retire in the same run.
+def test_native_running_hook_keeps_snapshot_until_restore_can_retry(tmp_path: Path) -> None:
+    # A mapped image cannot be replaced on Windows. Keep its snapshot and
+    # closed hook state so the same restoration can finish after it exits.
     data, bin_dir, slot = tmp_path / "data", tmp_path / "bin", tmp_path / "data" / "previous.new"
     hook = bin_dir / "defenseclaw-hook.exe"
     hook.parent.mkdir(parents=True)
@@ -3571,19 +3625,22 @@ def test_native_a_running_hook_does_not_block_snapshot_restore(tmp_path: Path) -
     _write(slot / "data" / "config.yaml", "old data")
     _write(data / "hooks" / ".hookcfg", '{"fail_modes":{"codex":"open"}}')
     running = subprocess.Popen([str(hook), "/c", "ping -n 120 127.0.0.1 >nul"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    body = (
+        _NATIVE_RESTORE_HASH + _ps1_function("Invoke-AtomicReplace")
+        + _close_mocks()
+        + f"\ntry {{ Restore-Slot '{slot}' | Out-Null; Write-Output 'RESTORED' }} catch {{ Write-Output \"REFUSED: $($_.Exception.Message)\" }}\n"
+        "Close-UnfinishedInstallHooks\n"
+    )
     try:
-        out = _restore_case(
-            tmp_path,
-            _NATIVE_RESTORE_HASH + _ps1_function("Invoke-AtomicReplace")
-            + _close_mocks()
-            + f"\ntry {{ Restore-Slot '{slot}' | Out-Null; Write-Output 'RESTORED' }} catch {{ Write-Output \"REFUSED: $($_.Exception.Message)\" }}\n"
-            "Close-UnfinishedInstallHooks\n",
-        )
+        out = _restore_case(tmp_path, body)
         still_running = running.poll() is None
+        assert still_running and "REFUSED:" in out and "RAN:" in out, out
+        assert slot.exists() and hook.read_bytes() == (Path(os.environ["SystemRoot"]) / "System32" / "cmd.exe").read_bytes()
     finally:
         running.kill()
         running.wait(timeout=30)
-    assert still_running and "RESTORED" in out and "REFUSED:" not in out, out
+    out = _restore_case(tmp_path, body)
+    assert "RESTORED" in out and "REFUSED:" not in out, out
     assert not slot.exists()
     assert (bin_dir / "defenseclaw-gateway.exe").read_text(encoding="ascii") == "old defenseclaw-gateway.exe"
     assert hook.read_text(encoding="ascii") == "old defenseclaw-hook.exe"
@@ -3740,22 +3797,26 @@ def test_a_closer_that_cannot_be_kept_is_never_hidden() -> None:
 
 
 @pytest.mark.skipif(sys.platform != "win32" or POWERSHELL is None, reason="requires Windows executable replacement")
-def test_native_running_hook_during_interrupted_resume_restores_immediately(tmp_path: Path) -> None:
-    # Recovery restores the old canonical hook name while the new image's
-    # in-flight process finishes against its original mapped bytes.
+def test_native_running_hook_during_interrupted_resume_keeps_a_retry(tmp_path: Path) -> None:
+    # Recovery cannot replace a mapped executable. Its slot and closer stay
+    # until a later run can put the old canonical hook back.
     data, bin_dir, slot = tmp_path / "data", tmp_path / "bin", tmp_path / "data" / "previous.new"
     _interrupted_fixture(data, bin_dir, slot, hook=Path(os.environ["SystemRoot"]) / "System32" / "cmd.exe")
     real = _ps1_function("Invoke-AtomicReplace")
     _restore_case(tmp_path, _NATIVE_RESTORE_HASH + real + _close_mocks() + _RESUME_MOCKS + _first_run(slot, complete=True))
     hook = bin_dir / "defenseclaw-hook.exe"
     running = subprocess.Popen([str(hook), "/c", "ping -n 120 127.0.0.1 >nul"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    body = _NATIVE_RESTORE_HASH + real + _close_mocks() + _RESUME_MOCKS + "\n" + _resume_and_finish()
     try:
-        out = _restore_case(tmp_path, _NATIVE_RESTORE_HASH + real + _close_mocks() + _RESUME_MOCKS + "\n" + _resume_and_finish())
+        out = _restore_case(tmp_path, body)
         still_running = running.poll() is None
+        assert still_running and "REFUSED:" in out and "RAN:" in out, out
+        assert slot.exists()
     finally:
         running.kill()
         running.wait(timeout=30)
-    assert still_running and "RESUMED" in out and "REFUSED:" not in out and "RAN:" not in out, out
+    out = _restore_case(tmp_path, body)
+    assert "RESUMED" in out and "REFUSED:" not in out and "RAN:" not in out, out
     assert not slot.exists()
     assert hook.read_text(encoding="ascii") == "old defenseclaw-hook.exe"
 

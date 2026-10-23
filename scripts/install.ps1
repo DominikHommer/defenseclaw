@@ -181,6 +181,13 @@ function Confirm-Step([string]$Prompt, [switch]$DefaultNo) {
 }
 
 function Get-Field($Object, [string]$Name) {
+    # A newly written lifecycle record is an OrderedDictionary until the
+    # next process reads its JSON. Its keys are not PSObject properties in
+    # Windows PowerShell 5.1; use dictionary lookup for that in-memory path.
+    if ($Object -is [Collections.IDictionary]) {
+        if ($Object.Contains($Name)) { return $Object[$Name] }
+        return $null
+    }
     if ($null -ne $Object -and $Object.PSObject.Properties[$Name]) { return $Object.PSObject.Properties[$Name].Value }
     return $null
 }
@@ -1195,7 +1202,12 @@ function Get-EffectiveConfigConnectors {
     $code = 'import json,sys,yaml; from defenseclaw.connector_paths import normalize; c=yaml.safe_load(open(sys.argv[1],encoding=''utf-8'')); c=c if isinstance(c,dict) else {}; g=c.get(''guardrail'') or {}; g=g if isinstance(g,dict) else {}; m=g.get(''connectors'') or {}; names=list(m) if isinstance(m,dict) and m else [g.get(''connector'') or (c.get(''claw'') or {}).get(''mode'')]; print(json.dumps(sorted({normalize(n) for n in names if isinstance(n,str) and n.strip()})))'
     $probe = Get-NativeProbe $python @("-I", "-c", $code, $path)
     if ($probe.Exit -ne 0) { throw "Cannot read the effective config's connectors: $path" }
-    try { return @($probe.Output | ConvertFrom-Json -ErrorAction Stop) } catch { throw "Cannot parse the effective config's connector roster: $path" }
+    try {
+        $decoded = $probe.Output | ConvertFrom-Json -ErrorAction Stop
+        # Windows PowerShell 5.1 emits a JSON array as one object. Enumerate
+        # it explicitly or the caller sees one "System.Object[]" connector.
+        return @($decoded | ForEach-Object { [string]$_ })
+    } catch { throw "Cannot parse the effective config's connector roster: $path" }
 }
 
 function Test-ConnectorConfigured {
@@ -1387,20 +1399,23 @@ function Switch-InPlace([string]$New, [string]$Destination, [int]$Seconds = 10) 
     # the old launcher for replacement and can deny a concurrent hook's
     # execution with a sharing violation (GAP-0352); its partial-failure
     # recovery also cannot prove uninterrupted availability. A running hook
-    # or scanner may refuse the rename. Retry while the whole old launcher
-    # remains callable, then refuse the upgrade without changing it.
-    for ($waited = 0; ; $waited++) {
+    # or scanner may refuse the rename. Windows will also refuse replacing a
+    # mapped executable image, even with POSIX rename semantics. Registered
+    # calls arriving once a second can phase-lock a 500 ms retry to the busy
+    # part of every call. Probe each 25 ms gap while the whole old launcher
+    # remains callable, then refuse without changing it if no gap appears.
+    for ($attempt = 0; ; $attempt++) {
         try {
             Invoke-AtomicReplace $New $Destination
             return
         } catch {
             $reason = $_.Exception.Message
         }
-        if (-not (Test-Path -LiteralPath $New) -or $waited -ge 2 * $Seconds) {
+        if (-not (Test-Path -LiteralPath $New) -or $attempt -ge 40 * $Seconds) {
             Remove-Item -LiteralPath $New -Force -ErrorAction SilentlyContinue
             throw "Could not replace $Destination in place ($reason); it was left as it was. Retry the same install command after the running hook finishes"
         }
-        Start-Sleep -Milliseconds 500
+        Start-Sleep -Milliseconds 25
     }
 }
 

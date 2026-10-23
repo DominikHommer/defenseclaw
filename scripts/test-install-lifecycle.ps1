@@ -648,9 +648,10 @@ function Test-Shim {
     Check ((Get-Content -LiteralPath (Join-Path $DcHome "previous\VERSION") -ErrorAction SilentlyContinue) -eq $from) "previous\VERSION is not $from"
 }
 
-# Upgrade while DefenseClaw programs hold files: running .exe files are swapped
-# in place (ReplaceFile keeps the old image as a .old-* backup while it runs),
-# and a program running from the venv stops the install before any change.
+# A continuously mapped hook image cannot be replaced on Windows. The first
+# attempt keeps its old bytes and proves the restored state; after that call exits, the
+# same install completes. A program running from the venv also stops the
+# install before any change.
 function Test-FilesInUse {
     Enter-Lane files-in-use
     Check ((Install-Candidate $Seed) -eq 0) "install of $(Get-AssetVersion $Seed) failed"
@@ -675,13 +676,20 @@ function Test-FilesInUse {
     if ($hook.HasExited) {
         Fail "defenseclaw-hook.exe did not stay running (exit $($hook.ExitCode)): $($hook.StandardError.ReadToEnd()) $($hook.StandardOutput.ReadToEnd())"
     }
-    Write-Log "install $Target while defenseclaw-hook.exe runs"
-    Check ((Install-Candidate $next) -eq 0) "an install with a running hook failed"
+    Write-Log "refuse safely while defenseclaw-hook.exe remains mapped"
+    Check ((Install-Candidate $next) -eq 1) "the installer claimed it replaced a continuously mapped hook"
+    Check (-not $hook.HasExited) "the running hook was stopped"
+    Check ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Bin "defenseclaw-hook.exe")).Hash -eq $oldHookSha) "the old canonical hook changed after a refused swap"
+    Check (-not (Test-Path -LiteralPath (Join-Path $DcHome ".lifecycle-txn.json"))) "the refused swap left a lifecycle record for an unchanged install"
+    Check (-not (Test-Path -LiteralPath (Join-Path $DcHome ".install.lock"))) "the refused swap left the unchanged install locked"
+    Stop-Held
+    Write-Log "retry the same install after the held hook exits"
+    Check ((Install-Candidate $next) -eq 0) "the installer did not recover and finish after the held hook exited"
     Assert-Versions $Target
     Assert-Healthy
-    Check (-not $hook.HasExited) "the running hook was stopped"
-    Check ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Bin "defenseclaw-hook.exe")).Hash -ne $oldHookSha) "the running defenseclaw-hook.exe was not replaced at its canonical path"
-    Stop-Held
+    Check ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Bin "defenseclaw-hook.exe")).Hash -ne $oldHookSha) "the retry did not publish the new hook at its canonical path"
+    Check (-not (Test-Path -LiteralPath (Join-Path $DcHome ".lifecycle-txn.json"))) "the retry left its lifecycle record"
+    Check (-not (Test-Path -LiteralPath (Join-Path $DcHome ".install.lock"))) "the retry left its install lock"
 
     Write-Log "re-run while the CLI runs from the venv (must stop, nothing changed)"
     $holder = Start-Held (Join-Path $DcHome ".venv\Scripts\python.exe") @("-c", "import time; time.sleep(900)")
