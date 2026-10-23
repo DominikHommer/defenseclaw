@@ -743,7 +743,9 @@ func (c removedOnlyConnector) hardLinkStep(path string) string {
 	if runtime.GOOS == "windows" {
 		list = "fsutil hardlink list " + path + " lists them"
 	}
-	return "delete every other name of this file (" + list + "), then run " + c.teardownCommand() + ", which writes the stub and revokes the tokens"
+	return "copy back what you need from connector_backups before deleting any linked name there; " +
+		"delete every other name of this file (" + list + "), then run " + c.teardownCommand() +
+		", which writes the stub and revokes the tokens"
 }
 
 // foreignStep is the manual step for a script path DefenseClaw cannot prove

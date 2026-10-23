@@ -326,8 +326,9 @@ func TestRemovedTeardownSavesTheEditToACopyOfItsOwn(t *testing.T) {
 		otherInfo os.FileInfo
 	}
 	cases := map[string]struct {
-		unixOnly bool
-		prepare  func(t *testing.T, h *removedHost, saved string) prepared
+		unixOnly               bool
+		windowsRefusesHardLink bool
+		prepare                func(t *testing.T, h *removedHost, saved string) prepared
 		// failSave: the save cannot be made (a link at its name); the
 		// module, its tokens and the link stay.
 		failSave bool
@@ -335,7 +336,7 @@ func TestRemovedTeardownSavesTheEditToACopyOfItsOwn(t *testing.T) {
 		"a hard link to the module": {
 			// Windows cannot write the stub into a hard-linked module. It
 			// leaves the module and its tokens for manual cleanup instead.
-			unixOnly: true,
+			windowsRefusesHardLink: true,
 			prepare: func(t *testing.T, h *removedHost, saved string) prepared {
 				removedLinkOrSkip(t, h.script(c), saved)
 				return prepared{}
@@ -401,6 +402,48 @@ func TestRemovedTeardownSavesTheEditToACopyOfItsOwn(t *testing.T) {
 				t.Fatal(err)
 			}
 			err = c.Teardown(context.Background(), h.opts)
+			if tc.windowsRefusesHardLink {
+				step := c.hardLinkStep(h.script(c))
+				copyAt, deleteAt := strings.Index(step, "copy back what you need"), strings.Index(step, "delete every other name")
+				if copyAt < 0 || deleteAt < 0 || copyAt >= deleteAt {
+					t.Fatalf("hard-link step %q must tell the operator to copy needed bytes before deleting a backup name", step)
+				}
+				if runtime.GOOS == "windows" {
+					h.requireLeftStep(t, c, err, step)
+					leftovers, _ := RemovedConnectorLeftovers(c.name, h.opts)
+					listed := false
+					for _, item := range leftovers {
+						if item.Path == saved && strings.Contains(item.Step, "copy back what you need") {
+							listed = true
+						}
+					}
+					if !listed {
+						t.Fatalf("leftovers %+v do not tell the operator to copy needed bytes from %s", leftovers, saved)
+					}
+					if data, readErr := os.ReadFile(h.script(c)); readErr != nil || string(data) != string(edit) {
+						t.Fatalf("the hard-linked module changed to %q: %v", data, readErr)
+					}
+					atBase, statErr := os.Stat(saved)
+					if statErr != nil || !os.SameFile(module, atBase) {
+						t.Fatalf("the hash-name file %s is no longer the module: %v", saved, statErr)
+					}
+					file, openErr := os.Open(saved)
+					if openErr != nil {
+						t.Fatal(openErr)
+					}
+					links, linkErr := atomicTransformBoundLinkCountPlatform(file)
+					if closeErr := file.Close(); closeErr != nil {
+						t.Fatal(closeErr)
+					}
+					if linkErr != nil || links != 2 {
+						t.Fatalf("the module still has %d names (%v), want two", links, linkErr)
+					}
+					newSaved := saved + "-2"
+					h.requireEditedSavedAt(t, c, newSaved, string(edit))
+					requireRemovedCopyOfItsOwn(t, newSaved, module)
+					return
+				}
+			}
 			if tc.failSave {
 				if err == nil || !strings.Contains(err.Error(), "save the edited") || !strings.Contains(err.Error(), "its tokens were kept") {
 					t.Fatalf("Teardown = %v, want the failed save and the tokens kept", err)
