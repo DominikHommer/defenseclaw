@@ -143,13 +143,20 @@ describe('Windows Hermes failure guidance', () => {
 });
 
 describe('Windows enrollment and machine-policy publication', () => {
-  it('qualifies unenrolled-user refusal for Codex and Cursor in the guide and detail', () => {
+  it('qualifies unenrolled-user refusal for Claude Code, Codex and Cursor in the guide and detail', () => {
     const reconcile = readFileSync(join(repo, 'internal/cli/enterprise_hooks_platform_windows.go'), 'utf8');
+    assert.match(reconcile, /PublishWindowsClaudeManagedPolicyTargets\(desiredClaude\)/);
     assert.match(reconcile, /else if len\(desiredCodex\) == 0 \{[\s\S]*?RemoveWindowsCodexMachineRequirements/);
     assert.match(reconcile, /if cursorActive \|\| len\(desiredCursor\) == 0 \{[\s\S]*?PublishWindowsCursorManagedPolicyTargets\(desiredCursor\)/);
+    const claudePolicy = readFileSync(join(repo, 'internal/enterprisehooks/managed_policy_windows.go'), 'utf8')
+      .split('func PublishWindowsClaudeManagedPolicyTargets(')[1]?.split('// PrepareWindowsClaudeManagedPolicyTeardown')[0];
+    assert.ok(claudePolicy, 'Claude Code exact-target publisher not found');
+    assert.match(claudePolicy, /if len\(targets\) == 0 \{\s*if err := os\.Remove\(path\); err != nil \{[\s\S]*?if err := os\.Remove\(statePath\); err != nil \{/);
     const enumerator = readFileSync(join(repo, 'internal/enterprisehooks/enumerator_standalone_windows.go'), 'utf8');
+    assert.match(enumerator, /case "claudecode":\s*if !windowsClaudeMachinePolicyPublished\(\)/);
     assert.match(enumerator, /case "cursor":\s*if !windowsCursorMachinePolicyPublished\(\)/);
     assert.match(enumerator, /case "codex":\s*if !windowsCodexMachinePolicyPublished\(\)/);
+    assert.match(enumerator, /var windowsClaudeMachinePolicyPublished = func\(\) bool \{[\s\S]*?ReadWindowsClaudeManagedPolicyTargets\(\)/);
 
     const enrollment = page('enterprise/configure/enrollment.mdx');
     assert.match(enrollment.split('## Choose who is enrolled')[0], /Published machine policy.*every user/i);
@@ -158,28 +165,32 @@ describe('Windows enrollment and machine-policy publication', () => {
     const newUsers = enrollment.split('## New, changed and removed users')[1]?.split('## Check it worked')[0];
     for (const [name, section] of [['settings', settings], ['Windows', windows], ['new users', newUsers]] as const) {
       assert.ok(section, `${name} section not found`);
-      assert.match(section, /Codex and Cursor.*at least one user.*enrolled.*for that agent.*without DefenseClaw hooks/i, name);
+      assert.match(section, /Claude Code, Codex and Cursor.*at least one user.*enrolled.*for that agent.*without DefenseClaw hooks/i, name);
     }
     assert.doesNotMatch(settings, /unenrolled user always fails closed/i);
     assert.match(newUsers, /machine-policy agents.*published.*first call/i);
+    assert.match(newUsers, /first Claude Code start.*refused.*another Claude Code user is enrolled/i);
 
     const reference = page('enterprise/configure/reference.mdx');
     const unprotected = reference.split('### Agents that cannot be enrolled')[1]?.split('### Agent upgrades')[0];
     assert.ok(unprotected, 'reference unprotected-agent section not found');
-    assert.match(unprotected, /Codex and Cursor.*at least one user.*enrolled.*for that agent.*without DefenseClaw hooks/i);
+    assert.match(unprotected, /Claude Code, Codex and Cursor.*at least one user.*enrolled.*for that agent.*without DefenseClaw hooks/i);
     const surfaces = reference.split('### Desktop apps and editor extensions')[1]?.split('### ', 1)[0];
     assert.ok(surfaces, 'reference surfaces section not found');
-    assert.match(surfaces, /On Windows, published machine-policy hooks refuse the unenrolled user; Codex and Cursor have no hooks when no user is enrolled/i);
+    assert.match(surfaces, /On Windows, published machine-policy hooks refuse the unenrolled user; Claude Code, Codex and Cursor have no hooks when no user is enrolled/i);
     const referenceWindows = reference.split('### Windows')[1]?.split('#### Group filters on Windows')[0];
     assert.ok(referenceWindows, 'reference Windows enrollment section not found');
     assert.doesNotMatch(referenceWindows, /under `unenrolled_users: deny`/);
     assert.match(referenceWindows, /Unenrolled users fail closed while policy is published/i);
+    assert.match(referenceWindows, /Claude Code, Codex and Cursor.*at least one enrolled user/i);
     const referenceNewUsers = reference.split('### New, changed and removed users')[1]?.split('### ', 1)[0];
     assert.ok(referenceNewUsers, 'reference new-user section not found');
-    assert.match(referenceNewUsers, /Codex and Cursor.*at least one user.*enrolled.*for that agent.*without DefenseClaw hooks/i);
+    assert.match(referenceNewUsers, /Claude Code, Codex and Cursor.*at least one user.*enrolled.*for that agent.*without DefenseClaw hooks/i);
+    assert.match(referenceNewUsers, /first Claude Code start.*refused.*another Claude Code user is enrolled/i);
     const policy = reference.split('## Machine policy detail')[1]?.split('### Managed OpenCode plugin')[0];
     assert.ok(policy, 'reference machine-policy section not found');
     assert.match(policy, /Codex.*requirements\.toml.*at least one user.*enrolled for Codex.*runs without DefenseClaw hooks/i);
+    assert.match(policy, /On Windows, Claude Code.*90-defenseclaw\.json.*at least one user.*enrolled.*removed.*without DefenseClaw hooks/i);
   });
 });
 

@@ -15,6 +15,7 @@ on:
       - 'internal/gateway/connector/hookexec/managed_hermes.go'
       - 'internal/cli/enterprise_hooks_platform_windows.go'
       - 'internal/enterprisehooks/enumerator_standalone_windows.go'
+      - 'internal/enterprisehooks/managed_policy_windows.go'
       - '.github/workflows/docs-site.yml'
   pull_request:
     paths:
@@ -29,6 +30,7 @@ on:
       - 'internal/gateway/connector/hookexec/managed_hermes.go'
       - 'internal/cli/enterprise_hooks_platform_windows.go'
       - 'internal/enterprisehooks/enumerator_standalone_windows.go'
+      - 'internal/enterprisehooks/managed_policy_windows.go'
       - '.github/workflows/docs-site.yml'
   workflow_dispatch:
 

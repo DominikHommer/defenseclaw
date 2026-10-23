@@ -75,6 +75,10 @@ func windowsUnenrolledConsequence(connector string) string {
 		return "it runs without DefenseClaw hooks"
 	}
 	switch strings.ToLower(strings.TrimSpace(connector)) {
+	case "claudecode":
+		if !windowsClaudeMachinePolicyPublished() {
+			return windowsClaudeUnpublishedConsequence
+		}
 	case "cursor":
 		if !windowsCursorMachinePolicyPublished() {
 			return windowsCursorUnpublishedConsequence
@@ -85,6 +89,19 @@ func windowsUnenrolledConsequence(connector string) string {
 		}
 	}
 	return "its machine-policy hooks refuse this user's tool calls until it is enrolled"
+}
+
+// windowsClaudeUnpublishedConsequence names the absence of Claude Code's
+// machine hooks file, including after the last enrolled user is removed.
+const windowsClaudeUnpublishedConsequence = "Claude Code's machine hooks file is not published, so it runs without DefenseClaw hooks"
+
+// windowsClaudeMachinePolicyPublished reads the protected policy artifacts.
+// An unreadable or invalid policy is treated as present when describing an
+// unenrolled user's calls; clean absence is the known unprotected state.
+// Replaced in tests.
+var windowsClaudeMachinePolicyPublished = func() bool {
+	_, active, err := ReadWindowsClaudeManagedPolicyTargets()
+	return err != nil || active
 }
 
 // windowsCursorUnpublishedConsequence is the unprotected-agent consequence for
