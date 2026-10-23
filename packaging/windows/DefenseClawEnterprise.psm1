@@ -31109,12 +31109,10 @@ function Invoke-DefenseClawTimeoutRecovery {
     <#
         Setup's one bounded recovery after it stopped a lifecycle child at
         TIMEOUTSECONDS (GAP-0501). The interrupted request is gone, so it
-        replays only pending.json, the journal it can finish alone, and runs
-        no new install. It reports the deployment settled only when that
-        replay left no pending transaction and no other lifecycle record:
-        a purge or install-rollback intent, a self-uninstall receipt, a
-        managed-hook journal or a transaction directory is replayed only by
-        the full recovery of a later ensure, so it throws and keeps them.
+        replays pending.json and independently completes an authenticated
+        committed uninstall tombstone. It runs no new install. A recovery is
+        settled only after postcommit hook cleanup and every remaining
+        lifecycle record have been checked.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -31127,6 +31125,29 @@ function Invoke-DefenseClawTimeoutRecovery {
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName)
     }
+    if ((Test-DefenseClawStandaloneProfile) -and
+        -not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $Layout.PendingPath `
+            -PathType Leaf)) {
+        $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout
+        if ($null -ne $metadata) {
+            Assert-DefenseClawMetadataIdentity `
+                -Metadata $metadata `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName
+            if (-not (Test-DefenseClawMetadataInstalled -Metadata $metadata)) {
+                # The absent pending record is the commit point. The
+                # tombstone, installed artifact hashes, service absence and
+                # teardown journal are rechecked by this idempotent cleanup
+                # before any hook registration is removed.
+                [void](Invoke-DefenseClawCommittedUninstallCleanup `
+                    -Layout $Layout `
+                    -GatewayServiceName $GatewayServiceName `
+                    -GuardianServiceName $GuardianServiceName `
+                    -Purge)
+            }
+        }
+    }
     $status = Get-DefenseClawLifecycleStatus `
         -Action Recover `
         -Layout $Layout `
@@ -31138,9 +31159,9 @@ function Invoke-DefenseClawTimeoutRecovery {
     $unfinished = @(Get-DefenseClawUnfinishedLifecycleEvidence -Layout $Layout)
     if ($unfinished.Count -gt 0) {
         throw (
-            'Setup replayed only the pending transaction, so the deployment ' +
-            'is not reported settled: these lifecycle records remain for the ' +
-            'full recovery of an ensure run as LocalSystem: ' +
+            'Setup recovery did not settle the deployment: these lifecycle ' +
+            'records remain for the full recovery of an ensure run as ' +
+            'LocalSystem: ' +
             ($unfinished -join ', ')
         )
     }
