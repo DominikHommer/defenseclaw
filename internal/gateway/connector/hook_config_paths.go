@@ -488,14 +488,13 @@ func (c *hookOnlyConnector) renderedHookEntriesPresent(opts SetupOpts, document 
 		for _, event := range events {
 			want[event] = copilotHookRegistration(runtime.GOOS, event, hookCommand)
 		}
-		edited := hookScriptBaseName(hookCommand)
 		return hookEventEntriesMatch(hooks, want, func(event string, entry interface{}) bool {
 			if _, registered := want[event]; registered {
 				// defenseclaw.json is DefenseClaw's file; Setup leaves only
 				// its render on a bound event (patchCopilotHooksForOS).
 				return true
 			}
-			return containsHookScript(entry, hookCommand) || editedDefenseClawHookEntry(entry, edited)
+			return copilotUnexpectedEventOwnsHook(entry, hookCommand)
 		})
 	case "antigravity":
 		// Setup rewrites each DefenseClaw-owned outer key whole.

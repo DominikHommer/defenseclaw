@@ -5054,10 +5054,21 @@ func patchCopilotHooksForOS(path, hookScript string, events []string, goos strin
 		if selected[event] {
 			continue
 		}
-		if _, ok := raw.([]interface{}); !ok {
+		entries, ok := raw.([]interface{})
+		if !ok {
+			// Presence and Doctor also find our command in a malformed mapping.
+			// Remove it here so the guardian's next Setup can converge.
+			if copilotUnexpectedEventOwnsHook(raw, hookScript) {
+				delete(hooks, event)
+			}
 			continue
 		}
-		remaining := removeOwnedFlatHooks(raw, hookScript)
+		remaining := make([]interface{}, 0, len(entries))
+		for _, entry := range entries {
+			if !copilotUnexpectedEventOwnsHook(entry, hookScript) {
+				remaining = append(remaining, entry)
+			}
+		}
 		if len(remaining) == 0 {
 			delete(hooks, event)
 		} else {
@@ -5065,6 +5076,39 @@ func patchCopilotHooksForOS(path, hookScript string, events []string, goos strin
 		}
 	}
 	return writeJSONObject(path, cfg)
+}
+
+func copilotUnexpectedEventOwnsHook(raw interface{}, hookScript string) bool {
+	if containsHookScript(raw, hookScript) || editedDefenseClawHookEntry(raw, hookScriptBaseName(hookScript)) {
+		return true
+	}
+	if !isCopilotPowerShellAdapterCommand(hookScript) {
+		return false
+	}
+	adapter := strings.ToLower(strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(hookScript), "& '"), "'"))
+	return copilotPowerShellCommandContainsAdapter(raw, adapter)
+}
+
+func copilotPowerShellCommandContainsAdapter(raw interface{}, adapter string) bool {
+	switch value := raw.(type) {
+	case []interface{}:
+		for _, item := range value {
+			if copilotPowerShellCommandContainsAdapter(item, adapter) {
+				return true
+			}
+		}
+	case map[string]interface{}:
+		for key, item := range value {
+			if key == "powershell" {
+				if command, ok := item.(string); ok && strings.Contains(strings.ToLower(command), adapter) {
+					return true
+				}
+			} else if copilotPowerShellCommandContainsAdapter(item, adapter) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // copilotHookRegistration is the one Copilot hook entry DefenseClaw registers

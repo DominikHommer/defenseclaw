@@ -3330,6 +3330,9 @@ func TestCopilotWindowsHooksRepairAndTeardown(t *testing.T) {
 				map[string]interface{}{"type": "command", "powershell": historic, "timeoutSec": 30},
 				map[string]interface{}{"type": "command", "powershell": foreign, "timeoutSec": 10},
 			},
+			"operatorEvent": []interface{}{
+				map[string]interface{}{"type": "command", "powershell": foreign, "timeoutSec": 10},
+			},
 		},
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
@@ -3350,6 +3353,15 @@ func TestCopilotWindowsHooksRepairAndTeardown(t *testing.T) {
 	hooks := repaired["hooks"].(map[string]interface{})
 	for event, raw := range hooks {
 		entries := raw.([]interface{})
+		if event == "operatorEvent" {
+			if len(entries) != 1 || entries[0].(map[string]interface{})["powershell"] != foreign {
+				t.Errorf("Setup changed the operator's unexpected-event hook: %v", entries)
+			}
+			continue
+		}
+		if len(entries) != 1 {
+			t.Errorf("%s has %d handlers; want only Setup's render", event, len(entries))
+		}
 		managed := 0
 		wantEventCommand := copilotHookInvocationCommandForEvent("windows", event, current)
 		for _, rawEntry := range entries {

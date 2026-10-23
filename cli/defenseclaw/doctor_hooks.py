@@ -3102,6 +3102,7 @@ def _copilot_powershell_binding(command: str) -> tuple[str, str] | None:
 def _validate_copilot_hook_matrix(
     document: dict[str, Any],
     contract_id: str,
+    expected_adapter: str,
 ) -> tuple[str, str, int, dict[str, str]]:
     if type(document.get("version")) is not int or document.get("version") != 1:
         raise _InspectionError("malformed", "Copilot hook registration version must be integer 1")
@@ -3182,14 +3183,23 @@ def _validate_copilot_hook_matrix(
         targets.add(target)
         count += 1
 
+    def unexpected_commands(value: Any):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key == "powershell" and isinstance(item, str):
+                    yield item
+                elif isinstance(item, (dict, list)):
+                    yield from unexpected_commands(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from unexpected_commands(item)
+
+    adapter_literal = expected_adapter.replace("'", "''").casefold()
     for event, entries in hooks.items():
-        if event in expected or not isinstance(entries, list):
+        if event in expected:
             continue
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            command = entry.get("powershell")
-            if isinstance(command, str) and _copilot_powershell_binding(command) is not None:
+        for command in unexpected_commands(entries):
+            if adapter_literal in command.casefold() or _copilot_powershell_binding(command) is not None:
                 raise _InspectionError("stale", f"unexpected Copilot event {event} contains a DefenseClaw handler")
 
     if len(targets) != 1:
@@ -3231,8 +3241,10 @@ def validate_windows_copilot_hook_registration(
             )
         document = _read_config(config_path, "copilot")
         evidence, _runtime_version, contract_id = _contract_evidence(data_dir, "copilot", config_path)
-        expected_adapter = os.path.join(data_dir, "hooks", "copilot-hook.ps1")
-        command, raw_adapter, matrix_entries, commands = _validate_copilot_hook_matrix(document, contract_id)
+        expected_adapter = os.path.normpath(os.path.join(data_dir, "hooks", "copilot-hook.ps1"))
+        command, raw_adapter, matrix_entries, commands = _validate_copilot_hook_matrix(
+            document, contract_id, expected_adapter
+        )
         resolved_adapter = _resolve_target(raw_adapter, "powershell", search_path=search_path, pathext=pathext)
         if not resolved_adapter:
             raise _InspectionError("missing", f"registered Copilot adapter cannot be resolved: {raw_adapter}")

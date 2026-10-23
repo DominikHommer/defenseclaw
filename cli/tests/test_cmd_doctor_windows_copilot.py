@@ -512,6 +512,42 @@ def test_windows_copilot_doctor_rejects_another_handler_in_defenseclaws_file(tmp
     assert "other handler" in check.detail
 
 
+@pytest.mark.parametrize("entry_shape", ["list", "mapping", "nested"])
+def test_windows_copilot_doctor_rejects_wrapped_adapter_on_unexpected_event(tmp_path: Path, entry_shape: str) -> None:
+    install, data, config = _fixture(tmp_path)
+    document = json.loads(config.read_text(encoding="utf-8"))
+    adapter = data / "hooks" / "copilot-hook.ps1"
+    handler = {
+        "type": "command",
+        "powershell": _powershell_command(adapter, "preToolUse") + "; Write-Output x",
+        "timeoutSec": 30,
+    }
+    document["hooks"]["unexpectedEvent"] = (
+        [handler] if entry_shape == "list" else {"handlers": [handler]} if entry_shape == "nested" else handler
+    )
+    config.write_text(json.dumps(document), encoding="utf-8")
+
+    check = _validate(install, data, config)
+
+    assert check.state == "stale", check
+    assert "unexpected Copilot event" in check.detail
+
+
+def test_windows_copilot_doctor_accepts_cleaned_data_dir(tmp_path: Path) -> None:
+    install, data, config = _fixture(tmp_path)
+    (data / "detour").mkdir()
+
+    check = validate_windows_copilot_hook_registration(
+        config_path=str(config),
+        data_dir=str(data / "detour" / ".."),
+        install_root=str(install),
+        search_path=str(install),
+        pathext=".EXE;.CMD",
+    )
+
+    assert check.state == "healthy", check
+
+
 @pytest.mark.parametrize("key, value", [("env", {"DEFENSECLAW_HOME": "C:/lane"}), ("cwd", "C:/lane")])
 def test_windows_copilot_doctor_rejects_a_changed_defenseclaw_handler(tmp_path: Path, key: str, value: object) -> None:
     # DefenseClaw's own handler with Setup's command but a key Setup does not
@@ -542,8 +578,9 @@ def test_windows_copilot_doctor_requires_the_exact_setup_command(tmp_path: Path,
     assert "Setup's command" in check.detail
 
 
+@pytest.mark.parametrize("tamper", ["command-whitespace", "unexpected-wrapper"])
 def test_windows_copilot_command_tamper_degrades_status_and_readiness(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tamper: str
 ) -> None:
     from defenseclaw import bootstrap, fail_mode, hook_integrity
     from defenseclaw.commands import cmd_doctor, cmd_status
@@ -559,13 +596,24 @@ def test_windows_copilot_command_tamper_degrades_status_and_readiness(
 
     assert cmd_status._hook_runtime_degraded_suffix(cfg, "copilot") == ""
     document = json.loads(config.read_text(encoding="utf-8"))
-    document["hooks"]["preToolUse"][0]["powershell"] += " "
+    if tamper == "command-whitespace":
+        document["hooks"]["preToolUse"][0]["powershell"] += " "
+    else:
+        adapter = data / "hooks" / "copilot-hook.ps1"
+        document["hooks"]["unexpectedEvent"] = [
+            {
+                "type": "command",
+                "powershell": _powershell_command(adapter, "preToolUse") + "; Write-Output x",
+                "timeoutSec": 30,
+            }
+        ]
     config.write_text(json.dumps(document), encoding="utf-8")
 
     assert "DEGRADED" in cmd_status._hook_runtime_degraded_suffix(cfg, "copilot")
     step = bootstrap._connector_runtime_readiness(cfg, "copilot")
     assert step is not None and step.status == "fail", step
-    assert fail_mode.registration_integrity_drift(cfg, "copilot") == ["registration-foreign"]
+    expected_drift = "registration-foreign" if tamper == "command-whitespace" else "hook-runtime-stale"
+    assert fail_mode.registration_integrity_drift(cfg, "copilot") == [expected_drift]
 
 
 @pytest.mark.parametrize(

@@ -881,3 +881,57 @@ func TestCopilotSetupRemovesOwnHandlerFromUnexpectedEvent(t *testing.T) {
 		})
 	}
 }
+
+func TestCopilotSetupRemovesNonListOwnHandlerFromUnexpectedEvent(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		t.Run(goos, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "defenseclaw.json")
+			dataDir := t.TempDir()
+			script := filepath.Join(dataDir, "hooks", "copilot-hook.sh")
+			if goos == "windows" {
+				script = windowsCopilotPowerShellAdapterCommand(script)
+			}
+			command := copilotHookInvocationCommandForEvent(goos, "preToolUse", script)
+			field := "bash"
+			if goos == "windows" {
+				field = "powershell"
+			}
+			own := map[string]interface{}{"type": "command", field: command}
+			hooks := map[string]interface{}{
+				"unexpectedEvent": own,
+				"nestedEvent":     map[string]interface{}{"handlers": []interface{}{own}},
+				"operatorEvent":   map[string]interface{}{"type": "command", field: "echo operator"},
+			}
+			if goos == "windows" {
+				hooks["wrappedEvent"] = []interface{}{map[string]interface{}{
+					"type": "command", field: command + "; Write-Output x",
+				}}
+			}
+			if err := writeJSONObject(path, map[string]interface{}{"hooks": hooks}); err != nil {
+				t.Fatal(err)
+			}
+			if goos == runtime.GOOS {
+				if NewCopilotConnector().renderedHookEntriesPresent(SetupOpts{DataDir: dataDir},
+					decodeHookFileForTest(t, path)) {
+					t.Fatal("non-list DefenseClaw event handler counted as current")
+				}
+			}
+			if err := patchCopilotHooksForOS(path, script, copilotCurrentHookEvents, goos); err != nil {
+				t.Fatal(err)
+			}
+			got := decodeHookFileForTest(t, path)["hooks"].(map[string]interface{})
+			for _, event := range []string{"unexpectedEvent", "nestedEvent", "wrappedEvent"} {
+				if _, exists := got[event]; exists {
+					t.Errorf("Setup kept DefenseClaw handler on %s: %v", event, got[event])
+				}
+			}
+			if !sameHookJSON(got["operatorEvent"], hooks["operatorEvent"]) {
+				t.Errorf("Setup changed operator handler: %v", got["operatorEvent"])
+			}
+			if goos == runtime.GOOS && !NewCopilotConnector().renderedHookEntriesPresent(
+				SetupOpts{DataDir: dataDir}, decodeHookFileForTest(t, path)) {
+				t.Error("repaired Copilot registration is still absent")
+			}
+		})
+	}
+}
