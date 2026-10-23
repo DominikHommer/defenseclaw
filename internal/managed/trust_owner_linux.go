@@ -48,6 +48,13 @@ func hostOwnerUID(path string, info os.FileInfo, mapped uint32) uint32 {
 	if os.Getppid() != 1 || len(path) == 0 || len(path) > 4096 {
 		return unknown
 	}
+	// The peer is the launcher outside the scanner's PID namespace. The
+	// kernel reports that peer as PID 0 from inside the scanner. A daemon
+	// reparented to host PID 1 must never write to an incidental fd 5.
+	peer, err := unix.GetsockoptUcred(5, unix.SOL_SOCKET, unix.SO_PEERCRED)
+	if err != nil || peer.Pid != 0 {
+		return unknown
+	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
 		return unknown

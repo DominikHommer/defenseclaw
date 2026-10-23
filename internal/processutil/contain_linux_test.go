@@ -118,6 +118,19 @@ func TestRunContainedFailsClosedWithoutANamespace(t *testing.T) {
 	}
 }
 
+// Exercise the public launcher path when it cannot create the runner's namespace.
+func TestRunContainedLauncherFailsClosedWithoutANamespace(t *testing.T) {
+	t.Setenv("DC_PROCESSUTIL_TEST_FAIL_NAMESPACE", "1")
+	ran := filepath.Join(t.TempDir(), "ran")
+	err := RunContained(CommandContext(context.Background(), "/bin/sh", "-c", `: > "$1"`, "sh", ran))
+	if !errors.Is(err, ErrNotContained) {
+		t.Fatalf("RunContained = %v, want ErrNotContained", err)
+	}
+	if _, statErr := os.Stat(ran); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("command executed without containment: %v", statErr)
+	}
+}
+
 // A privileged caller (root without CAP_SYS_ADMIN, as in the hook guardian's
 // unit) keeps every file's owner in the namespace.
 func TestRunContainedKeepsFileOwnersWhenPrivileged(t *testing.T) {

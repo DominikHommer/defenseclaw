@@ -30,6 +30,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -50,13 +51,14 @@ import (
 // detached children, before its pidfd becomes readable. The namespace also
 // keeps the gateway and its unrelated children out of the scanner's PID map.
 const (
-	containSupervisorArg0 = "defenseclaw-contained-run"
-	containSupervisorEnv  = "DEFENSECLAW_CONTAINED_RUN_SUPERVISOR"
-	containInitMode       = "init"
-	containLauncherMode   = "launcher"
-	containTrackedMode    = "tracked-launcher"
-	containTrackedInit    = "tracked-init"
-	containHostStatEnv    = "DEFENSECLAW_TRACKED_HOST_STAT_FD"
+	containSupervisorArg0   = "defenseclaw-contained-run"
+	containSupervisorEnv    = "DEFENSECLAW_CONTAINED_RUN_SUPERVISOR"
+	containInitMode         = "init"
+	containLauncherMode     = "launcher"
+	containTrackedMode      = "tracked-launcher"
+	containTrackedInit      = "tracked-init"
+	containHostStatEnv      = "DEFENSECLAW_TRACKED_HOST_STAT_FD"
+	containFailNamespaceEnv = "DC_PROCESSUTIL_TEST_FAIL_NAMESPACE"
 )
 
 // Supervisor exit codes. Any other code is the command's own (128+signal
@@ -80,6 +82,56 @@ const containPipeWaitDelay = 2 * time.Second
 // tests map an ID this process does not have to reach the fail-closed result.
 var containIDMap = func(id int) []syscall.SysProcIDMap {
 	return []syscall.SysProcIDMap{{ContainerID: id, HostID: id, Size: 1}}
+}
+
+var trackedGatewayProtection struct {
+	sync.Mutex
+	active  int
+	restore bool
+}
+
+// A private PID namespace still inherits the host procfs. Keep the gateway
+// non-dumpable until every tracked scanner is gone, then restore its original
+// visibility for daemon status, stop and upgrades.
+func protectTrackedGateway() error {
+	trackedGatewayProtection.Lock()
+	defer trackedGatewayProtection.Unlock()
+	if trackedGatewayProtection.active == 0 && trackedGatewayProtection.restore {
+		// A prior cleanup could not restore dumpability. Keep protection in
+		// place for this scan and retry restoration when it ends.
+		if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
+			return fmt.Errorf("%w: protect gateway memory: %v", ErrNotContained, err)
+		}
+	} else if trackedGatewayProtection.active == 0 {
+		initial, err := unix.PrctlRetInt(unix.PR_GET_DUMPABLE, 0, 0, 0, 0)
+		if err != nil {
+			return fmt.Errorf("%w: inspect gateway memory protection: %v", ErrNotContained, err)
+		}
+		if initial != 0 && initial != 1 {
+			return fmt.Errorf("%w: unsupported gateway dumpability %d", ErrNotContained, initial)
+		}
+		trackedGatewayProtection.restore = initial == 1
+		if trackedGatewayProtection.restore {
+			if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
+				return fmt.Errorf("%w: protect gateway memory: %v", ErrNotContained, err)
+			}
+		}
+	}
+	trackedGatewayProtection.active++
+	return nil
+}
+
+func releaseTrackedGateway() error {
+	trackedGatewayProtection.Lock()
+	defer trackedGatewayProtection.Unlock()
+	trackedGatewayProtection.active--
+	if trackedGatewayProtection.active == 0 && trackedGatewayProtection.restore {
+		if err := unix.Prctl(unix.PR_SET_DUMPABLE, 1, 0, 0, 0); err != nil {
+			return fmt.Errorf("%w: restore gateway status visibility: %v", ErrNotContained, err)
+		}
+		trackedGatewayProtection.restore = false
+	}
+	return nil
 }
 
 func init() {
@@ -213,6 +265,9 @@ func launchContained(argv []string) int {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	if os.Getenv(containFailNamespaceEnv) == "1" {
+		return containExitNotContained
+	}
 	go func() {
 		<-terms
 		cancel()
@@ -248,7 +303,7 @@ func effectiveCapabilities() uint64 {
 // launcher is outside that namespace, so the scanner cannot address it or the
 // gateway by PID. The launcher holds a pidfd for the scanner and is linked to
 // the gateway by a parent-death signal and its own pidfd.
-func runTracked(cmd *exec.Cmd) error {
+func runTracked(cmd *exec.Cmd) (runErr error) {
 	if cmd.Process != nil {
 		return errors.New("processutil: RunTracked: already started")
 	}
@@ -297,11 +352,33 @@ func runTracked(cmd *exec.Cmd) error {
 			return err
 		}
 	}
-	// A scanner in a user namespace can still see the host /proc mount. This
-	// blocks ptrace and /proc/<gateway>/mem even when Yama is permissive.
-	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
-		return fmt.Errorf("%w: cannot protect gateway memory: %v", ErrNotContained, err)
+	if err := protectTrackedGateway(); err != nil {
+		return err
 	}
+	scannerFD := -1
+	provenEnded := true // the start gate is still closed
+	defer func() {
+		if !provenEnded {
+			// Keep the gateway protected after a bounded wait, then restore
+			// visibility only when the scanner pidfd reports its exit.
+			go func(fd int) {
+				defer unix.Close(fd)
+				for !waitScannerPidfd(fd, time.Minute) {
+					time.Sleep(time.Second)
+				}
+				if err := releaseTrackedGateway(); err != nil {
+					fmt.Fprintf(os.Stderr, "processutil: %v\n", err)
+				}
+			}(scannerFD)
+			return
+		}
+		if scannerFD >= 0 {
+			_ = unix.Close(scannerFD)
+		}
+		if err := releaseTrackedGateway(); err != nil {
+			runErr = errors.Join(runErr, err)
+		}
+	}()
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	if err := cmd.Start(); err != nil {
@@ -328,17 +405,18 @@ func runTracked(cmd *exec.Cmd) error {
 		_ = cmd.Wait()
 		return fmt.Errorf("%w: scanner custody handshake: %v", ErrNotContained, err)
 	}
-	scannerFD, err := unix.PidfdOpen(int(binary.LittleEndian.Uint32(scannerPID[:])), 0)
+	scannerFD, err = unix.PidfdOpen(int(binary.LittleEndian.Uint32(scannerPID[:])), 0)
 	if err != nil {
 		_ = unix.PidfdSendSignal(pidfd, unix.SIGKILL, nil, 0)
 		_ = cmd.Wait()
 		return fmt.Errorf("%w: cannot own scanner pidfd: %v", ErrNotContained, err)
 	}
-	defer unix.Close(scannerFD)
+	provenEnded = false
 	if _, err := owner.Write([]byte{1}); err != nil {
 		_ = unix.PidfdSendSignal(scannerFD, unix.SIGKILL, nil, 0)
 		_ = unix.PidfdSendSignal(pidfd, unix.SIGKILL, nil, 0)
 		_ = cmd.Wait()
+		provenEnded = waitScannerPidfd(scannerFD, 5*time.Second)
 		return fmt.Errorf("%w: scanner custody acknowledge: %v", ErrNotContained, err)
 	}
 	_ = owner.Close()
@@ -351,6 +429,7 @@ func runTracked(cmd *exec.Cmd) error {
 	if !waitScannerPidfd(scannerFD, 5*time.Second) {
 		return fmt.Errorf("%w: scanner did not end with its launcher", ErrNotContained)
 	}
+	provenEnded = true
 	return err
 }
 
