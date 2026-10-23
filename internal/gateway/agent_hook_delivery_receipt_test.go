@@ -24,6 +24,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
@@ -42,9 +43,18 @@ type managedHookAuditFixture struct {
 // set, wraps the hook's response writer.
 func newManagedHookAuditFixture(t *testing.T, wrap func(http.ResponseWriter) http.ResponseWriter) managedHookAuditFixture {
 	t.Helper()
+	return newManagedHookAuditFixtureCollectingNo(t, wrap)
+}
+
+// newManagedHookAuditFixtureCollectingNo is newManagedHookAuditFixture with
+// log collection off for each bucket in off.
+func newManagedHookAuditFixtureCollectingNo(
+	t *testing.T, wrap func(http.ResponseWriter) http.ResponseWriter, off ...observability.Bucket,
+) managedHookAuditFixture {
+	t.Helper()
 	installCorrelationHMACForTest()
 	installDefaultProfileConnector(t, "claudecode")
-	fixture := newSidecarRuntimeFixture(t, true)
+	fixture := newSidecarRuntimeFixtureCollectingNo(t, nil, off...)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
 	if err != nil {
 		t.Fatal(err)
