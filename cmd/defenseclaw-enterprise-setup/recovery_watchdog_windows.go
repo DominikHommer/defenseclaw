@@ -115,7 +115,7 @@ func runStandaloneSetupRecoveryWatchdog(parentArgument string, stdout, stderr io
 		fmt.Fprintln(stderr, err)
 		return enterpriseFailureExitCode
 	}
-	defer parent.Close() //nolint:errcheck -- the wait result determines recovery.
+	defer func() { _ = parent.Close() }()
 	if _, err := io.WriteString(stdout, "READY\n"); err != nil {
 		return enterpriseFailureExitCode
 	}
