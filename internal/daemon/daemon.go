@@ -264,7 +264,8 @@ func (d *Daemon) HasAuthenticatedMigrationProcessIdentity(pid int) bool {
 	// standing: stop and restart may reach it only through the authenticated
 	// control plane.
 	return d.verifyProcessForAuthenticatedMigration(info) || d.verifyReplacedExecutable(info) ||
-		d.verifyUnreadableExecutable(info) || d.verifyProcessForControl(info)
+		d.verifyUnreadableExecutable(info) ||
+		(info.StartIdentity != "" && d.verifyProcessForControl(info))
 }
 
 // verifyProcess verifies every identity signal present in a PID record. It
