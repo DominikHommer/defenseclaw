@@ -359,11 +359,13 @@ func (d *Driver) Finish(p *Prepared, installed string, failure []string, policy 
 		// against the gateway again. It is never failed or rolled back here
 		// (GAP-0485).
 		code := CodeStateInvalid
+		recovery := "run `defenseclaw enterprise windows ensure --profile standalone` to finish confirming it"
 		if diskFull(err) {
 			code = CodeDiskFull
+			recovery = "free space on that volume, then " + recovery
 		}
 		return st, &Error{Code: code, cause: err, Detail: "the gateway enforces this bundle, but recording its confirmation failed (" +
-			boundedDetail(err.Error()) + "); the bundle stays applied: run `defenseclaw enterprise windows ensure --profile standalone` to finish confirming it"}
+			boundedDetail(err.Error()) + "); the bundle stays applied: " + recovery}
 	}
 	return st, nil
 }

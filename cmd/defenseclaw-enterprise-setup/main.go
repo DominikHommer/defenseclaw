@@ -503,7 +503,7 @@ func parseEnterpriseSetupOptionsForFlavor(arguments []string, standalone bool) (
 			return opts, false, errors.New("BUNDLE= cannot be combined with CONFIG= (or --mode/--connector): the signed bundle carries the config")
 		}
 		if opts.RefuseCapabilityLoss && strings.TrimSpace(opts.Bundle) == "" {
-			return opts, false, errors.New("REFUSECAPABILITYLOSS=1 requires BUNDLE=")
+			return opts, false, errors.New("REFUSECAPABILITYLOSS=1 requires BUNDLE=; nothing was changed: deliver both with Setup /ensure")
 		}
 	}
 	if opts.AllowUnsigned && strings.TrimSpace(opts.CertificationCodexHome) == "" {

@@ -266,12 +266,13 @@ type windowsBundleRun struct {
 	sessions *enterprisestatus.SessionRestartStatus
 	// previous is the installed config.yaml before the run: the last good
 	// config while no bundle is current.
-	previous       []byte
-	warnings       []enterprisebundle.Warning
-	anchorStage    string
-	anchorPath     string
-	anchorPrevious []byte
-	anchorExisted  bool
+	previous         []byte
+	rollbackWriteErr error
+	warnings         []enterprisebundle.Warning
+	anchorStage      string
+	anchorPath       string
+	anchorPrevious   []byte
+	anchorExisted    bool
 	// previousGeneration is config.generation.json as the run found it.
 	previousGeneration configwrite.GenerationState
 	// anchorOnly records the anchor file a TRUSTANCHORS= run without
@@ -1222,6 +1223,12 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 				result.AddError(code, windowsBundleNotApplied(p, err.Error(), windowsBundleHasCurrent(run.driver.Store)))
 			}
 		}
+		if run.rollbackWriteErr != nil {
+			writeErr := enterprisebundle.StateWriteError("stage the last good config for rollback", run.rollbackWriteErr)
+			if writeErr.Code == enterprisebundle.CodeDiskFull {
+				result.AddError(string(writeErr.Code), writeErr.Detail)
+			}
+		}
 		// The delivered anchors are committed only once the bundle they
 		// verified is confirmed, so a run killed while Finish waits for the
 		// gateway leaves the previous anchors installed (GAP-0106). Finish
@@ -1388,6 +1395,7 @@ func (t *windowsBundleRollbackTarget) writeOptions(expectSHA string) (configwrit
 // this run reports the failed bundle. It returns the digest the gateway then
 // enforces and whether the last good config is installed.
 func rollbackWindowsBundle(cmd *cobra.Command, opts *windowsEnterpriseLifecycleOptions, run *windowsBundleRun) (string, bool) {
+	run.rollbackWriteErr = nil
 	last, ref, err := run.driver.CurrentConfig()
 	if err != nil {
 		return "", false
@@ -1399,10 +1407,11 @@ func rollbackWindowsBundle(cmd *cobra.Command, opts *windowsEnterpriseLifecycleO
 		return "", false
 	}
 	path := filepath.Join(run.layout.LifecycleDir, windowsBundleRollbackName)
+	defer os.Remove(path)
 	if err := writeWindowsBundleAdminFile(path, last); err != nil {
+		run.rollbackWriteErr = err
 		return "", false
 	}
-	defer os.Remove(path)
 	rollback := *opts
 	rollback.bundle, rollback.bundleRollback, rollback.bundleRollbackTo = nil, true, nil
 	if ref != nil {

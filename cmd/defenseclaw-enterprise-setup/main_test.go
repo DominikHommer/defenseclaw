@@ -682,6 +682,17 @@ func TestStandaloneSetupBundleIsAnEnsureProperty(t *testing.T) {
 }
 
 func TestStandaloneSetupRefuseCapabilityLossNamesTheCorrectNextStep(t *testing.T) {
+	t.Run("ensure without bundle", func(t *testing.T) {
+		_, _, err := parseStandaloneEnterpriseSetupOptions([]string{"/ensure", "REFUSECAPABILITYLOSS=1"})
+		if err == nil {
+			t.Fatal("REFUSECAPABILITYLOSS=1 was accepted without BUNDLE=")
+		}
+		for _, want := range []string{"REFUSECAPABILITYLOSS=1 requires BUNDLE=", "nothing was changed", "deliver both with Setup /ensure"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("refusal %q does not name %q", err, want)
+			}
+		}
+	})
 	for _, action := range []string{"install", "upgrade", "repair"} {
 		for _, bundle := range []string{"", `BUNDLE=C:\b\v7.dcbundle`} {
 			name := action

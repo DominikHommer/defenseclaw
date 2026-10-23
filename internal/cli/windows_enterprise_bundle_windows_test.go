@@ -1227,6 +1227,89 @@ func TestWindowsBundleApplyRejectsDifferentEnforcingDigest(t *testing.T) {
 	assertWindowsBundleLockRemoved(t, layout)
 }
 
+// GAP-0609: a full volume can also stop the private rollback copy after a
+// failed apply or confirmation. The result must name that write failure and
+// the free-space step while preserving the original bundle failure.
+func TestWindowsBundleRollbackStageOnAFullVolumeIsDiskFull(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		failureCode  string
+		policyDigest string
+		applied      bool
+	}{
+		{name: "apply failure", failureCode: "installer_failed"},
+		{name: "digest mismatch", policyDigest: "sha256:" + strings.Repeat("2", 64), applied: true},
+		{name: "not confirmed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newBundleCLIEnv(t)
+			e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+			signed := filepath.Join(e.dir, "v5.dcbundle")
+			if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+				t.Fatalf("sign exit %d:\n%s", code, out)
+			}
+			layout := stubWindowsBundleHost(t)
+			cmd, out := windowsBundleCommand()
+			opts := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: e.anchors,
+				profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+			if done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", opts); done || err != nil {
+				t.Fatalf("prepare: done=%v err=%v\n%s", done, err, out)
+			}
+			cleanupPreparedWindowsBundle(t, opts)
+			run := opts.bundle
+			run.previous = []byte("config_version: 9\n")
+			opts.resolvedInstaller = `C:\stage\install-enterprise.ps1`
+			if err := os.MkdirAll(filepath.Dir(layout.ConfigPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(layout.ConfigPath, run.prepared.Config, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			policyDigest := tc.policyDigest
+			if policyDigest == "" {
+				policyDigest = run.prepared.Receipt.ExpectedDigest
+			}
+			windowsBundlePolicy = func(context.Context) *enterprisebundle.GatewayPolicy {
+				return &enterprisebundle.GatewayPolicy{EffectiveDigest: policyDigest, Digest: policyDigest, Applied: tc.applied}
+			}
+			rollbackPath := filepath.Join(layout.LifecycleDir, windowsBundleRollbackName)
+			var rollbackWrites int
+			windowsBundlePublishPrivateFile = func(path string) error {
+				if path == rollbackPath {
+					rollbackWrites++
+					return &os.PathError{Op: "publish", Path: path, Err: windows.ERROR_DISK_FULL}
+				}
+				return nil
+			}
+			result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+			if tc.failureCode != "" {
+				result.AddError(tc.failureCode, "the ensure transaction failed")
+			}
+			finishWindowsEnterpriseBundle(cmd, opts, result)
+			if rollbackWrites != 1 {
+				t.Fatalf("rollback writes = %d, want one", rollbackWrites)
+			}
+			if !windowsBundleHasCode(result.Errors, string(enterprisebundle.CodeDiskFull)) {
+				t.Fatalf("errors = %+v; want disk_full beside the original failure", result.Errors)
+			}
+			for _, message := range result.Errors {
+				if message.Code == string(enterprisebundle.CodeDiskFull) &&
+					(!strings.Contains(message.Message, "stage the last good config for rollback") ||
+						!strings.Contains(message.Message, "free space on that volume")) {
+					t.Errorf("disk_full message = %q; want the write and recovery step", message.Message)
+				}
+			}
+			if result.Bundle == nil || result.Bundle.State != enterprisebundle.StateFailed {
+				t.Fatalf("bundle = %+v; want the original failure recorded", result.Bundle)
+			}
+			if _, err := os.Stat(rollbackPath); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("unsealed rollback copy remains: %v", err)
+			}
+			assertWindowsBundleLockRemoved(t, layout)
+		})
+	}
+}
+
 // GAP-0113: Setup /ensure BUNDLE= refuses a validly signed bundle whose
 // signed Windows digest this device disproves, also when the manifest says a
 // Linux host computed it: digest_mismatch, a failure exit and the installed
