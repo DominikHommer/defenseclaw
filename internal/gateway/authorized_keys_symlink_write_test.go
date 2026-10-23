@@ -1370,8 +1370,11 @@ func TestR103B07FalsePositiveRows(t *testing.T) {
 			input := actionfacts.Input{Tool: "Bash", Command: tc.command, CWD: cwd,
 				ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
 			request := trustedActionRequest{Input: input}
-			if trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)) {
-				t.Fatalf("%s classified as an SSH-key write", tc.command)
+			// FP-0004/0005 have unknown copy source operands. The shared
+			// action decision closes them under the new class rule.
+			wantBlock := tc.id == "FP-0004" || tc.id == "FP-0005"
+			if got := trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)); got != wantBlock {
+				t.Fatalf("%s blocked=%t, want %t", tc.command, got, wantBlock)
 			}
 		})
 	}
