@@ -193,8 +193,8 @@ func parseLaunchEnvironmentBlock(raw []byte) (map[string]string, error) {
 
 func launchEnvironmentKey(key string) bool {
 	switch key {
-	case "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME",
-		"OPENCODE_PURE", "OPENCODE_TEST_MANAGED_CONFIG_DIR", "OPENCODE_CONFIG_DIR",
+	case "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "XDG_CONFIG_HOME",
+		"OPENCODE_PURE", "OPENCODE_TEST_MANAGED_CONFIG_DIR",
 		"KIRO_HOME", "KIRO_AGENT_CONFIG_DIR", "KIRO_TEST_AGENTS_DIR",
 		"HERMES_HOME", "HERMES_MANAGED_DIR", "HERMES_SAFE_MODE":
 		return true

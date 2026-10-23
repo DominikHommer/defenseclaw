@@ -36,9 +36,17 @@ func TestLinuxDirectoryAgentNormalLaunchUsesNSSHome(t *testing.T) {
 			if connector == "antigravity" {
 				agent = "agy"
 			}
+			env := map[string]string{"HOME": home}
+			switch connector {
+			case "opencode":
+				env["OPENCODE_PURE"] = "0"
+				env["OPENCODE_CONFIG_DIR"] = home + "/.config/opencode"
+			case "hermes":
+				env["HERMES_SAFE_MODE"] = "false"
+			}
 			l.describePluginLaunchSession(context.Background(), agentSession{
 				PID: 7133, UID: uid, Agent: agent, Args: []string{agent}, ArgsKnown: true,
-				Env: map[string]string{"HOME": home}, EnvKnown: true,
+				Env: env, EnvKnown: true,
 			}, connector)
 			if !result.CoverageComplete || !result.SecurityComplete || len(result.Warnings) != 0 || len(result.Errors) != 0 {
 				t.Fatalf("normal directory-account launch reported uninspected: %+v", result)
@@ -69,7 +77,7 @@ func TestLinuxDirectoryAgentNormalLaunchUsesNSSHome(t *testing.T) {
 func TestDarwinLaunchEnvironmentKeepsOnlyPluginSelectors(t *testing.T) {
 	raw := make([]byte, 4)
 	binary.LittleEndian.PutUint32(raw, 2)
-	raw = append(raw, []byte("/usr/local/bin/opencode\x00\x00opencode\x00--pure\x00OPENCODE_PURE=1\x00KIRO_AGENT_CONFIG_DIR=/tmp/agents\x00API_TOKEN=secret\x00")...)
+	raw = append(raw, []byte("/usr/local/bin/opencode\x00\x00opencode\x00--pure\x00OPENCODE_PURE=1\x00OPENCODE_CONFIG_DIR=/tmp/extra\x00KIRO_AGENT_CONFIG_DIR=/tmp/agents\x00API_TOKEN=secret\x00")...)
 	env, err := parseProcArgs2Environment(raw)
 	if err != nil || env["OPENCODE_PURE"] != "1" || env["KIRO_AGENT_CONFIG_DIR"] != "/tmp/agents" || len(env) != 2 {
 		t.Fatalf("plugin selectors = %v, %v", env, err)

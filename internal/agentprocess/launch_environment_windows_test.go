@@ -38,7 +38,7 @@ func TestWindowsLaunchEnvironmentReadsAnotherProcess(t *testing.T) {
 		t.Fatalf("child did not start: %q, %v", line, err)
 	}
 	env, err := LaunchEnvironmentForPID(command.Process.Pid)
-	if err != nil || env["OPENCODE_PURE"] != "1" || env["HERMES_SAFE_MODE"] != "1" || env["USERPROFILE"] == "" {
+	if err != nil || env["OPENCODE_PURE"] != "1" || env["HERMES_SAFE_MODE"] != "1" || env["USERPROFILE"] == "" || env["PROGRAMDATA"] == "" {
 		t.Fatalf("selected child launch environment unavailable: %v, %v", env, err)
 	}
 	if _, kept := env["DC_PRIVATE_MARKER"]; kept {
@@ -73,8 +73,8 @@ func TestWindowsLaunchEnvironmentRejectsIncompleteAndConflictingBlocks(t *testin
 			t.Fatalf("malformed block was accepted: %q", raw)
 		}
 	}
-	parsed, err := parseLaunchEnvironmentBlock(encode("=C:=C:\\Users\\alice\x00UserProfile=C:\\Users\\alice\x00DC_PRIVATE_MARKER=secret\x00\x00"))
-	if err != nil || !strings.EqualFold(parsed["USERPROFILE"], `C:\Users\alice`) || len(parsed) != 1 {
+	parsed, err := parseLaunchEnvironmentBlock(encode("=C:=C:\\Users\\alice\x00UserProfile=C:\\Users\\alice\x00ProgramData=C:\\ProgramData\x00OPENCODE_CONFIG_DIR=C:\\extra\x00DC_PRIVATE_MARKER=secret\x00\x00"))
+	if err != nil || !strings.EqualFold(parsed["USERPROFILE"], `C:\Users\alice`) || parsed["PROGRAMDATA"] != `C:\ProgramData` || len(parsed) != 2 {
 		t.Fatalf("selected keys = %v, %v", parsed, err)
 	}
 	var pointer [8]byte
