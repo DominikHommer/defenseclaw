@@ -54,6 +54,7 @@ for current behavior.
 
 ### Fixed
 
+- **The Cursor and rollback guides now give the recovery steps the commands perform.** A refused Cursor action setup leaves configuration unchanged; observation requires an explicit setup command. On Windows, a failed rollback is undone, and pending recovery uses the installer command printed with its error.
 - An interrupted Windows upgrade refuses to continue when gateway recovery fails, including on another retry. Restoring a snapshot now checkpoints and verifies required data and environment moves, retains recovery state on failure, and verifies an external config before reporting recovery (GAP-0444, GAP-0450).
 
 - **A refused proxy-provider setup restores the vendor configuration.** Provider verification now runs before setup is published as ready and rolls back a failed prerequisite. Correcting a ZeptoClaw provider key and retrying no longer reuses a stale blank-key snapshot or leaves an orphaned localhost redirect.

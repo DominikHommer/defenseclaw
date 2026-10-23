@@ -69,3 +69,27 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
     assert.ok(page('reference/configuration/fail-modes.mdx').includes('Hooks follow an open fail mode only when your config sets it'));
   });
 });
+
+describe('setup and rollback recovery guides', () => {
+  it('says a refused Cursor action setup makes no change and gives an explicit observe command', () => {
+    const setup = readFileSync(join(repo, 'cli/defenseclaw/commands/cmd_setup.py'), 'utf8');
+    assert.ok(setup.includes('connector was not detected locally; refusing action-mode hook setup.'));
+    const guide = page('how-to/guardrail/stop-a-secret-upload.mdx');
+    assert.match(guide, /Cursor was not detected locally.*refuses action mode.*(?:no|nothing) (?:setup or configuration )?change/i);
+    assert.ok(guide.includes('defenseclaw setup cursor --yes --mode observe'));
+    assert.doesNotMatch(guide, /refuses action mode and configures observe mode/i);
+  });
+
+  it('explains a failed Windows rollback, its undo, and pending installer recovery', () => {
+    const installer = readFileSync(join(repo, 'scripts/install.ps1'), 'utf8');
+    assert.ok(installer.includes('return Undo-Rollback "DefenseClaw $backTo is not proven running'));
+    assert.ok(installer.includes('Assert-LifecycleRestored (Get-Variable -Name Manifest'));
+    assert.ok(installer.includes('fix the cause, then run: $(Get-LifecycleNextStep)'));
+    const rollback = page('get-started/upgrade.mdx').split('## Rollback', 2)[1].split('## Update notices', 1)[0];
+    assert.match(rollback, /does not start or, on Windows, cannot be proven.*undoes the rollback/i);
+    assert.match(rollback, /restart and prove the install.*started from/i);
+    assert.match(rollback, /lifecycle record.*install lock/i);
+    assert.match(rollback, /recovery command.*installer prints/i);
+    assert.doesNotMatch(rollback, /agent hooks are not guarded until `defenseclaw-gateway start` succeeds/i);
+  });
+});
