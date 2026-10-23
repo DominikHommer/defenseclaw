@@ -246,6 +246,42 @@ func TestValidateWindowsManagedHooksLifecycleJournalRequiresExactTransaction(t *
 	}
 }
 
+func TestWindowsManagedHooksLifecycleAcceptsGuardWithNoEnrolledAccounts(t *testing.T) {
+	identity, journal, _ := windowsManagedHooksLifecycleJournalTestIdentity(t)
+	journal.PriorClaudeTargetSIDs = []string{}
+	journal.PriorCursorTargets = []enterprisehooks.WindowsCursorManagedRuntimeTarget{}
+	journal.Cursor.PolicyActive = true
+	journal.Cursor.HooksExisted = true
+	journal.Cursor.AdapterExisted = true
+	journal.Cursor.StateExisted = true
+	journal.Cursor.ReceiptExisted = true
+	journal.Cursor.HooksSecurityDescriptor = "protected"
+	journal.Cursor.AdapterSecurityDescriptor = "protected"
+	journal.Cursor.StateSecurityDescriptor = "protected"
+	journal.Cursor.ReceiptSecurityDescriptor = "protected"
+	journal.Cursor.HooksAttributes = 1
+	journal.Cursor.AdapterAttributes = 1
+	journal.Cursor.StateAttributes = 1
+	journal.Cursor.ReceiptAttributes = 1
+	if err := validateWindowsManagedHooksLifecycleJournal(journal, identity); err != nil {
+		t.Fatalf("active zero-target policies rejected during upgrade: %v", err)
+	}
+	if _, err := windowsManagedHooksPartialClaudeTargets(nil, nil, true); err != nil {
+		t.Fatalf("active empty Claude policy rejected during capture: %v", err)
+	}
+	if _, err := windowsManagedHooksPartialCursorTargets(nil, nil, true); err != nil {
+		t.Fatalf("active empty Cursor policy rejected during capture: %v", err)
+	}
+	journal.Claude.PolicyExisted = false
+	journal.Claude.StateExisted = false
+	journal.Claude.Policy = nil
+	journal.Claude.State = nil
+	journal.Cursor = enterprisehooks.WindowsCursorManagedPolicyTeardownSnapshot{}
+	if err := validateWindowsManagedHooksLifecycleJournal(journal, identity); err != nil {
+		t.Fatalf("legacy inactive zero-target policies rejected during upgrade: %v", err)
+	}
+}
+
 func TestValidateWindowsManagedHooksLifecycleRecoveryBindingIsExact(t *testing.T) {
 	transactionID := strings.Repeat("a", 32)
 	directory := `C:\ProgramData\DefenseClaw\install\transactions\` + transactionID

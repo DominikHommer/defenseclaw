@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-// Docs claims that must match what the product does. Each check reads the
-// page as one line of words, so a reflowed paragraph still matches.
+// Docs claims and release security requirements. Each check reads the
+// page as words, so a reflowed paragraph still matches.
 
 const site = join(dirname(fileURLToPath(import.meta.url)), '..');
 const repo = join(site, '..');
@@ -33,6 +33,14 @@ describe('Rollback gateway state', () => {
     assert.match(text, /`defenseclaw-gateway start`/);
   });
 });
+
+function enterprisePages(path = join(site, 'content/docs/enterprise')): string[] {
+  return readdirSync(path, { withFileTypes: true }).flatMap((entry) => {
+    const child = join(path, entry.name);
+    if (entry.isDirectory()) return enterprisePages(child);
+    return entry.isFile() && entry.name.endsWith('.mdx') ? [child] : [];
+  });
+}
 
 describe('Intune base config versus the signed bundle', () => {
   it('names exactly the blocks the packager compares', () => {
@@ -133,5 +141,152 @@ describe('Hook connector setup and teardown', () => {
     const turnOff = page('connectors/claudecode.mdx').split('## Turn it off')[1]?.split('## Details')[0];
     assert.match(turnOff ?? '', /whole-guardrail disable.*`--no-restart`.*restart the gateway/i);
     assert.match(turnOff ?? '', /`--connector claudecode`.*`--no-restart`.*running gateway.*(?:at once|without a restart)/i);
+  });
+});
+
+describe('setup and rollback recovery guides', () => {
+  it('says a refused Cursor action setup makes no change and gives an explicit observe command', () => {
+    const setup = readFileSync(join(repo, 'cli/defenseclaw/commands/cmd_setup.py'), 'utf8');
+    assert.ok(setup.includes('connector was not detected locally; refusing action-mode hook setup.'));
+    const guide = page('how-to/guardrail/stop-a-secret-upload.mdx');
+    assert.match(guide, /Cursor was not detected locally.*refuses action mode.*(?:no|nothing) (?:setup or configuration )?change/i);
+    assert.ok(guide.includes('defenseclaw setup cursor --yes --mode observe'));
+    assert.doesNotMatch(guide, /refuses action mode and configures observe mode/i);
+  });
+
+  it('explains a failed Windows rollback, its undo, and pending installer recovery', () => {
+    const installer = readFileSync(join(repo, 'scripts/install.ps1'), 'utf8');
+    assert.ok(installer.includes('return Undo-Rollback "DefenseClaw $backTo is not proven running'));
+    assert.ok(installer.includes('Assert-LifecycleRestored (Get-Variable -Name Manifest'));
+    assert.ok(installer.includes('fix the cause, then run: $(Get-LifecycleNextStep)'));
+    const rollback = page('get-started/upgrade.mdx').split('## Rollback', 2)[1].split('## Update notices', 1)[0];
+    assert.match(rollback, /does not start or, on Windows, cannot be proven.*undoes the rollback/i);
+    assert.match(rollback, /restart and prove the install.*started from/i);
+    assert.match(rollback, /lifecycle record.*install lock/i);
+    assert.match(rollback, /recovery command.*installer prints/i);
+    assert.doesNotMatch(rollback, /agent hooks are not guarded until `defenseclaw-gateway start` succeeds/i);
+  });
+
+  it('describes every Windows and Unix pending recovery hook state', () => {
+    const installer = readFileSync(join(repo, 'scripts/install.ps1'), 'utf8');
+    const closeHooks = /function Close-UnfinishedInstallHooks \{([\s\S]*?)\n\}\n\nfunction Clear-SetupDataDir/.exec(installer)?.[1];
+    assert.ok(closeHooks, 'Windows installer hook closure path not found');
+    assert.match(closeHooks, /\(-not \$unfinished\.Count -and -not \$pending\) -or \(Get-GatewayProcess\)/);
+    assert.match(closeHooks, /-not \(Test-Path -LiteralPath \(Join-Path \$DataDir "hooks"\) -PathType Container\)/);
+    assert.match(closeHooks, /if \(Close-AllHooks \$gateways\)/);
+    assert.match(closeHooks, /every agent hook blocks tool calls until the gateway runs again/);
+    assert.match(closeHooks, /agent hooks could not be closed: until the gateway runs, they follow the outage fail mode/);
+
+    const unixInstaller = readFileSync(join(repo, 'scripts/install.sh'), 'utf8');
+    const unixRestore = /restore_snapshot\(\) \{([\s\S]*?)\n\}\n\nrestart_old\(\)/.exec(unixInstaller)?.[1];
+    assert.ok(unixRestore, 'Unix installer incomplete restore path not found');
+    assert.match(unixRestore, /The snapshot stays \(with COMPLETE\), so the next run puts the rest back first/);
+    const unixRestart = /restart_old\(\) \{([\s\S]*?)\n\}\n\n# A 1\.0\.0 gateway/.exec(unixInstaller)?.[1];
+    assert.ok(unixRestart, 'Unix installer failed gateway restart path not found');
+    assert.match(unixRestart, /connectors in fail-closed mode block tool calls/);
+    const unixUndo = /undo_rollback\(\) \{([\s\S]*?)\n\}\n\n# A 0\.x release/.exec(unixInstaller)?.[1];
+    assert.ok(unixUndo, 'Unix installer failed rollback undo path not found');
+    assert.match(unixUndo, /gateway is not running, so agent hooks are not guarded/);
+    assert.match(installer, /is installed, but its gateway is not running, so agent hooks are not guarded/);
+
+    const rollback = page('get-started/upgrade.mdx').split('## Rollback', 2)[1].split('## Update notices', 1)[0];
+    assert.match(rollback, /on Windows.*gateway is down.*installed hooks.*if (?:that|hook closure) succeeds, (?:they|hooks) block tool calls until the gateway runs again/i);
+    assert.match(rollback, /if the gateway is running or no hooks directory exists.*does not force hooks closed/i);
+    assert.match(rollback, /if the installer warns that hooks could not be closed, they follow the configured outage fail mode.*configured open may allow tool calls/i);
+    assert.match(rollback, /on Linux and macOS.*does not force hooks closed.*gateway.*down.*closed.*block.*open.*allow/i);
+    assert.match(rollback, /unfinished snapshot.*run the same install command again/i);
+    assert.match(rollback, /if undoing the rollback also fails.*gateway down.*hooks not guarded/i);
+    assert.match(rollback, /stop agent activity, fix the reported cause and run the recovery command the installer prints/i);
+    assert.doesNotMatch(rollback, /hooks block tool calls until recovery finishes/i);
+  });
+});
+
+describe('Windows Hermes failure guidance', () => {
+  it('matches the native hook fail mode and names the managed outage exception', () => {
+    const hook = readFileSync(join(repo, 'internal/gateway/connector/hookexec/managed_hermes.go'), 'utf8');
+    const failMode = /func hermesFailsClosed\(opts Options\) bool \{([\s\S]*?)\n\}/.exec(hook)?.[1];
+    assert.ok(failMode, 'native Hermes failure mode not found');
+    assert.match(failMode, /opts\.ManagedEnterprise && !managedNativeDecision\(opts\)/);
+    assert.match(failMode, /opts\.StrictAvailability \|\| !strings\.EqualFold\(strings\.TrimSpace\(opts\.FailMode\), "open"\)/);
+    const windows = page('troubleshooting/windows.mdx');
+    assert.doesNotMatch(windows, /Hermes.*(?:fail-open setting|always shows failures as open)/i);
+    assert.match(windows, /Hermes.*closed by default.*explicitly.*open/i);
+    assert.match(windows, /managed host.*administrator.*open.*gateway outage/i);
+    assert.match(windows, /Secure Client.*open.*default/i);
+  });
+});
+
+describe('managed-host enrollment protection', () => {
+  const guides = [
+    'enterprise/plan/threat-model.mdx',
+    'enterprise/configure/enrollment.mdx',
+    'enterprise/configure/reference.mdx',
+    'enterprise/configure/machine-policy.mdx',
+    'enterprise/install/reference/windows.mdx',
+    'enterprise/operate/lifecycle.mdx',
+  ];
+  for (const name of guides) {
+    it(`${name} describes zero-enrollment refusal`, () => {
+      const paragraphs = readFileSync(join(site, 'content/docs', name), 'utf8')
+        .split(/\n\s*\n/)
+        .map((text) => text.split(/\s+/).join(' '));
+      const closure = paragraphs.find((text) =>
+        /Claude Code, Codex and Cursor/i.test(text) &&
+        /(?:no|zero|last).{0,60}enrolled user/i.test(text) &&
+        /(?:refus|fail closed)/i.test(text),
+      );
+      assert.ok(closure, `${name} must describe refusal even with no enrolled user`);
+    });
+  }
+
+  it('does not present a missing machine hook as an intended enrollment state', () => {
+    for (const path of enterprisePages()) {
+      const paragraphs = readFileSync(path, 'utf8')
+        .split(/\n\s*\n/)
+        .map((text) => text.split(/\s+/).join(' '));
+      for (const paragraph of paragraphs) {
+        if (!/(?:Claude Code|Codex|Cursor)/i.test(paragraph)) continue;
+        assert.doesNotMatch(
+          paragraph,
+          /(?:no|none|last|at least one|another).{0,100}enrolled user.{0,260}(?:without DefenseClaw hooks|no hooks|not published|policy is removed)/i,
+          `${path} presents missing machine policy as an intended enrollment state`,
+        );
+        assert.doesNotMatch(
+          paragraph,
+          /(?:Claude Code|Codex|Cursor).{0,120}(?:policy|hooks).{0,120}(?:only while|needs? at least one|requires? at least one).{0,120}enrolled/i,
+          `${path} conditions managed policy on another user's enrollment`,
+        );
+      }
+    }
+  });
+
+  it('describes the installed Windows policy as a product change', () => {
+    const changelog = readFileSync(join(repo, 'CHANGELOG.md'), 'utf8');
+    assert.match(
+      changelog,
+      /Windows.{0,160}(?:keeps|retains|remain.{0,40}installed|stays in force).{0,160}(?:no|zero) enrolled users/i,
+      'the release note must describe the installed zero-enrollment machine policy',
+    );
+    assert.doesNotMatch(changelog, /no Claude Code user is enrolled.{0,160}without DefenseClaw hooks/i);
+  });
+});
+
+describe('docs claim CI coverage', () => {
+  it('runs when any product source read by these checks changes', () => {
+    const testSource = readFileSync(fileURLToPath(import.meta.url), 'utf8');
+    const dependencies = [...testSource.matchAll(/join\(repo,\s*'([^']+)'/g)].map((match) => match[1]);
+    assert.ok(dependencies.includes('scripts/install.ps1'));
+    assert.ok(dependencies.includes('cli/defenseclaw/commands/cmd_setup.py'));
+    const workflow = readFileSync(join(repo, '.github/workflows/docs-site.yml'), 'utf8');
+    for (const [event, next] of [['push', 'pull_request'], ['pull_request', 'workflow_dispatch']]) {
+      const paths = workflow.split(`  ${event}:\n`, 2)[1]?.split(`  ${next}:\n`, 1)[0];
+      assert.ok(paths, `${event} path triggers not found`);
+      const patterns = [...paths.matchAll(/- '([^']+)'/g)].map((match) => match[1]);
+      for (const dependency of dependencies) {
+        assert.ok(patterns.some((pattern) => pattern === dependency ||
+          (pattern.endsWith('/**') && dependency.startsWith(pattern.slice(0, -2)))),
+        `${event} does not trigger docs claims for ${dependency}`);
+      }
+    }
   });
 });

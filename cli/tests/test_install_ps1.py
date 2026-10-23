@@ -376,6 +376,28 @@ def _ps1_function(name: str) -> str:
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
 @pytest.mark.allow_subprocess
+def test_rollback_manifest_records_an_oss_install_without_setup(tmp_path: Path) -> None:
+    # A rollback enters before the install path discovers an old Setup install.
+    # Under StrictMode an unbound $Setup used to abort before any swap began.
+    manifest = tmp_path / "lifecycle.json"
+    script = f"""
+Set-StrictMode -Version Latest
+$LifecycleManifest = '{manifest}'
+function Get-LifecycleState {{ return [ordered]@{{ Bins = @{{}} }} }}
+function Write-DurableText($Path, $Body) {{ [IO.File]::WriteAllText($Path, $Body) }}
+{_ps1_function('Write-LifecycleManifest')}
+$record = Write-LifecycleManifest 'rollback' '1.0.4' '1.0.2' ''
+if ($record.SetupRoot -cne '' -or $record.Operation -cne 'rollback') {{ throw 'wrong rollback record' }}
+if (([IO.File]::ReadAllText($LifecycleManifest) | ConvertFrom-Json).SetupRoot -cne '') {{
+    throw 'rollback record references Setup'
+}}
+"""
+    completed = _run_powershell(script)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
 def test_failed_readiness_preserves_hooks_without_restarting_the_old_setup(tmp_path: Path) -> None:
     install = _ps1_function("Invoke-Install")
     startup = install[install.index("    $startRc = 0") : install.index("    Complete-Swap")]

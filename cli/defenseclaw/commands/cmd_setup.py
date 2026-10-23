@@ -15257,19 +15257,17 @@ def _partition_unconvergeable_peers(
         if invariant := connector_lock_contract_invariant(name, entry):
             skipped[name] = _lock_contract_failure_detail(name, entry, invariant)
     # A connector that has left the roster keeps its lock entry until its own
-    # teardown reclaims it. `defenseclaw guardrail disable --connector X`
-    # removes X from the roster immediately, so an unconvergeable X turns from
-    # an expected failure into an unexpected-peer failure and still blocks
-    # every other connector's setup. Tolerate the leftover entry on the same
-    # terms: only when it is the entry itself that cannot converge.
+    # teardown reclaims it. Tolerate only an invalid leftover entry so it
+    # cannot block a current connector's setup. Do not print setup advice for
+    # it: the config no longer names it and a retired connector has no setup.
     for raw_name in entries:
         if not isinstance(raw_name, str) or not raw_name.strip():
             continue
         name = normalize_connector(raw_name)
         if not name or name in expected or name in must_keep or name in skipped:
             continue
-        if invariant := connector_lock_contract_invariant(name, entries[raw_name]):
-            skipped[name] = _lock_contract_failure_detail(name, entries[raw_name], invariant)
+        if connector_lock_contract_invariant(name, entries[raw_name]):
+            quiet.add(name)
     for name in quiet:
         skipped.pop(name, None)
     for name in skipped:

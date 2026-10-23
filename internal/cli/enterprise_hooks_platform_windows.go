@@ -32,6 +32,19 @@ var enterpriseHookWindowsTargetSessionCheck = enterprisehooks.RequireWindowsEnte
 var enterpriseHookWindowsDeferredPendingCheck = enterprisehooks.RequireWindowsEnterpriseDeferredTargetPending
 var enterpriseHookClaudePolicyIdentityVerifier = enterprisehooks.VerifyWindowsClaudeManagedPolicyIdentity
 var enterpriseHookCursorPolicyIdentityVerifier = enterprisehooks.VerifyWindowsCursorManagedPolicyIdentity
+var enterpriseHookClaudePolicyTargetsReader = enterprisehooks.ReadWindowsClaudeManagedPolicyTargets
+var enterpriseHookClaudePolicyTargetsPublisher = enterprisehooks.PublishWindowsClaudeManagedPolicyTargets
+var enterpriseHookCursorPolicyTargetsReader = enterprisehooks.ReadWindowsCursorManagedPolicyTargets
+var enterpriseHookCursorPolicyTargetsPublisher = enterprisehooks.PublishWindowsCursorManagedPolicyTargets
+var enterpriseHookCodexRequirementsLayoutResolver = resolveWindowsCodexRequirementsLayout
+var enterpriseHookCodexRuntimeRegistryReader = connector.ResolveWindowsCodexManagedRuntimeRegistry
+var enterpriseHookCodexRequirementsRemover = connector.RemoveWindowsCodexMachineRequirements
+var enterpriseHookCodexRequirementsReconciler = connector.ReconcileWindowsCodexMachineRequirements
+var enterpriseHookCodexTargetsPublisher = connector.PublishWindowsCodexManagedRuntimeTargets
+var enterpriseHookClaudePolicyEnsurer = enterprisehooks.EnsureWindowsStandaloneClaudeManagedPolicy
+var enterpriseHookClaudePolicyDeactivator = enterprisehooks.DeactivateWindowsClaudeManagedPolicy
+var enterpriseHookCursorPolicyEnsurer = enterprisehooks.EnsureWindowsStandaloneCursorManagedPolicy
+var enterpriseHookCursorPolicyDeactivator = enterprisehooks.DeactivateWindowsCursorManagedPolicy
 
 // enterpriseHookRemovedAccountNote follows each failure status and verify
 // report as a warning for a deleted account whose profile folder was removed.
@@ -219,6 +232,7 @@ func syncEnterpriseHookManagedMachineEnrollments(
 	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		return nil
 	}
+	configured := windowsEnterpriseConfiguredMachinePolicies()
 	desiredClaude, desiredCodex, err := windowsEnterpriseDesiredEnrollments(manifest)
 	if err != nil {
 		return err
@@ -227,9 +241,14 @@ func syncEnterpriseHookManagedMachineEnrollments(
 	if err != nil {
 		return err
 	}
-	currentClaude, claudeActive, err := enterprisehooks.ReadWindowsClaudeManagedPolicyTargets()
+	codexOpts, err := enterpriseHookCodexRequirementsLayoutResolver("reconcile")
 	if err != nil {
-		if publishExact || len(desiredClaude) == 0 {
+		return err
+	}
+	currentClaude, claudeActive, err := enterpriseHookClaudePolicyTargetsReader()
+	if err != nil {
+		if (!cfg.StandaloneEnterprise() || !configured["claudecode"]) &&
+			(publishExact || len(desiredClaude) == 0) {
 			return err
 		}
 		// The active global command remains fail-closed while protected state
@@ -239,9 +258,33 @@ func syncEnterpriseHookManagedMachineEnrollments(
 		currentClaude = nil
 		claudeActive = false
 	}
+	if cfg.StandaloneEnterprise() {
+		switch {
+		case configured["claudecode"] && !claudeActive:
+			if err := enterpriseHookClaudePolicyEnsurer(connector.SetupOpts{
+				APIAddr: apiAddr, HookExecutable: codexOpts.HookBinary,
+				HookContractID: enterpriseHookMachinePolicyContract(manifest),
+			}); err != nil {
+				return fmt.Errorf("ensure configured Claude machine policy: %w", err)
+			}
+			currentClaude, claudeActive, err = enterpriseHookClaudePolicyTargetsReader()
+			if err != nil {
+				return fmt.Errorf("read ensured Claude machine policy: %w", err)
+			}
+			if !claudeActive {
+				return errors.New("configured Claude machine policy did not become active")
+			}
+		case !configured["claudecode"] && claudeActive:
+			if err := enterpriseHookClaudePolicyDeactivator(); err != nil {
+				return fmt.Errorf("deactivate removed Claude connector: %w", err)
+			}
+			currentClaude = nil
+			claudeActive = false
+		}
+	}
 	if publishExact {
 		if claudeActive || len(desiredClaude) > 0 {
-			if err := enterprisehooks.PublishWindowsClaudeManagedPolicyTargets(desiredClaude); err != nil {
+			if err := enterpriseHookClaudePolicyTargetsPublisher(desiredClaude); err != nil {
 				return err
 			}
 		}
@@ -256,19 +299,29 @@ func syncEnterpriseHookManagedMachineEnrollments(
 				retained = append(retained, sid)
 			}
 		}
-		if err := enterprisehooks.PublishWindowsClaudeManagedPolicyTargets(retained); err != nil {
+		if err := enterpriseHookClaudePolicyTargetsPublisher(retained); err != nil {
 			return err
 		}
 	}
 
-	codexOpts, err := resolveWindowsCodexRequirementsLayout("reconcile")
-	if err != nil {
-		return err
-	}
-	currentCodex, err := connector.ResolveWindowsCodexManagedRuntimeRegistry(
+	currentCodex, err := enterpriseHookCodexRuntimeRegistryReader(
 		codexOpts.HookBinary,
 	)
 	var deferredCodexErr error
+	if cfg.StandaloneEnterprise() && configured["codex"] && (err != nil || !currentCodex.Active) {
+		codexOpts.CodexTargetEnabled = true
+		report, reconcileErr := enterpriseHookCodexRequirementsReconciler(codexOpts)
+		if reconcileErr != nil {
+			return fmt.Errorf("ensure configured Codex machine requirements: %w", reconcileErr)
+		}
+		if !report.OK {
+			return errors.New("configured Codex machine requirements were not published")
+		}
+		currentCodex, err = enterpriseHookCodexRuntimeRegistryReader(codexOpts.HookBinary)
+		if err == nil && !currentCodex.Active {
+			return errors.New("configured Codex machine requirements did not become active")
+		}
+	}
 	if err != nil {
 		if publishExact || len(desiredCodex) == 0 {
 			deferredCodexErr = err
@@ -276,9 +329,9 @@ func syncEnterpriseHookManagedMachineEnrollments(
 		// As above, defer only to the trusted machine-policy reconciler. The
 		// target stays unregistered/fail-closed until final exact publication,
 		// but still revoke an independent stale Cursor enrollment below.
-	} else if len(desiredCodex) == 0 {
+	} else if len(desiredCodex) == 0 && (!cfg.StandaloneEnterprise() || !configured["codex"]) {
 		if currentCodex.Active {
-			report, err := connector.RemoveWindowsCodexMachineRequirements(codexOpts)
+			report, err := enterpriseHookCodexRequirementsRemover(codexOpts)
 			if err != nil {
 				return err
 			}
@@ -291,7 +344,7 @@ func syncEnterpriseHookManagedMachineEnrollments(
 		if !currentCodex.Active {
 			return fmt.Errorf("Codex managed policy is absent after target runtime installation")
 		}
-		if err := connector.PublishWindowsCodexManagedRuntimeTargets(codexOpts, desiredCodex); err != nil {
+		if err := enterpriseHookCodexTargetsPublisher(codexOpts, desiredCodex); err != nil {
 			return err
 		}
 	} else if currentCodex.Active {
@@ -306,25 +359,44 @@ func syncEnterpriseHookManagedMachineEnrollments(
 				retained = append(retained, target)
 			}
 		}
-		if err := connector.PublishWindowsCodexManagedRuntimeTargets(codexOpts, retained); err != nil {
+		if err := enterpriseHookCodexTargetsPublisher(codexOpts, retained); err != nil {
 			return err
 		}
 	}
 
-	currentCursor, cursorActive, err := enterprisehooks.ReadWindowsCursorManagedPolicyTargets()
+	currentCursor, cursorActive, err := enterpriseHookCursorPolicyTargetsReader()
 	if err != nil {
-		if publishExact || len(desiredCursor) == 0 {
+		if (!cfg.StandaloneEnterprise() || !configured["cursor"]) &&
+			(publishExact || len(desiredCursor) == 0) {
 			return err
 		}
 		currentCursor = nil
 		cursorActive = false
+	}
+	if cfg.StandaloneEnterprise() {
+		switch {
+		case configured["cursor"] && !cursorActive:
+			if err := enterpriseHookCursorPolicyEnsurer(connector.SetupOpts{
+				APIAddr: apiAddr, HookExecutable: codexOpts.HookBinary,
+			}); err != nil {
+				return fmt.Errorf("ensure configured Cursor machine policy: %w", err)
+			}
+			currentCursor = nil
+			cursorActive = true
+		case !configured["cursor"] && cursorActive:
+			if err := enterpriseHookCursorPolicyDeactivator(); err != nil {
+				return fmt.Errorf("deactivate removed Cursor connector: %w", err)
+			}
+			currentCursor = nil
+			cursorActive = false
+		}
 	}
 	if publishExact {
 		if len(desiredCursor) > 0 && !cursorActive {
 			return fmt.Errorf("Cursor enterprise policy is absent after target runtime installation")
 		}
 		if cursorActive || len(desiredCursor) == 0 {
-			if err := enterprisehooks.PublishWindowsCursorManagedPolicyTargets(desiredCursor); err != nil {
+			if err := enterpriseHookCursorPolicyTargetsPublisher(desiredCursor); err != nil {
 				return err
 			}
 		}
@@ -344,7 +416,7 @@ func syncEnterpriseHookManagedMachineEnrollments(
 			retainedCursor = append(retainedCursor, target)
 		}
 	}
-	if err := enterprisehooks.PublishWindowsCursorManagedPolicyTargets(retainedCursor); err != nil {
+	if err := enterpriseHookCursorPolicyTargetsPublisher(retainedCursor); err != nil {
 		return err
 	}
 	return deferredCodexErr
@@ -463,26 +535,27 @@ func verifyEnterpriseHookManagedEnrollments(
 	if err != nil {
 		return err
 	}
-	currentClaude, claudeActive, err := enterprisehooks.ReadWindowsClaudeManagedPolicyTargets()
+	currentClaude, claudeActive, err := enterpriseHookClaudePolicyTargetsReader()
 	if err != nil {
 		return err
 	}
-	if claudeActive != (len(desiredClaude) > 0) ||
+	expected := windowsEnterpriseConfiguredMachinePolicies()
+	if claudeActive != (expected["claudecode"] || len(desiredClaude) > 0) ||
 		!equalWindowsEnterpriseStringSet(currentClaude, desiredClaude) {
 		return fmt.Errorf("Claude protected SID enrollment does not match the enabled manifest")
 	}
 
-	codexOpts, err := resolveWindowsCodexRequirementsLayout("verify")
+	codexOpts, err := enterpriseHookCodexRequirementsLayoutResolver("verify")
 	if err != nil {
 		return err
 	}
-	currentCodex, err := connector.ResolveWindowsCodexManagedRuntimeRegistry(
+	currentCodex, err := enterpriseHookCodexRuntimeRegistryReader(
 		codexOpts.HookBinary,
 	)
 	if err != nil {
 		return err
 	}
-	if currentCodex.Active != (len(desiredCodex) > 0) ||
+	if currentCodex.Active != (expected["codex"] || len(desiredCodex) > 0) ||
 		len(currentCodex.Targets) != len(desiredCodex) {
 		return fmt.Errorf("Codex protected SID enrollment does not match the enabled manifest")
 	}
@@ -495,11 +568,11 @@ func verifyEnterpriseHookManagedEnrollments(
 			return fmt.Errorf("Codex protected SID enrollment does not match the enabled manifest")
 		}
 	}
-	currentCursor, cursorActive, err := enterprisehooks.ReadWindowsCursorManagedPolicyTargets()
+	currentCursor, cursorActive, err := enterpriseHookCursorPolicyTargetsReader()
 	if err != nil {
 		return err
 	}
-	if cursorActive != (len(desiredCursor) > 0) || len(currentCursor) != len(desiredCursor) {
+	if cursorActive != (expected["cursor"] || len(desiredCursor) > 0) || len(currentCursor) != len(desiredCursor) {
 		return fmt.Errorf("Cursor protected SID enrollment does not match the enabled manifest")
 	}
 	if err := verifyWindowsEnterpriseManagedPolicyIdentities(
@@ -517,6 +590,20 @@ func verifyEnterpriseHookManagedEnrollments(
 		}
 	}
 	return nil
+}
+
+func windowsEnterpriseConfiguredMachinePolicies() map[string]bool {
+	configured := map[string]bool{}
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return configured
+	}
+	for _, name := range enterprisehooks.EffectiveWindowsStandaloneHookConnectors(cfg) {
+		switch name {
+		case "claudecode", "codex", "cursor":
+			configured[name] = true
+		}
+	}
+	return configured
 }
 
 func verifyWindowsEnterpriseManagedPolicyIdentities(

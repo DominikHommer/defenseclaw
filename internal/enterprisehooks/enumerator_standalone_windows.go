@@ -75,6 +75,10 @@ func windowsUnenrolledConsequence(connector string) string {
 		return "it runs without DefenseClaw hooks"
 	}
 	switch strings.ToLower(strings.TrimSpace(connector)) {
+	case "claudecode":
+		if !windowsClaudeMachinePolicyPublished() {
+			return windowsClaudeUnpublishedConsequence
+		}
 	case "cursor":
 		if !windowsCursorMachinePolicyPublished() {
 			return windowsCursorUnpublishedConsequence
@@ -87,14 +91,26 @@ func windowsUnenrolledConsequence(connector string) string {
 	return "its machine-policy hooks refuse this user's tool calls until it is enrolled"
 }
 
+// windowsClaudeUnpublishedConsequence names the absence of Claude Code's
+// machine hooks file, including after the last enrolled user is removed.
+const windowsClaudeUnpublishedConsequence = "Claude Code's machine hooks file is not published, so it runs without DefenseClaw hooks"
+
+// windowsClaudeMachinePolicyPublished reads the protected policy artifacts.
+// An unreadable or invalid policy is treated as present when describing an
+// unenrolled user's calls; clean absence is the known unprotected state.
+// Replaced in tests.
+var windowsClaudeMachinePolicyPublished = func() bool {
+	_, active, err := ReadWindowsClaudeManagedPolicyTargets()
+	return err != nil || active
+}
+
 // windowsCursorUnpublishedConsequence is the unprotected-agent consequence for
 // Cursor while its machine hooks file is not published.
-const windowsCursorUnpublishedConsequence = "no user is enrolled for Cursor, so the guardian has not published Cursor's machine hooks file and it runs without DefenseClaw hooks"
+const windowsCursorUnpublishedConsequence = "Cursor's configured machine hook is missing; the guardian must restore it, and Cursor runs without DefenseClaw hooks until then"
 
 // windowsCursorMachinePolicyPublished reports whether Cursor's machine hooks
-// file is in force. The guardian publishes it only while at least one user is
-// enrolled for Cursor (an empty target set deactivates it), so with no
-// enrolled Cursor user there is no machine hook to refuse anyone. A policy
+// file is in force. The guardian keeps it published for a configured Cursor
+// connector even when no user is enrolled. A policy
 // that cannot be read or validated counts as published: its adapter refuses
 // unregistered users. Replaced in tests.
 var windowsCursorMachinePolicyPublished = func() bool {

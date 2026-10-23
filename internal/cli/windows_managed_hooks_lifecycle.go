@@ -347,8 +347,8 @@ func runWindowsManagedHooksLifecycleWithStagedRetire(
 		// Mirror of the Cursor reclaim invariant: Capture may reclaim an
 		// identity-drifted Claude managed policy, in which case the returned
 		// snapshot has PolicyExisted=false even though `prior` was computed
-		// from the pre-reclaim active state. The journal validator enforces
-		// (Claude.PolicyExisted == (len(PriorClaudeTargetSIDs) != 0)); align
+		// from the pre-reclaim active state. The journal validator binds target
+		// presence to the policy snapshot; align
 		// them by zeroing `prior` when the snapshot is empty. The subsequent
 		// Claude install re-publishes targets fresh.
 		if !snapshot.PolicyExisted {
@@ -376,8 +376,7 @@ func runWindowsManagedHooksLifecycleWithStagedRetire(
 		// Capture may reclaim an identity-drifted Cursor managed policy, in
 		// which case the returned snapshot has PolicyActive=false even though
 		// priorCursor was computed from the pre-reclaim active state. The
-		// journal validator in validateWindowsManagedHooksLifecycleJournal
-		// enforces (cursorActive == (len(PriorCursorTargets) != 0)), so
+		// journal validator binds target presence to the policy snapshot, so
 		// re-align the two by zeroing priorCursor when the snapshot is
 		// inactive. The subsequent Cursor install re-publishes targets fresh.
 		if !cursorSnapshot.PolicyActive {
@@ -1006,8 +1005,11 @@ func classifyLegacyWindowsManagedHooksActivation(
 	if err != nil {
 		return "", err
 	}
-	if codexRegistry.Active != ctx.opts.CodexTargetEnabled ||
-		len(codexRegistry.Targets) != 0 {
+	// A pre-1.0.4 standalone install could leave Codex inactive when its
+	// enrollment was empty. Accept that exact legacy state so upgrade can
+	// publish the configured machine guard during reconciliation.
+	if len(codexRegistry.Targets) != 0 ||
+		(codexRegistry.Active && !ctx.opts.CodexTargetEnabled) {
 		return "", errors.New(
 			"legacy deployment has no Guardian activation but Codex enrollment is not the exact preactivation form",
 		)
@@ -2277,7 +2279,7 @@ func windowsManagedHooksPartialClaudeTargets(
 		}
 		return []string{}, nil
 	}
-	if len(currentTargets) == 0 || !sort.StringsAreSorted(currentTargets) {
+	if !sort.StringsAreSorted(currentTargets) {
 		return nil, errors.New("active Claude machine enrollment has a noncanonical target set")
 	}
 	allowed := make(map[string]struct{}, len(manifestTargets))
@@ -2311,7 +2313,7 @@ func windowsManagedHooksPartialCursorTargets(
 		}
 		return []enterprisehooks.WindowsCursorManagedRuntimeTarget{}, nil
 	}
-	if len(currentTargets) == 0 || !sort.SliceIsSorted(currentTargets, func(i, j int) bool {
+	if !sort.SliceIsSorted(currentTargets, func(i, j int) bool {
 		return currentTargets[i].SID < currentTargets[j].SID
 	}) {
 		return nil, errors.New("active Cursor machine enrollment has a noncanonical target set")
@@ -2368,14 +2370,14 @@ func validateWindowsManagedHooksLifecycleJournal(
 	if _, err := windowsManagedHooksPartialClaudeTargets(
 		priorAllowedClaudeTargets,
 		journal.PriorClaudeTargetSIDs,
-		len(journal.PriorClaudeTargetSIDs) != 0,
+		journal.Claude.PolicyExisted,
 	); err != nil {
 		return err
 	}
 	if journal.Claude.PolicyExisted != journal.Claude.StateExisted ||
 		len(journal.Claude.Policy) > windowsManagedHooksLifecycleJournalMax ||
 		len(journal.Claude.State) > windowsManagedHooksLifecycleJournalMax ||
-		(journal.Claude.PolicyExisted != (len(journal.PriorClaudeTargetSIDs) != 0)) {
+		(len(journal.PriorClaudeTargetSIDs) != 0 && !journal.Claude.PolicyExisted) {
 		return errors.New("managed-hook lifecycle journal contains an invalid Claude snapshot")
 	}
 	priorAllowedCursorTargets := make([]enterprisehooks.WindowsCursorManagedRuntimeTarget, 0, len(journal.Targets))
@@ -2389,7 +2391,7 @@ func validateWindowsManagedHooksLifecycleJournal(
 	if _, err := windowsManagedHooksPartialCursorTargets(
 		priorAllowedCursorTargets,
 		journal.PriorCursorTargets,
-		len(journal.PriorCursorTargets) != 0,
+		journal.Cursor.PolicyActive,
 	); err != nil {
 		return err
 	}
@@ -2405,7 +2407,7 @@ func validateWindowsManagedHooksLifecycleJournal(
 		(journal.Cursor.AdapterExisted != (journal.Cursor.AdapterSecurityDescriptor != "" && journal.Cursor.AdapterAttributes != 0)) ||
 		(journal.Cursor.StateExisted != (journal.Cursor.StateSecurityDescriptor != "" && journal.Cursor.StateAttributes != 0)) ||
 		(journal.Cursor.ReceiptExisted != (journal.Cursor.ReceiptSecurityDescriptor != "" && journal.Cursor.ReceiptAttributes != 0)) ||
-		(cursorActive != (len(journal.PriorCursorTargets) != 0)) {
+		(len(journal.PriorCursorTargets) != 0 && !cursorActive) {
 		return errors.New("managed-hook lifecycle journal contains an invalid Cursor snapshot")
 	}
 	if err := validateWindowsManagedHooksLifecycleSelectors(

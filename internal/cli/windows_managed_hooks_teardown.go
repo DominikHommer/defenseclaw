@@ -558,6 +558,7 @@ func runWindowsManagedHooksTeardown(
 		identity.CodexTargets,
 		identity.CursorTargets = windowsManagedHooksTeardownExpectedEnrollment(
 		activation.State,
+		opts.CodexTargetEnabled,
 		claudeTargets,
 		codexTargets,
 		cursorTargets,
@@ -1662,7 +1663,7 @@ func validateWindowsManagedHooksTeardownEnrollment(
 	currentCursor []enterprisehooks.WindowsCursorManagedRuntimeTarget,
 	cursorActive bool,
 ) error {
-	if claudeActive != (len(identity.ClaudeTargetSIDs) != 0) ||
+	if (len(identity.ClaudeTargetSIDs) != 0 && !claudeActive) ||
 		!equalWindowsEnterpriseStringSet(currentClaude, identity.ClaudeTargetSIDs) {
 		return errors.New("Claude machine enrollment does not match the authenticated activation state")
 	}
@@ -1686,7 +1687,7 @@ func validateWindowsManagedHooksTeardownEnrollment(
 			return errors.New("Codex machine enrollment does not match the authenticated activation state")
 		}
 	}
-	if cursorActive != (len(identity.CursorTargets) != 0) ||
+	if (len(identity.CursorTargets) != 0 && !cursorActive) ||
 		len(currentCursor) != len(identity.CursorTargets) {
 		return errors.New("Cursor machine enrollment does not match the authenticated activation state")
 	}
@@ -1771,6 +1772,7 @@ func validateWindowsManagedHooksTeardownDeployment(
 
 func windowsManagedHooksTeardownExpectedEnrollment(
 	activationState string,
+	codexConfigured bool,
 	claudeTargets []string,
 	codexTargets []connector.WindowsCodexManagedRuntimeTarget,
 	cursorTargets []enterprisehooks.WindowsCursorManagedRuntimeTarget,
@@ -1780,7 +1782,7 @@ func windowsManagedHooksTeardownExpectedEnrollment(
 	[]connector.WindowsCodexManagedRuntimeTarget,
 	[]enterprisehooks.WindowsCursorManagedRuntimeTarget,
 ) {
-	codexPolicyActive := len(codexTargets) != 0
+	codexPolicyActive := codexConfigured || len(codexTargets) != 0
 	if activationState == windowsManagedHooksNeverActivated {
 		return []string{}, codexPolicyActive,
 			[]connector.WindowsCodexManagedRuntimeTarget{},
@@ -2039,17 +2041,17 @@ func validateWindowsManagedHooksTeardownJournal(
 	if journal.ActivationState == windowsManagedHooksActivated {
 		if !equalWindowsEnterpriseStringSet(allowedClaudeTargets, identity.ClaudeTargetSIDs) ||
 			!equalWindowsManagedHooksCodexTargets(allowedCodexTargets, identity.CodexTargets) ||
-			identity.CodexPolicyActive != (len(allowedCodexTargets) != 0) {
+			(len(allowedCodexTargets) != 0 && !identity.CodexPolicyActive) {
 			return errors.New("activated teardown journal does not contain the exact manifest enrollment")
 		}
 	} else if len(identity.ClaudeTargetSIDs) != 0 || len(identity.CodexTargets) != 0 ||
-		identity.CodexPolicyActive != (len(allowedCodexTargets) != 0) {
+		(len(allowedCodexTargets) != 0 && !identity.CodexPolicyActive) {
 		return errors.New("never-activated teardown journal contains an invalid machine enrollment")
 	}
 	if journal.Claude.PolicyExisted != journal.Claude.StateExisted ||
 		len(journal.Claude.Policy) > windowsManagedHooksTeardownJournalMax ||
 		len(journal.Claude.State) > windowsManagedHooksTeardownJournalMax ||
-		(journal.Claude.PolicyExisted != (len(journal.ClaudeTargetSIDs) != 0)) {
+		(len(journal.ClaudeTargetSIDs) != 0 && !journal.Claude.PolicyExisted) {
 		return errors.New("managed-hook teardown journal contains an invalid Claude snapshot")
 	}
 	allowedCursorTargets := make([]enterprisehooks.WindowsCursorManagedRuntimeTarget, 0, len(identity.Targets))
@@ -2079,7 +2081,7 @@ func validateWindowsManagedHooksTeardownJournal(
 		(journal.Cursor.AdapterExisted != (journal.Cursor.AdapterSecurityDescriptor != "" && journal.Cursor.AdapterAttributes != 0)) ||
 		(journal.Cursor.StateExisted != (journal.Cursor.StateSecurityDescriptor != "" && journal.Cursor.StateAttributes != 0)) ||
 		(journal.Cursor.ReceiptExisted != (journal.Cursor.ReceiptSecurityDescriptor != "" && journal.Cursor.ReceiptAttributes != 0)) ||
-		(cursorSnapshotActive != (len(journal.CursorTargets) != 0)) {
+		(len(journal.CursorTargets) != 0 && !cursorSnapshotActive) {
 		return errors.New("managed-hook teardown journal contains an invalid Cursor snapshot")
 	}
 	return nil
