@@ -1509,6 +1509,86 @@ def test_setup_refuses_agent_settings_before_it_changes_anything(monkeypatch, tm
     assert "defenseclaw-gateway restart" not in err
 
 
+@pytest.mark.parametrize("connector", ("claudecode", "copilot"))
+@pytest.mark.parametrize("requested_scope", ("new", "global"))
+def test_setup_prechecks_the_requested_workspace_when_switching_away_from_refusal(
+    monkeypatch, tmp_path: Path, connector: str, requested_scope: str,
+) -> None:
+    old_workspace = tmp_path / "old-workspace"
+    new_workspace = tmp_path / "new-workspace"
+    old_workspace.mkdir()
+    new_workspace.mkdir()
+    cfg = _config(tmp_path)
+    cfg.claw = SimpleNamespace(workspace_dir=str(old_workspace))
+    seen: list[list[str]] = []
+    touched: list[str] = []
+
+    def check(argv, **_kwargs):
+        seen.append(list(argv))
+        scope = argv[argv.index("--workspace-dir") + 1] if "--workspace-dir" in argv else str(old_workspace)
+        refused = scope == str(old_workspace)
+        payload = {
+            "connector": connector, "action": "check-agent-settings", "refused": refused,
+            "reason": "old workspace sets disableAllHooks=true" if refused else "",
+        }
+        return SimpleNamespace(returncode=1 if refused else 0, stdout=json.dumps(payload) + "\n", stderr="")
+
+    monkeypatch.setattr(cmd_setup, "_gateway_lifecycle_executable", lambda: "/opt/dc/defenseclaw-gateway")
+    monkeypatch.setattr(cmd_setup, "run_pinned_executable", check)
+    monkeypatch.setattr(
+        cmd_setup, "_check_connector_version_supported_for_setup",
+        lambda *_args, **_kwargs: touched.append("version") or False,
+    )
+    monkeypatch.setattr(cmd_setup, "_capture_setup_config_snapshot", lambda *_a, **_k: touched.append("snapshot"))
+    requested = str(new_workspace) if requested_scope == "new" else None
+    assert cmd_setup._apply_hook_connector_setup(
+        SimpleNamespace(cfg=cfg), connector=connector, restart=True, workspace_dir=requested,
+    ) is False
+    assert seen and seen[0][seen[0].index("--workspace-dir") + 1] == (str(new_workspace) if requested else "")
+    assert touched == ["version"]
+    assert cfg.claw.workspace_dir == str(old_workspace)
+
+
+def test_setup_codex_precheck_uses_selected_root_before_migrating(monkeypatch, tmp_path: Path) -> None:
+    old_root = tmp_path / "old-codex"
+    new_root = tmp_path / "new-codex"
+    old_root.mkdir()
+    new_root.mkdir()
+    (old_root / "config.toml").write_text("[features]\nhooks = false\n", encoding="utf-8")
+    (new_root / "config.toml").write_text("[features]\nhooks = true\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(new_root))
+    monkeypatch.setenv("DEFENSECLAW_EXPLICIT_CODEX_SETUP", str(old_root))
+    cfg = _config(tmp_path)
+    touched: list[str] = []
+    seen_env: list[dict[str, str]] = []
+
+    def check(_argv, **kwargs):
+        env = kwargs["env"]
+        seen_env.append(env)
+        # The gateway pins an existing registration to the old root unless
+        # the explicit setup marker matches the selected CODEX_HOME.
+        root = new_root if env.get("DEFENSECLAW_EXPLICIT_CODEX_SETUP") == str(new_root) else old_root
+        refused = "hooks = false" in (root / "config.toml").read_text(encoding="utf-8")
+        payload = {
+            "connector": "codex", "action": "check-agent-settings", "refused": refused,
+            "reason": f"Codex config {root / 'config.toml'} turns hooks off" if refused else "",
+        }
+        return SimpleNamespace(returncode=1 if refused else 0, stdout=json.dumps(payload) + "\n", stderr="")
+
+    monkeypatch.setattr(cmd_setup, "_gateway_lifecycle_executable", lambda: "/opt/dc/defenseclaw-gateway")
+    monkeypatch.setattr(cmd_setup, "run_pinned_executable", check)
+    monkeypatch.setattr(
+        cmd_setup, "_check_connector_version_supported_for_setup",
+        lambda *_args, **_kwargs: touched.append("version") or False,
+    )
+    assert cmd_setup._apply_hook_connector_setup(
+        SimpleNamespace(cfg=cfg), connector="codex", restart=True,
+    ) is False
+    assert seen_env and seen_env[0]["DEFENSECLAW_EXPLICIT_CODEX_SETUP"] == str(new_root)
+    assert seen_env[0]["CODEX_HOME"] == str(new_root)
+    assert touched == ["version"]
+
+
 @pytest.mark.parametrize(
     ("connector", "reason", "cause"),
     [
