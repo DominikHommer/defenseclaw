@@ -536,6 +536,14 @@ func copilotVSCodeStatus(opts Options, state *State) {
 		if plugin {
 			state.conflict("DefenseClaw's Copilot plugin remains for an account outside enrollment: %s; run the guardian to remove it", CopilotPluginHooksPath(home))
 		}
+		if !file && !plugin {
+			left, err := CopilotVSCodeUserFilesLeft(home, opts.goos(), opts.HookBinary)
+			if err != nil {
+				state.conflict("cannot inspect Copilot Local files outside enrollment in %s: %v", home, err)
+			} else if left {
+				state.conflict("an older DefenseClaw Copilot Local hook or plugin remains outside enrollment in %s; run the guardian to remove it", home)
+			}
+		}
 	}
 	if len(opts.CopilotUserHomes) == 0 {
 		return

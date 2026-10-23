@@ -124,6 +124,26 @@ func TestCopilotVSCodeStatusRejectsHookOutsideEnrollment(t *testing.T) {
 	if len(state.Conflicts) != 0 {
 		t.Fatalf("cleaned unenrolled account is still a conflict: %+v", state)
 	}
+	released, err := os.ReadFile(filepath.Join("testdata", "copilot-vscode-1.0.0", "linux-hooks.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, CopilotVSCodeLocalHookFilePath(home), string(released))
+	state = State{}
+	copilotVSCodeStatus(opts, &state)
+	if len(state.Conflicts) == 0 {
+		t.Fatal("released Copilot Local hook in an unenrolled home was reported healthy")
+	}
+	if _, err := EnsureCopilotVSCodeUser(CopilotVSCodeUserRequest{
+		Home: home, GOOS: "linux", HookBinary: testHookBinary,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state = State{}
+	copilotVSCodeStatus(opts, &state)
+	if len(state.Conflicts) != 0 {
+		t.Fatalf("removed released Local hook is still a conflict: %+v", state)
+	}
 }
 
 // A managed 1.0.0 install wrote the Local hook file and plugin without the
