@@ -15,11 +15,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
-// On Windows the standalone guardian publishes Cursor's enterprise
-// hooks.json only while a user is enrolled for Cursor. `enterprise policy
-// show` and `verify` used to say only that the file does not exist; they now
-// say why it can be absent and where to look.
-func TestWindowsCursorVerifyExplainsAnUnpublishedHooksFile(t *testing.T) {
+// The standalone guardian keeps Cursor's machine hook published even when
+// no user is enrolled. Verify reports an absent hooks.json as drift and names
+// the action required to restore protection.
+func TestWindowsCursorVerifyReportsMissingMachineHook(t *testing.T) {
 	opts := windowsTestOptions(t)
 	state, err := cursorTarget{}.Verify(opts)
 	if err != nil {
@@ -29,9 +28,14 @@ func TestWindowsCursorVerifyExplainsAnUnpublishedHooksFile(t *testing.T) {
 	if state.Covered || len(state.Conflicts) != 1 {
 		t.Fatalf("state = %+v, want one conflict and not covered", state)
 	}
-	want := hooks + " does not exist: the guardian publishes it only while at least one user is enrolled for Cursor"
-	if !strings.HasPrefix(state.Conflicts[0], want) || !strings.Contains(state.Conflicts[0], "enterprise windows status") {
-		t.Fatalf("conflict = %q, want it to start with %q and point at enterprise windows status", state.Conflicts[0], want)
+	want := hooks + " does not exist: Cursor's configured machine hook is missing; this is a protection failure"
+	if !strings.HasPrefix(state.Conflicts[0], want) {
+		t.Fatalf("conflict = %q, want it to start with %q", state.Conflicts[0], want)
+	}
+	for _, action := range []string{"Stop Cursor use until repaired", "enterprise windows reconcile --profile standalone", "enterprise windows repair --profile standalone"} {
+		if !strings.Contains(state.Conflicts[0], action) {
+			t.Errorf("conflict = %q, want %q", state.Conflicts[0], action)
+		}
 	}
 }
 
