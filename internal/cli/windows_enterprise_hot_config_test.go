@@ -633,19 +633,19 @@ func TestWindowsBundleConfigApplyUsesSharedRestartClassification(t *testing.T) {
 	}
 }
 
-// A gateway outage after the signed config has been committed leaves the
-// candidate installed for a later receipt confirmation. It must not report
-// the temporary loss of a policy answer as a rejected bundle.
-func TestWindowsHotBundleGatewayOutageLeavesCandidatePending(t *testing.T) {
+// A signed config that never reached a responding gateway cannot be kept as
+// an applied receipt. If the gateway remains unavailable through adoption,
+// restore the previous bytes and stop it when the restored policy cannot be
+// proven either. A later outage after adoption is covered by Finish tests.
+func TestWindowsHotBundleNeverAdoptedDuringOutageRestoresPreviousConfig(t *testing.T) {
 	const previous = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 500\n"
 	const candidate = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 600\n"
 	const enrolled = "config_version: 9\nenterprise:\n  enrollment:\n    exclude_users: [dcw-eo1]\n"
 	for _, tc := range []struct {
 		name, previous, candidate string
-		refresh                   int
 	}{
 		{name: "restart setting", previous: previous, candidate: candidate},
-		{name: "enrollment", previous: enrolled, candidate: strings.Replace(enrolled, "[dcw-eo1]", "[dcw-eo1, dcw-eo5]", 1), refresh: 1},
+		{name: "enrollment", previous: enrolled, candidate: strings.Replace(enrolled, "[dcw-eo1]", "[dcw-eo1, dcw-eo5]", 1)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			host, opts := newHotConfigHost(t, tc.previous, tc.candidate)
@@ -658,10 +658,11 @@ func TestWindowsHotBundleGatewayOutageLeavesCandidatePending(t *testing.T) {
 			applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
 				&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
 			installed, err := os.ReadFile(host.configPath)
-			if !applied || err != nil || string(installed) != tc.candidate || len(host.writes) != 1 || len(result.Errors) != 0 ||
-				host.refreshes != tc.refresh {
-				t.Fatalf("gateway outage: applied=%t config=%q writes=%q refreshes=%d errors=%+v read=%v",
-					applied, installed, host.writes, host.refreshes, result.Errors, err)
+			if applied || err != nil || string(installed) != tc.previous ||
+				!windowsBundleHasCode(result.Errors, "bundle_policy_not_adopted") ||
+				!opts.hotConfigRestoreFailed || host.stops != 1 || host.refreshes != 0 {
+				t.Fatalf("unadopted bundle: applied=%t config=%q stops=%d refreshes=%d errors=%+v read=%v",
+					applied, installed, host.stops, host.refreshes, result.Errors, err)
 			}
 		})
 	}

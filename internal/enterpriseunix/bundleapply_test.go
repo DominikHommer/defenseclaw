@@ -564,6 +564,89 @@ func TestBundleRepeatAfterAuthorizedRestartDrift(t *testing.T) {
 	}
 }
 
+// A plain ensure in bundle mode repairs an in-place edit from the current
+// signed bundle. Its generation must retain that bundle's identity; a later
+// delivery of the same bundle must use the original confirmed receipt.
+func TestBundlePlainEnsureRepairKeepsConfirmedGeneration(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			b := newBundleHost(t, goos)
+			_, _, restart := bundleConfigs(b.testHost)
+			path := b.dir(1, restart)
+			requireOK(t, b.apply(path))
+			first := b.receipt(bundleID(1))
+			configPath := b.env.P(b.env.Layout.ConfigPath)
+			drift := strings.Replace(restart, "hook_self_heal: false", "hook_self_heal: true", 1)
+			if drift == restart {
+				t.Fatal("restart setting missing")
+			}
+			if err := os.WriteFile(configPath, []byte(drift), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			requireOK(t, b.run(Options{Action: ActionEnsure}))
+			generation, err := configwrite.ReadGenerationState(configPath)
+			if err != nil || generation.BundleID != bundleID(1) || generation.BundleVersion != 1 ||
+				generation.Actor != first.Principal || generation.SignerKeyID != first.SignerKeyID {
+				t.Fatalf("plain ensure generation=%+v error=%v", generation, err)
+			}
+			before, err := b.env.bundleStore().Receipts()
+			if err != nil {
+				t.Fatal(err)
+			}
+			repeated := b.apply(path)
+			requireOK(t, repeated)
+			after, err := b.env.bundleStore().Receipts()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if repeated.Bundle == nil || repeated.Bundle.State != enterprisebundle.StateConfirmed ||
+				repeated.Bundle.ReceiptID != first.ReceiptID || len(after) != len(before) {
+				t.Fatalf("repeat=%+v receipts %d -> %d", repeated, len(before), len(after))
+			}
+		})
+	}
+}
+
+// An older lifecycle could leave equal config bytes under an unattributed
+// generation. Reapplying the current signed bundle must bind that generation
+// without requiring a byte change, including after an upgrade.
+func TestBundleRepeatRebindsUnattributedEqualBytes(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		for _, fromVersion := range []string{"0.8.10", "1.0.0", "1.0.1", "1.0.2", "1.0.3"} {
+			t.Run(goos+"/"+fromVersion, func(t *testing.T) {
+				b := newBundleHost(t, goos)
+				b.env.ProductVersion = fromVersion
+				v1, _, _ := bundleConfigs(b.testHost)
+				path := b.dir(1, v1)
+				requireOK(t, b.apply(path))
+				b.env.ProductVersion = "1.0.4"
+				first := b.receipt(bundleID(1))
+				configPath := b.env.P(b.env.Layout.ConfigPath)
+				_, err := configwrite.Locked(t.Context(), configPath, configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "pre-upgrade ensure"},
+					func() (bool, error) { return true, nil })
+				if err != nil {
+					t.Fatal(err)
+				}
+				before, err := configwrite.ReadGenerationState(configPath)
+				if err != nil || before.BundleID != "" {
+					t.Fatalf("unattributed setup=%+v error=%v", before, err)
+				}
+				repeated := b.apply(path)
+				requireOK(t, repeated)
+				generation, err := configwrite.ReadGenerationState(configPath)
+				if err != nil || generation.Generation <= before.Generation || generation.BundleID != bundleID(1) ||
+					generation.BundleVersion != 1 || generation.Actor != first.Principal || generation.SignerKeyID != first.SignerKeyID {
+					t.Fatalf("rebound generation=%+v previous=%+v error=%v", generation, before, err)
+				}
+				if repeated.Bundle == nil || repeated.Bundle.State != enterprisebundle.StateConfirmed ||
+					repeated.Bundle.ReceiptID != first.ReceiptID {
+					t.Fatalf("repeat=%+v", repeated)
+				}
+			})
+		}
+	}
+}
+
 func TestUnixBundleRefusesDeviceKeyMoveBeforeChangingConfirmedPolicy(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {

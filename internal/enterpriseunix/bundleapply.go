@@ -156,6 +156,32 @@ func (e *Env) currentBundleConfig(store *enterprisebundle.Store) ([]byte, *enter
 	return raw, st.Current, err
 }
 
+// currentBundleGenerationOptions attributes a write of the current bundle's
+// rendered config. The state pins the stored manifest, so its signed
+// principal remains available even after the confirmed receipt was pruned.
+func currentBundleGenerationOptions(store *enterprisebundle.Store, ref *enterprisebundle.Ref) (configwrite.Options, error) {
+	b, err := store.ReadVersion(ref)
+	if err != nil {
+		return configwrite.Options{}, err
+	}
+	m, err := enterprisebundle.DecodeManifest(b.Manifest)
+	if err != nil {
+		return configwrite.Options{}, err
+	}
+	if m.BundleID != ref.BundleID || m.Version != ref.Version || ref.SignerKeyID == "" {
+		return configwrite.Options{}, fmt.Errorf("confirmed policy bundle %s version %d has incomplete identity", ref.BundleID, ref.Version)
+	}
+	opt, ok := enterprisebundle.GenerationOptions(&enterprisebundle.Receipt{
+		BundleID: ref.BundleID, Version: ref.Version, Principal: m.CreatedBy,
+		SignerKeyID: ref.SignerKeyID, ChangeSummary: m.ChangeSummary,
+	})
+	if !ok {
+		return configwrite.Options{}, fmt.Errorf("confirmed policy bundle %s version %d has no principal", ref.BundleID, ref.Version)
+	}
+	opt.GenerationFloor = ref.ConfigGeneration
+	return opt, nil
+}
+
 // configWriteOptions is how the transaction records the config it installs
 // in config.generation.json: as the lifecycle, or for a bundle as its
 // principal with the bundle change summary and the bundle fields.
@@ -165,8 +191,8 @@ func (l *lifecycle) configWriteOptions() configwrite.Options {
 			return opt
 		}
 	}
-	if opt, ok := enterprisebundle.GenerationOptions(l.repeatGeneration); ok {
-		return opt
+	if l.currentBundleGeneration != nil {
+		return *l.currentBundleGeneration
 	}
 	return configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise " + l.opts.Action}
 }
@@ -187,12 +213,21 @@ func (l *lifecycle) useBundleConfig(raw []byte) error {
 // config cannot be read.
 func (l *lifecycle) useCurrentBundleConfig() bool {
 	env := l.env
+	l.currentBundleGeneration = nil
 	if !env.bundleMode() {
 		return true
 	}
-	raw, _, err := env.currentBundleConfig(env.bundleStore())
+	store := env.bundleStore()
+	raw, ref, err := env.currentBundleConfig(store)
 	if err == nil && raw != nil {
-		err = l.useBundleConfig(raw)
+		var opt configwrite.Options
+		opt, err = currentBundleGenerationOptions(store, ref)
+		if err == nil {
+			err = l.useBundleConfig(raw)
+		}
+		if err == nil {
+			l.currentBundleGeneration = &opt
+		}
 	}
 	if err != nil {
 		l.result.AddError(codeBundleStateUnreadable, "cannot read the current policy bundle, so no config is applied: "+err.Error())
@@ -270,13 +305,9 @@ func (l *lifecycle) prepareBundleMode(ctx context.Context, record *Deployment) (
 				filepath.Join(env.Layout.ConfigDir, "trust", enterprisebundle.AnchorsName), bundleApplyCommand))
 			return stop()
 		}
-		return 0, false
 	}
-	if current != nil {
-		if err := l.useBundleConfig(current); err != nil {
-			r.AddError(codeState, err.Error())
-			return stop()
-		}
+	if current != nil && !l.useCurrentBundleConfig() {
+		return stop()
 	}
 	return 0, false
 }
@@ -525,8 +556,6 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 		// on a healthy host).
 		repeat = true
 		receipt.Principal, receipt.ChangeSummary, receipt.SignerKeyID = res.Manifest.CreatedBy, res.Manifest.ChangeSummary, res.Signature.KeyID
-		l.repeatGeneration = receipt
-		defer func() { l.repeatGeneration = nil }()
 		if err := store.Discard(receipt); err != nil {
 			r.AddWarning(codeBundleStateUnreadable, "could not remove the receipt of the repeated delivery: "+err.Error())
 		}
