@@ -223,6 +223,7 @@ $pairings = [ordered]@{
     InstallFile = 'Install'
     ServiceInstallDirectory = 'ServiceInstall'
     ServiceInstallFile = 'ServiceInstall'
+    SecureClientMarkerDirectory = 'Install'
     StateDirectory = 'State'
     AdminDirectory = 'Admin'
     AdminFile = 'Admin'
