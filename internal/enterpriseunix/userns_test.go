@@ -17,6 +17,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -77,6 +78,140 @@ func TestLinuxManagedUserNamespacesAreDisabledAndDetected(t *testing.T) {
 	requireOK(t, h.run(Options{Action: ActionEnsure}))
 	if got := h.read(userNamespacesConfigPath); got != string(userNamespacesConfig) {
 		t.Fatalf("ensure did not restore persistent restriction: %q", got)
+	}
+}
+
+// ptrace path translation can hide /etc/codex and /etc/claude-code without a
+// user namespace. The managed host must require administrator-only tracing.
+func TestLinuxManagedPtraceRestrictionIsEnforcedAndDetected(t *testing.T) {
+	h := newTestHost(t, "linux")
+	const ptrace = "/proc/sys/kernel/yama/ptrace_scope"
+	path := h.env.P(ptrace)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	installed := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4")})
+	if !installed.Installed || installed.SecurityComplete || !hasMessageCode(installed.Errors, codeUserNamespaces) {
+		t.Fatalf("install trusted a boot with user ptrace available: %+v", installed)
+	}
+	if got := h.read(ptrace); got != "2\n" {
+		t.Fatalf("install left user ptrace available: %q", got)
+	}
+	if got := h.read(userNamespacesConfigPath); got != string(userNamespacesConfig) {
+		t.Fatalf("install did not persist the ptrace restriction: %q", got)
+	}
+	if marker := h.read(userNamespaceBootMarker); marker != "boot-before\n" {
+		t.Fatalf("install did not require a reboot after restricting ptrace: %q", marker)
+	}
+	if err := os.WriteFile(h.env.P(userNamespaceBootIDPath), []byte("boot-after\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		if r := h.run(Options{Action: action}); hasMessageCode(r.Errors, codeUserNamespaces) {
+			t.Fatalf("%s rejected the rebooted restricted host: %+v", action, r.Errors)
+		}
+	}
+	if err := os.WriteFile(path, []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		r := h.run(Options{Action: action})
+		if r.OK || r.SecurityComplete || !hasMessageCode(r.Errors, codeUnprivilegedPtrace) {
+			t.Fatalf("%s missed ptrace drift: %+v", action, r)
+		}
+	}
+	repaired := h.run(Options{Action: ActionEnsure})
+	if !repaired.Installed || repaired.SecurityComplete || !hasMessageCode(repaired.Errors, codeUserNamespaces) {
+		t.Fatalf("ensure did not require reboot after ptrace drift: %+v", repaired)
+	}
+	if got := h.read(ptrace); got != "2\n" {
+		t.Fatalf("ensure did not repair ptrace drift: %q", got)
+	}
+	if err := os.WriteFile(h.env.P(userNamespaceBootIDPath), []byte("boot-third\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if r := h.run(Options{Action: ActionVerify}); hasMessageCode(r.Errors, codeUserNamespaces) {
+		t.Fatalf("ptrace repair did not clear after reboot: %+v", r.Errors)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if r := h.run(Options{Action: ActionStatus}); r.SecurityComplete || !hasMessageCode(r.Errors, codeUnprivilegedPtrace) {
+		t.Fatalf("status trusted a missing ptrace kernel setting: %+v", r)
+	}
+	if r := h.run(Options{Action: ActionEnsure}); r.OK || !hasMessageCode(r.Errors, codeUserNamespaces) {
+		t.Fatalf("ensure invented a missing ptrace kernel setting: %+v", r)
+	}
+}
+
+func TestLinuxMissingPtraceAttestationRequiresReboot(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4")}))
+	if err := os.Remove(h.env.P(ptraceBootMarker)); err != nil {
+		t.Fatal(err)
+	}
+	if r := h.run(Options{Action: ActionVerify}); r.SecurityComplete || !hasMessageCode(r.Errors, codeUserNamespaces) {
+		t.Fatalf("verify trusted a missing ptrace attestation: %+v", r)
+	}
+	repaired := h.run(Options{Action: ActionEnsure})
+	if !repaired.Installed || repaired.SecurityComplete || !hasMessageCode(repaired.Errors, codeUserNamespaces) {
+		t.Fatalf("ensure did not recreate ptrace attestation and require reboot: %+v", repaired)
+	}
+	if marker := h.read(ptraceBootMarker); marker != "boot-before\n" {
+		t.Fatalf("ensure did not attest the current boot: %q", marker)
+	}
+}
+
+func TestLinuxStricterPtraceScopeIsPreserved(t *testing.T) {
+	h := newTestHost(t, "linux")
+	if err := os.WriteFile(h.env.P(sysctlPtraceScope), []byte("3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	installed := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4")})
+	if !installed.Installed || installed.SecurityComplete || !hasMessageCode(installed.Errors, codeUserNamespaces) {
+		t.Fatalf("install trusted an unattested stricter setting: %+v", installed)
+	}
+	if got := h.read(sysctlPtraceScope); got != "3\n" {
+		t.Fatalf("install weakened a stricter ptrace setting: %q", got)
+	}
+	if config := h.read(userNamespacesConfigPath); !strings.Contains(config, "kernel.yama.ptrace_scope = 3\n") {
+		t.Fatalf("install would weaken ptrace after reboot: %q", config)
+	}
+	if err := os.WriteFile(h.env.P(userNamespaceBootIDPath), []byte("boot-after\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if r := h.run(Options{Action: ActionVerify}); hasMessageCode(r.Errors, codeUnprivilegedPtrace) || hasMessageCode(r.Errors, codeUserNamespaces) {
+		t.Fatalf("verify rejected a stricter ptrace setting: %+v", r.Errors)
+	}
+}
+
+func TestLinuxPtraceUpgradeRequiresRebootWithoutPriorPtraceAttestation(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4")}))
+	oldConfig := []byte("# DefenseClaw managed policy requires a single host view of machine policy.\nuser.max_user_namespaces = 0\n")
+	if err := os.WriteFile(h.env.P(userNamespacesConfigPath), oldConfig, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	record, err := h.env.loadDeployment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Files[userNamespacesConfigPath] = sha256Bytes(oldConfig)
+	if err := h.env.saveDeployment(record); err != nil {
+		t.Fatal(err)
+	}
+	// The live value may already be 2 because an administrator changed it in
+	// this boot. That cannot prove that no tracer attached earlier.
+	h.env.ProductVersion = "1.0.5"
+	upgraded := h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.5")})
+	if !upgraded.Installed || upgraded.SecurityComplete || !hasMessageCode(upgraded.Errors, codeUserNamespaces) {
+		t.Fatalf("upgrade trusted an unattested ptrace setting: %+v", upgraded)
+	}
+	if marker := h.read(userNamespaceBootMarker); marker != "boot-before\n" {
+		t.Fatalf("upgrade did not require a new boot: %q", marker)
 	}
 }
 
@@ -250,6 +385,9 @@ func TestLinuxNamespaceRebootMarkerSurvivesUninstall(t *testing.T) {
 	if marker := h.read(userNamespaceBootMarker); marker != "boot-before\n" {
 		t.Fatalf("uninstall removed the reboot marker: %q", marker)
 	}
+	if marker := h.read(ptraceBootMarker); marker != "boot-before\n" {
+		t.Fatalf("uninstall removed the ptrace reboot marker: %q", marker)
+	}
 	if got := h.read(sysctlMaxUserNamespaces); got != "0\n" {
 		t.Fatalf("uninstall reopened user namespaces: %q", got)
 	}
@@ -340,7 +478,7 @@ func TestMacOSUserNamespaceSettingIsNotRequired(t *testing.T) {
 	if problem := h.env.userNamespaceProblem(); problem != "" {
 		t.Fatal(problem)
 	}
-	if err := h.env.disableUnprivilegedUserNamespaces(false); err != nil {
+	if err := h.env.restrictManagedPolicyViews(false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(h.env.P(userNamespacesConfigPath)); !os.IsNotExist(err) {

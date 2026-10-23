@@ -157,6 +157,8 @@ not-found answers.
 | M-32 | — | A release is fetched from a redirected source (`update.source`, `DEFENSECLAW_REPO`) and installed | The release identity is compiled into `install.sh` and `defenseclaw upgrade`; the source only changes where bytes come from. A mirror needs cosign 2.0 or later and the unchanged signed `checksums.txt`; only the official source falls back to `checksums.txt` alone. On a managed host `defenseclaw upgrade` and `rollback` refuse and `DEFENSECLAW_REPO` is ignored | `cli/tests/test_upgrade_shim.py`; enterprise B20 |
 | M-33 | — | The gateway enforces an older policy than the config on disk | A change that does not build keeps the previous policy generation and shows as `policy.last_reload_error` on `/health`; `status --json` and `verify --json` report `policy.applied` (the digest the config computes to against the one the gateway reports), and `ensure` warns `policy_not_applied`. The last applied digest is in `policy-state.json` | `internal/enterpriseunix/policystate_test.go`; enterprise B21 |
 
+| M-34 | — | A standard user changes only the agent process's read view of machine policy | File ownership and mode checks do not prove what the agent reads. On macOS 15.8, a standard-user `sandbox-exec` profile denied reads beneath both the Claude Code and Codex machine-policy directories while the same account could read them without the profile. Actual agent hook behavior still needs a managed-host test (GAP-0716-MAC, [R35](ENTERPRISE-THREAT-MODEL.md#residual-risks)) | Standard-user read probes on dc-mac; managed agent tool-call and audit test pending |
+
 ## Residual risks
 
 1. Per-user registrations are user-owned and repaired within one reconcile

@@ -490,6 +490,13 @@ func newTestHost(t *testing.T, goos string) *testHost {
 		if err := os.WriteFile(path, []byte("0\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
+		ptrace := env.P(sysctlPtraceScope)
+		if err := os.MkdirAll(filepath.Dir(ptrace), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(ptrace, []byte("2\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 		boot := env.P(userNamespaceBootIDPath)
 		if err := os.MkdirAll(filepath.Dir(boot), 0o755); err != nil {
 			t.Fatal(err)
@@ -505,6 +512,9 @@ func newTestHost(t *testing.T, goos string) *testHost {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(env.P(userNamespaceBootMarker), []byte("boot-prior\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(env.P(ptraceBootMarker), []byte("boot-prior\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}

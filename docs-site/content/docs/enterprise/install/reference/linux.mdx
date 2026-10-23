@@ -197,23 +197,27 @@ sudo systemctl show defenseclaw-gateway.service \
 ## User namespaces
 
 The managed install writes `/etc/sysctl.d/99-zz-defenseclaw-userns.conf` with
-`user.max_user_namespaces = 0` and applies it to the running kernel. This
-prevents a standard user from mounting another filesystem over any connector's
-machine policy, runtime descriptor or hook socket before starting an agent.
-`status` and `verify` report `unprivileged_user_namespaces` as an error and
-`security_complete: false` if the live setting or persistent file is missing,
-changed or unreadable. `ensure` restores the setting.
+`user.max_user_namespaces = 0` and `kernel.yama.ptrace_scope = 2`, and applies
+both to the running kernel. These settings prevent a standard user from
+mounting over machine policy or translating its paths with ptrace before
+starting an agent. A preexisting, stricter ptrace scope of `3` is preserved.
+`status` and `verify` report
+`unprivileged_user_namespaces` or `unprivileged_ptrace` and
+`security_complete: false` if either live setting or the persistent file is
+missing, changed or unreadable. `ensure` restores the settings.
 
 **Reboot after the first managed install or an upgrade from an older
 deployment, even if the live value was already zero.** A user namespace
-created earlier in that boot can survive the sysctl change. DefenseClaw
+created earlier in that boot, or a tracer already attached to an agent, can
+survive the sysctl change. DefenseClaw
 records the boot ID in the root-owned
-`/etc/sysctl.d/.defenseclaw-userns-restricted-boot-id` marker and keeps
+`/etc/sysctl.d/.defenseclaw-userns-restricted-boot-id` and
+`/etc/sysctl.d/.defenseclaw-ptrace-restricted-boot-id` markers and keeps
 `security_complete: false` until the host starts a new boot with the
-restriction in effect. Status and verify also fail if that marker is missing
-or changed. A second root-owned marker,
+restrictions in effect. Status and verify also fail if either marker is
+missing or changed. Another root-owned marker,
 `/etc/sysctl.d/.defenseclaw-userns-uninstalled-boot-id`, records when an
-uninstall removed the persistent file. Both markers survive uninstall: a
+uninstall removed the persistent file. All markers survive uninstall: a
 same-boot reinstall can keep a prior safe boot only when the restriction was
 intact at uninstall, while a reinstall after a boot without that file requires
 another reboot. If the kernel setting cannot
@@ -221,13 +225,16 @@ be applied, the transaction fails. After uninstall, the lifecycle removes
 its persistent sysctl file but leaves the running restriction in place until
 reboot.
 
-The setting also prevents rootless containers, root-run workloads that create
+The user namespace setting also prevents rootless containers, root-run workloads that create
 user namespaces, and the user namespace based command sandboxes in Codex and
 Claude Code from starting. Configure agent
 sandbox behavior for this managed host before rollout; DefenseClaw's hooks
 still inspect each tool call when the agent runs without its own sandbox. A
 private user namespace that does not hide policy (`unshare -Ur`) is also
 rejected by the hook, but that check alone cannot protect a hidden policy.
+The ptrace setting prevents standard users from debugging their own processes
+with `gdb` or `strace`. Application control is still needed to keep users
+from launching modified agent clients or loader-injected variants.
 
 ## Tetragon and AI Discovery Plane C
 

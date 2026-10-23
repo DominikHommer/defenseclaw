@@ -106,6 +106,33 @@ message_of() {
         head -n 1 | unescape
 }
 
+# Keep the errors and warnings arrays separate. A message can contain a ']'
+# inside its JSON string, so a plain sed character class would truncate it.
+message_codes() {
+    printf '%s\n' "$result" | awk -v name="$1" '
+        BEGIN { RS = "\001" }
+        {
+            start = index($0, "\"" name "\"")
+            if (!start) exit
+            s = substr($0, start)
+            start = index(s, "[")
+            if (!start) exit
+            quoted = 0; escaped = 0
+            for (i = start + 1; i <= length(s); i++) {
+                c = substr(s, i, 1)
+                if (escaped) { escaped = 0; continue }
+                if (c == "\\" && quoted) { escaped = 1; continue }
+                if (c == "\"") { quoted = !quoted; continue }
+                if (c == "]" && !quoted) {
+                    print substr(s, start + 1, i - start - 1)
+                    exit
+                }
+            }
+        }' |
+        grep -oE '"code":[[:space:]]*"[^" ]+"' |
+        sed 's/^"code":[[:space:]]*"//; s/"$//'
+}
+
 case "$status" in
     0)
         echo "defenseclaw-enterprise: the managed deployment is active."
@@ -121,7 +148,11 @@ case "$status" in
         echo "  Apply this package with: sudo $gateway enterprise linux ensure --from-package$downgrade" >&2
         ;;
     *)
-        if [ -n "$(message_of unprivileged_user_namespaces)" ] &&
+        codes=$(message_codes errors)
+        other_errors=$(printf '%s\n' "$codes" | grep -vFx unprivileged_user_namespaces)
+        rollback_warning=$(message_codes warnings | grep -E '^(rolled_back|rollback_failed)$')
+        if [ -n "$codes" ] && [ -z "$other_errors" ] &&
+           [ -z "$rollback_warning" ] &&
            printf '%s\n' "$result" | grep -Eq '"installed":[[:space:]]*true'; then
             echo "defenseclaw-enterprise: a managed deployment is installed, but policy protection is incomplete until this host reboots." >&2
             echo "  Reboot, then run: sudo $gateway enterprise linux verify --json" >&2
@@ -133,11 +164,15 @@ case "$status" in
         cause=$(printf '%s\n' "$result" |
             sed -n 's/.*"errors":[[:space:]]*\[[[:space:]]*{[[:space:]]*"code":[[:space:]]*"\([^"]*\)",[[:space:]]*"message":[[:space:]]*"\(\([^"\\]\|\\.\)*\)".*/\1: \2/p' |
             head -n 1 | unescape)
+        if [ -n "$other_errors" ]; then
+            first_other=$(printf '%s\n' "$other_errors" | head -n 1)
+            cause="$first_other: $(message_of "$first_other")"
+        fi
         # A run that refused the config, or rolled its change back, leaves the
         # previous deployment running; only a first install, or a failed
         # rollback, leaves none (GAP-0176).
         running=$(printf '%s\n' "$result" | sed -n 's/.*"installed_version":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
-        if [ -n "$running" ] && [ -z "$(message_of rollback_failed)" ]; then
+        if [ -n "$running" ] && [ -z "$(printf '%s\n' "$rollback_warning" | grep -Fx rollback_failed)" ]; then
             echo "defenseclaw-enterprise: the package is installed but not applied; the previous deployment ($running) keeps running unchanged." >&2
             finish="apply this package with"
         else

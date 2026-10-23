@@ -1144,7 +1144,15 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 			r.AddError(codeUserNamespaces, problem)
 			r.SecurityComplete = false
 		}
+		if problem := env.ptraceProblem(); problem != "" {
+			r.AddError(codeUnprivilegedPtrace, problem)
+			r.SecurityComplete = false
+		}
 		if problem := env.userNamespaceBootProblem(); problem != "" {
+			r.AddError(codeUserNamespaces, problem)
+			r.SecurityComplete = false
+		}
+		if problem := env.ptraceBootProblem(); problem != "" {
 			r.AddError(codeUserNamespaces, problem)
 			r.SecurityComplete = false
 		}

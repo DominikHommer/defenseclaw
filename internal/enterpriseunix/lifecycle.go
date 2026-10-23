@@ -2039,14 +2039,14 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	// transaction wrote the sysctl file. A zero value alone cannot prove that
 	// a namespace created earlier in this boot has gone away.
 	uninstalledThisBoot, hasUninstallMarker := env.userNamespaceUninstallState()
-	priorUserNamespaceRestricted := env.userNamespaceBootProblem() == "" &&
+	priorUserNamespaceRestricted := env.userNamespaceBootProblem() == "" && env.ptraceBootProblem() == "" && env.ptraceProblem() == "" &&
 		(env.userNamespaceProblem() == "" || uninstalledThisBoot ||
-			record != nil && record.Files[userNamespacesConfigPath] != "" && !hasUninstallMarker)
+			record != nil && record.Files[userNamespacesConfigPath] == sha256Bytes(env.desiredPolicyViewConfig()) && !hasUninstallMarker)
 	changed, err := l.applyFilesRecorded(ctx, p, account)
 	if err != nil {
 		return failAndRollback(errorCode(err, codeApply), err)
 	}
-	if err := env.disableUnprivilegedUserNamespaces(priorUserNamespaceRestricted); err != nil {
+	if err := env.restrictManagedPolicyViews(priorUserNamespaceRestricted); err != nil {
 		return failAndRollback(codeUserNamespaces, err)
 	}
 	if record != nil {
@@ -3187,7 +3187,7 @@ func (l *lifecycle) restoreUnchangedConfigMetadata(ctx context.Context, record *
 func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, string) {
 	env := l.env
 	l.noopPolicy, l.policyAssetsEdited, l.policyAssetRefusal = nil, false, ""
-	if env.userNamespaceProblem() != "" || env.userNamespaceBootProblem() != "" {
+	if env.userNamespaceProblem() != "" || env.ptraceProblem() != "" || env.userNamespaceBootProblem() != "" || env.ptraceBootProblem() != "" {
 		return false, ""
 	}
 	account, ok, err := env.Accounts.Lookup(ctx, env.Layout.ServiceUser)
