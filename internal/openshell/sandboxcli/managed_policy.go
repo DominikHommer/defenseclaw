@@ -131,7 +131,7 @@ func managedStatusOfExplain(m *sandboxapi.ManagedExplain) *sandboxapi.ManagedSta
 	if m == nil {
 		return nil
 	}
-	return &sandboxapi.ManagedStatus{Profile: m.Profile, Description: m.Description, HostRunGate: m.HostRunGate, Provisional: m.Provisional,
+	return &sandboxapi.ManagedStatus{Profile: m.Profile, Description: m.Description, Allowed: m.Allowed, HostRunGate: m.HostRunGate, Provisional: m.Provisional,
 		EffectiveDigest: m.PolicyDigest, UpdatedAt: m.UpdatedAt, RequestAccess: m.RequestAccess,
 		Driver: m.Driver, DriverReason: m.DriverReason, DriverFallback: m.DriverFallback}
 }
@@ -921,7 +921,15 @@ func (a *App) managedPolicyCheck(m *sandboxapi.ManagedStatus) openshell.Check {
 	if ago := agoText(m.UpdatedAt, a.Now()); ago != "" {
 		c.Detail += ", updated " + ago
 	}
-	if m.Provisional {
+	if !m.Allowed {
+		c.Status = openshell.StatusFail
+		if len(m.DeniedHarnesses) > 0 {
+			c.Detail += ": your organization doesn't allow sandboxes for " + strings.Join(sandboxapi.DisplayTexts(m.DeniedHarnesses), ", ")
+		} else {
+			c.Detail += ": sandbox authorization could not be confirmed for your account"
+		}
+		c.Fix = &openshell.Fix{Summary: sandboxapi.AccessContact(m.RequestAccess)}
+	} else if m.Provisional {
 		c.Status = openshell.StatusWarn
 		c.Detail += ": your directory couldn't be reached, so your organization's default applies for now"
 		c.Fix = &openshell.Fix{Summary: "nothing to do on this computer; the policy updates when the directory answers. " +
@@ -952,8 +960,9 @@ func managedRuntimeCheck(m *sandboxapi.ManagedStatus) openshell.Check {
 	switch {
 	case m.Unavailable == sandboxrelay.UnavailableSetupChanging:
 		// The organization's switch of the setup is under way: it clears
-		// by itself, and is nothing to ask IT about (#1203).
-		c.Status = openshell.StatusWarn
+		// by itself, and is nothing to ask IT about. A run refuses until
+		// it clears, so doctor must not report ready (GAP-0528).
+		c.Status = openshell.StatusFail
 		c.Detail = m.Unavailable
 		c.Fix = &openshell.Fix{Summary: "nothing to do on this computer; run the command again in a few minutes"}
 	case m.Unavailable != "":

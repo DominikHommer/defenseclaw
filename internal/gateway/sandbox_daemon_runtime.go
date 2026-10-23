@@ -1724,15 +1724,44 @@ func (d *SandboxDaemon) managedStatus(ctx context.Context) *sandboxapi.ManagedSt
 	case !s.Available:
 		out.Unavailable = s.Unavailable
 	}
+	registered := false
 	if r, ok := d.regs.newest(); ok {
 		out.Profile, out.Provisional, out.EffectiveDigest, out.UpdatedAt = r.Profile, r.Provisional, r.Digest, r.UpdatedAt
-		return out
+		registered = true
 	}
 	ctx, cancel := context.WithTimeout(ctx, managedViewTimeout)
 	defer cancel()
-	if me, _, err := d.managedExplain(ctx, sandboxapi.ExplainRequest{}, nil); err == nil {
-		out.Profile, out.Description, out.Provisional, out.EffectiveDigest = me.Profile, me.Description, me.Provisional, me.PolicyDigest
-		if me.RequestAccess != "" {
+	// Status and doctor describe whether the configured agents can run at
+	// all. A default connector's permission cannot stand in for another's
+	// connector-scoped profile (GAP-0534).
+	harnesses := s.Operational.Harnesses
+	if len(harnesses) == 0 {
+		harnesses = []string{defaultManagedConnector}
+	}
+	seen := make(map[string]bool, len(harnesses))
+	out.Allowed = true
+	viewSet := false
+	for _, name := range harnesses {
+		connector := d.managedConnector(name)
+		if seen[connector] {
+			continue
+		}
+		seen[connector] = true
+		me, _, err := d.managedExplain(ctx, sandboxapi.ExplainRequest{Harness: connector}, nil)
+		if err != nil {
+			out.Allowed = false
+			continue
+		}
+		allowed := managedExplainAllowsHarness(me, connector)
+		if !allowed {
+			out.Allowed = false
+			out.DeniedHarnesses = append(out.DeniedHarnesses, connector)
+		}
+		if !registered && !viewSet {
+			out.Profile, out.Description, out.Provisional, out.EffectiveDigest = me.Profile, me.Description, me.Provisional, me.PolicyDigest
+			viewSet = true
+		}
+		if me.RequestAccess != "" && (!allowed || out.RequestAccess == "") {
 			out.RequestAccess = me.RequestAccess
 		}
 	}
@@ -1814,6 +1843,22 @@ func (d *SandboxDaemon) managedExplain(ctx context.Context, req sandboxapi.Expla
 		return me, reg.Floor, nil
 	}
 	return me, managedExplainFloor(me), nil
+}
+
+// managedExplainAllowsHarness applies both sandbox.allowed and the agent
+// allowlist to a policy view. Resolve checks both before Create; Ready and
+// status must make the same decision before an install or ready verdict.
+func managedExplainAllowsHarness(me sandboxapi.ManagedExplain, name string) bool {
+	if !me.Allowed {
+		return false
+	}
+	if len(me.AllowedHarnesses) == 0 {
+		return true
+	}
+	name = config.NormalizeConnectorName(name)
+	return slices.ContainsFunc(me.AllowedHarnesses, func(h string) bool {
+		return config.NormalizeConnectorName(h) == name
+	})
 }
 
 // managedExplainFloor is the organization floor a managed explain names,
@@ -2051,8 +2096,11 @@ func managedSettingsRefusal(s sandboxrelay.DaemonSettings) error {
 // openshell CLI, and refused every run of an account whose OpenShell was not
 // installed or started yet, before the create that readies it ran
 // (GAP-0437, GAP-0441).
-func (c *managedSandboxController) Ready(ctx context.Context) (*sandboxapi.Status, error) {
+func (c *managedSandboxController) Ready(ctx context.Context, req sandboxapi.ReadyRequest) (*sandboxapi.Status, error) {
 	d := c.d
+	if _, ok := harness.Get(config.NormalizeConnectorName(req.Harness)); !ok {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "a supported sandbox harness is required to ready OpenShell")
+	}
 	if err := d.lockLifecycle(ctx); err != nil {
 		return nil, managedBusyError(err)
 	}
@@ -2064,7 +2112,25 @@ func (c *managedSandboxController) Ready(ctx context.Context) (*sandboxapi.Statu
 		if uid, held := d.openShell.PortHolder(s); held && uid != d.uid {
 			err = accountBusyError()
 		} else {
-			err = d.readyOpenShell(ctx, s, "")
+			// Ready has no run registration yet. Ask the managed gateway for
+			// this harness's current policy before installing OpenShell or
+			// starting its gateway. A forbidden profile must leave no runtime
+			// behind, including when Ready is called directly (GAP-0534).
+			viewCtx, cancel := context.WithTimeout(ctx, managedViewTimeout)
+			view, _, viewErr := d.managedExplain(viewCtx, sandboxapi.ExplainRequest{Harness: req.Harness}, nil)
+			cancel()
+			switch {
+			case viewErr != nil:
+				err = viewErr
+			case !view.Allowed:
+				err = &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Status: http.StatusForbidden,
+					Message: "Your organization doesn't allow sandboxes for your account.", Detail: sandboxrelay.ReasonNotAllowed}
+			case !managedExplainAllowsHarness(view, req.Harness):
+				err = &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Status: http.StatusForbidden,
+					Message: "Your organization doesn't allow this agent in a sandbox.", Detail: sandboxrelay.ReasonNotAllowed}
+			default:
+				err = d.readyOpenShell(ctx, s, "")
+			}
 		}
 	}
 	d.unlockLifecycle()

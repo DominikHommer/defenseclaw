@@ -48,6 +48,12 @@ const (
 	PathReady = "/api/v1/sandbox/ready"
 )
 
+// ReadyRequest names the agent whose policy must allow a first run before
+// the managed daemon installs or starts the account's OpenShell.
+type ReadyRequest struct {
+	Harness string `json:"harness"`
+}
+
 // PolicyDecisionRequest records one managed user's lasting host decision
 // through a sandbox registration. Kind is allow or block.
 type PolicyDecisionRequest struct {
@@ -147,6 +153,13 @@ type ManagedStatus struct {
 	// organization's floor alone) and Description its description.
 	Profile     string `json:"profile"`
 	Description string `json:"description,omitempty"`
+	// Allowed is true only when the managed gateway allows every configured
+	// sandbox harness for this account. An unavailable policy answer leaves
+	// it false, so doctor cannot claim broad readiness without one.
+	Allowed bool `json:"allowed"`
+	// DeniedHarnesses names configured harnesses whose profile forbids a
+	// sandbox. Empty with Allowed false means the policy could not be read.
+	DeniedHarnesses []string `json:"denied_harnesses,omitempty"`
 	// HostRunGate, when present, is the caller's gateway decision carried
 	// from a managed explain into a launch banner.
 	HostRunGate string `json:"host_run_gate,omitempty"`

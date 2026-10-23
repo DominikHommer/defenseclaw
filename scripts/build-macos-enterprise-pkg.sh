@@ -31,7 +31,8 @@
 #
 # Signing is optional and off by default:
 #   MACOS_APP_SIGN_IDENTITY        "Developer ID Application: ..." codesigns
-#                                  the binaries with the hardened runtime.
+#                                  the binaries with the hardened runtime;
+#                                  "-" uses an ad hoc identity for CI.
 #   MACOS_INSTALLER_SIGN_IDENTITY  "Developer ID Installer: ..." signs the
 #                                  product archive.
 #   MACOS_SIGN_KEYCHAIN            keychain holding both identities.
@@ -127,7 +128,13 @@ ln -s "/$INSTALL_BIN/defenseclaw-gateway" "$ROOT/$LAUNCHER_DIR/defenseclaw"
 # decision after an upgrade. The lifecycle renders the same path from the
 # installed gateway's SHA-256.
 if [ -n "${MACOS_APP_SIGN_IDENTITY:-}" ]; then
-    sign_args=(--force --timestamp --options runtime --sign "$MACOS_APP_SIGN_IDENTITY")
+    sign_args=(--force)
+    # Ad hoc signing lets the disposable macOS CI install lane exercise the
+    # same signed-program copy and label path without a release certificate.
+    if [ "$MACOS_APP_SIGN_IDENTITY" != - ]; then
+        sign_args+=(--timestamp)
+    fi
+    sign_args+=(--options runtime --sign "$MACOS_APP_SIGN_IDENTITY")
     [ -n "${MACOS_SIGN_KEYCHAIN:-}" ] && sign_args+=(--keychain "$MACOS_SIGN_KEYCHAIN")
     for binary in "$ROOT/$INSTALL_BIN"/* "$e2fs_root/sbin"/*; do
         codesign "${sign_args[@]}" --identifier "com.cisco.defenseclaw.$(basename "$binary")" "$binary"

@@ -19,9 +19,12 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -30,6 +33,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
@@ -551,16 +555,19 @@ func TestSandboxDaemonCreateReadiesOpenShell(t *testing.T) {
 // ready nothing (GAP-0437, GAP-0441).
 func TestSandboxDaemonReadyBeforeFirstRun(t *testing.T) {
 	f := newSandboxDaemonFixture(t)
+	f.relay.explain = func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+		return sandboxapi.ManagedExplain{Allowed: true}, nil
+	}
 	f.run(t)
 	client := sandboxapi.NewUnixClient(f.socket)
-	st, err := client.Ready(context.Background())
+	st, err := client.Ready(context.Background(), sandboxapi.ReadyRequest{Harness: "claudecode"})
 	if err != nil || st == nil || st.Managed == nil || f.os.prepared.Load() != 1 {
 		t.Fatalf("ready: %+v, %v (prepared %d)", st, err, f.os.prepared.Load())
 	}
 	f.os.prepare = func(sandboxrelay.DaemonSettings) (bool, error) {
 		return false, openShellPrerequisiteError("OpenShell 0.1.3 could not be installed into your ~/.local: offline")
 	}
-	if _, err := client.Ready(context.Background()); !sandboxapi.IsCode(err, sandboxapi.CodeUnavailable) ||
+	if _, err := client.Ready(context.Background(), sandboxapi.ReadyRequest{Harness: "claudecode"}); !sandboxapi.IsCode(err, sandboxapi.CodeUnavailable) ||
 		!strings.Contains(err.Error(), openShellPrerequisiteReason) {
 		t.Fatalf("unready: %v", err)
 	}
@@ -569,9 +576,207 @@ func TestSandboxDaemonReadyBeforeFirstRun(t *testing.T) {
 		o.Settings.Available, o.Settings.Unavailable = false, "no OpenShell here"
 	})
 	g.run(t)
-	if _, err := sandboxapi.NewUnixClient(g.socket).Ready(context.Background()); !sandboxapi.IsCode(err, sandboxapi.CodeUnavailable) ||
+	if _, err := sandboxapi.NewUnixClient(g.socket).Ready(context.Background(), sandboxapi.ReadyRequest{Harness: "claudecode"}); !sandboxapi.IsCode(err, sandboxapi.CodeUnavailable) ||
 		g.os.prepared.Load() != 0 {
 		t.Fatalf("unavailable settings: %v (prepared %d)", err, g.os.prepared.Load())
+	}
+}
+
+// GAP-0534: Ready is callable directly, and must consult the current
+// organization profile before setup mode installs anything for the account.
+func TestSandboxDaemonReadyRefusesForbiddenAccountBeforeInstall(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	f.relay.explain = func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+		return sandboxapi.ManagedExplain{Profile: "no-sandboxes", Allowed: false}, nil
+	}
+	f.run(t)
+	_, err := sandboxapi.NewUnixClient(f.socket).Ready(context.Background(), sandboxapi.ReadyRequest{Harness: "claudecode"})
+	if !sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) || f.os.prepared.Load() != 0 {
+		t.Fatalf("forbidden account ready = %v (prepared %d)", err, f.os.prepared.Load())
+	}
+	// An unavailable policy answer cannot authorize an install either.
+	f.relay.explain = func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+		return sandboxapi.ManagedExplain{}, sandboxrelay.ErrGatewayUnreachable
+	}
+	_, err = sandboxapi.NewUnixClient(f.socket).Ready(context.Background(), sandboxapi.ReadyRequest{Harness: "claudecode"})
+	if !sandboxapi.IsCode(err, sandboxapi.CodeUnavailable) || f.os.prepared.Load() != 0 {
+		t.Fatalf("unreadable policy ready = %v (prepared %d)", err, f.os.prepared.Load())
+	}
+}
+
+// A connector-scoped assignment must be checked for the run's harness,
+// including when the default connector has the opposite answer (GAP-0534).
+func TestSandboxDaemonReadyUsesTheRequestedHarnessBeforeInstall(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		claudeAllowed bool
+		codexAllowed  bool
+		wantCode      int
+		wantPrepared  int64
+	}{
+		{"codex forbidden", true, false, http.StatusForbidden, 0},
+		{"codex allowed", false, true, http.StatusOK, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+				o.Settings.Operational.Harnesses = []string{"claudecode", "codex"}
+			})
+			profiles := &guardrailProfileSet{
+				profiles: map[string]config.DerivedGuardrailProfile{
+					"claude-profile": {}, "codex-profile": {},
+				},
+				assignments: []config.ProfileAssignment{{
+					Profile: "codex-profile", Match: config.ProfileMatch{Connectors: []string{"codex"}},
+				}},
+				defaultProfile: "claude-profile",
+			}
+			f.relay.explain = func(req sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+				profile := profiles.match(nil, "", req.Connector, "").Name
+				switch profile {
+				case "codex-profile":
+					return sandboxapi.ManagedExplain{Profile: profile, Allowed: tc.codexAllowed}, nil
+				case "claude-profile":
+					return sandboxapi.ManagedExplain{Profile: profile, Allowed: tc.claudeAllowed}, nil
+				default:
+					t.Errorf("unexpected connector %q, profile %q", req.Connector, profile)
+					return sandboxapi.ManagedExplain{}, nil
+				}
+			}
+			f.run(t)
+			client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", f.socket)
+			}}}
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+				"http://sandbox-daemon"+sandboxapi.PathReady, bytes.NewBufferString(`{"harness":"codex"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set(sandboxapi.ClientHeader, sandboxapi.ClientName)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.wantCode || f.os.prepared.Load() != tc.wantPrepared {
+				t.Fatalf("codex ready: HTTP %d, prepared %d; want HTTP %d, prepared %d",
+					resp.StatusCode, f.os.prepared.Load(), tc.wantCode, tc.wantPrepared)
+			}
+		})
+	}
+}
+
+func TestSandboxDaemonReadyRespectsAllowedHarnessesBeforeInstall(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		allowed      []string
+		wantDenied   bool
+		wantPrepared int64
+	}{
+		{"codex excluded", []string{"claudecode"}, true, 0},
+		{"codex included", []string{"codex"}, false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+				o.Settings.Operational.Harnesses = []string{"claudecode", "codex"}
+			})
+			f.relay.explain = func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+				return sandboxapi.ManagedExplain{Allowed: true, AllowedHarnesses: tc.allowed}, nil
+			}
+			f.run(t)
+			_, err := sandboxapi.NewUnixClient(f.socket).Ready(context.Background(), sandboxapi.ReadyRequest{Harness: "codex"})
+			if sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) != tc.wantDenied || f.os.prepared.Load() != tc.wantPrepared {
+				t.Fatalf("codex ready with allowed_harnesses %v = %v (prepared %d)", tc.allowed, err, f.os.prepared.Load())
+			}
+		})
+	}
+}
+
+func TestSandboxDaemonReadyRequiresHarness(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	f.relay.explain = func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+		return sandboxapi.ManagedExplain{Allowed: true}, nil
+	}
+	f.run(t)
+	_, err := sandboxapi.NewUnixClient(f.socket).Ready(context.Background(), sandboxapi.ReadyRequest{})
+	if !sandboxapi.IsCode(err, sandboxapi.CodeInvalid) || f.os.prepared.Load() != 0 {
+		t.Fatalf("ready without a harness = %v (prepared %d)", err, f.os.prepared.Load())
+	}
+	// OpenClaw is a known connector, but it is not an agent this sandbox
+	// command can run. Its profile must not authorize an OpenShell install.
+	_, err = sandboxapi.NewUnixClient(f.socket).Ready(context.Background(), sandboxapi.ReadyRequest{Harness: "openclaw"})
+	if !sandboxapi.IsCode(err, sandboxapi.CodeInvalid) || f.os.prepared.Load() != 0 {
+		t.Fatalf("ready for a connector without a sandbox harness = %v (prepared %d)", err, f.os.prepared.Load())
+	}
+}
+
+func TestSandboxDaemonStatusCarriesForbiddenProfile(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	f.relay.explain = func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+		return sandboxapi.ManagedExplain{Profile: "prep-runtime-off", Allowed: false}, nil
+	}
+	f.run(t)
+	st, err := sandboxapi.NewUnixClient(f.socket).Status(context.Background())
+	if err != nil || st.Managed == nil {
+		t.Fatalf("status = %+v, %v", st, err)
+	}
+	b, err := json.Marshal(st.Managed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var view map[string]any
+	if err := json.Unmarshal(b, &view); err != nil {
+		t.Fatal(err)
+	}
+	if view["profile"] != "prep-runtime-off" || view["allowed"] != false {
+		t.Fatalf("managed status = %s", b)
+	}
+}
+
+func TestSandboxDaemonStatusCarriesAllowedProfile(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	f.relay.explain = func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+		return sandboxapi.ManagedExplain{Profile: "prep-runtime-on", Allowed: true}, nil
+	}
+	f.run(t)
+	st, err := sandboxapi.NewUnixClient(f.socket).Status(context.Background())
+	if err != nil || st.Managed == nil || !st.Managed.Allowed || st.Managed.Profile != "prep-runtime-on" {
+		t.Fatalf("allowed managed status = %+v, %v", st.Managed, err)
+	}
+}
+
+func TestSandboxDaemonStatusChecksEveryConfiguredHarness(t *testing.T) {
+	for _, denied := range []string{"claudecode", "codex"} {
+		t.Run(denied, func(t *testing.T) {
+			f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+				o.Settings.Operational.Harnesses = []string{"claudecode", "codex"}
+			})
+			f.relay.explain = func(req sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+				return sandboxapi.ManagedExplain{Profile: req.Connector + "-profile", Allowed: req.Connector != denied}, nil
+			}
+			f.run(t)
+			st, err := sandboxapi.NewUnixClient(f.socket).Status(context.Background())
+			if err != nil || st.Managed == nil || st.Managed.Allowed || len(st.Managed.DeniedHarnesses) != 1 || st.Managed.DeniedHarnesses[0] != denied {
+				t.Fatalf("status when %s is denied = %+v, %v", denied, st.Managed, err)
+			}
+			if f.os.prepared.Load() != 0 {
+				t.Fatalf("status installed OpenShell for %s", denied)
+			}
+		})
+	}
+}
+
+func TestSandboxDaemonStatusIncludesAllowedHarnessesRestriction(t *testing.T) {
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		o.Settings.Operational.Harnesses = []string{"claudecode", "codex"}
+	})
+	f.relay.explain = func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+		return sandboxapi.ManagedExplain{Allowed: true, AllowedHarnesses: []string{"claudecode"}}, nil
+	}
+	f.run(t)
+	st, err := sandboxapi.NewUnixClient(f.socket).Status(context.Background())
+	if err != nil || st.Managed == nil || st.Managed.Allowed || len(st.Managed.DeniedHarnesses) != 1 || st.Managed.DeniedHarnesses[0] != "codex" {
+		t.Fatalf("status for excluded codex = %+v, %v", st.Managed, err)
 	}
 }
 
@@ -646,7 +851,7 @@ func TestSandboxDaemonReportsAccountBusyRefusals(t *testing.T) {
 		defer f.relay.eventsMu.Unlock()
 		return append([]sandboxrelay.EventBatch(nil), f.relay.events...)
 	}
-	_, err := client.Ready(context.Background())
+	_, err := client.Ready(context.Background(), sandboxapi.ReadyRequest{Harness: "claudecode"})
 	if e := sandboxapi.AsError(err); e.Detail != SandboxAccountBusyReason || f.os.prepared.Load() != 0 {
 		t.Fatalf("ready beside another account's gateway: %v (prepared %d)", err, f.os.prepared.Load())
 	}
@@ -657,7 +862,7 @@ func TestSandboxDaemonReportsAccountBusyRefusals(t *testing.T) {
 	}
 	// Two more inside the pace: not sent at once, both in the next batch.
 	for range 2 {
-		if _, err = client.Ready(context.Background()); err == nil {
+		if _, err = client.Ready(context.Background(), sandboxapi.ReadyRequest{Harness: "claudecode"}); err == nil {
 			t.Fatal("ready beside another account's gateway succeeded")
 		}
 	}
