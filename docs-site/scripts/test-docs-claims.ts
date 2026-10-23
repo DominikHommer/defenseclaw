@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +12,14 @@ const repo = join(site, '..');
 
 function page(name: string): string {
   return readFileSync(join(site, 'content/docs', name), 'utf8').split(/\s+/).join(' ');
+}
+
+function enterprisePages(path = join(site, 'content/docs/enterprise')): string[] {
+  return readdirSync(path, { withFileTypes: true }).flatMap((entry) => {
+    const child = join(path, entry.name);
+    if (entry.isDirectory()) return enterprisePages(child);
+    return entry.isFile() && entry.name.endsWith('.mdx') ? [child] : [];
+  });
 }
 
 describe('Intune base config versus the signed bundle', () => {
@@ -143,14 +151,16 @@ describe('Windows Hermes failure guidance', () => {
 });
 
 describe('managed-host enrollment protection', () => {
-  it('keeps zero-enrollment closure as a requirement in every operator guide', () => {
-    const guides = [
-      'enterprise/plan/threat-model.mdx',
-      'enterprise/configure/enrollment.mdx',
-      'enterprise/configure/reference.mdx',
-      'enterprise/operate/lifecycle.mdx',
-    ];
-    for (const name of guides) {
+  const guides = [
+    'enterprise/plan/threat-model.mdx',
+    'enterprise/configure/enrollment.mdx',
+    'enterprise/configure/reference.mdx',
+    'enterprise/configure/machine-policy.mdx',
+    'enterprise/install/reference/windows.mdx',
+    'enterprise/operate/lifecycle.mdx',
+  ];
+  for (const name of guides) {
+    it(`${name} describes zero-enrollment refusal`, () => {
       const paragraphs = readFileSync(join(site, 'content/docs', name), 'utf8')
         .split(/\n\s*\n/)
         .map((text) => text.split(/\s+/).join(' '));
@@ -159,22 +169,38 @@ describe('managed-host enrollment protection', () => {
         /(?:no|zero|last).{0,60}enrolled user/i.test(text) &&
         /(?:refus|fail closed)/i.test(text),
       );
-      assert.ok(closure, `${name} must require refusal even with no enrolled user`);
+      assert.ok(closure, `${name} must describe refusal even with no enrolled user`);
+    });
+  }
+
+  it('does not present a missing machine hook as an intended enrollment state', () => {
+    for (const path of enterprisePages()) {
+      const paragraphs = readFileSync(path, 'utf8')
+        .split(/\n\s*\n/)
+        .map((text) => text.split(/\s+/).join(' '));
       for (const paragraph of paragraphs) {
         if (!/(?:Claude Code|Codex|Cursor)/i.test(paragraph)) continue;
         assert.doesNotMatch(
           paragraph,
           /(?:no|none|last|at least one|another).{0,100}enrolled user.{0,260}(?:without DefenseClaw hooks|no hooks|not published|policy is removed)/i,
-          `${name} presents missing machine policy as an intended enrollment state`,
+          `${path} presents missing machine policy as an intended enrollment state`,
         );
         assert.doesNotMatch(
           paragraph,
           /(?:Claude Code|Codex|Cursor).{0,120}(?:policy|hooks).{0,120}(?:only while|needs? at least one|requires? at least one).{0,120}enrolled/i,
-          `${name} conditions managed policy on another user's enrollment`,
+          `${path} conditions managed policy on another user's enrollment`,
         );
       }
     }
+  });
+
+  it('describes the installed Windows policy as a product change', () => {
     const changelog = readFileSync(join(repo, 'CHANGELOG.md'), 'utf8');
+    assert.match(
+      changelog,
+      /Windows.{0,160}(?:keeps|retains|remain.{0,40}installed|stays in force).{0,160}(?:no|zero) enrolled users/i,
+      'the release note must describe the installed zero-enrollment machine policy',
+    );
     assert.doesNotMatch(changelog, /no Claude Code user is enrolled.{0,160}without DefenseClaw hooks/i);
   });
 });

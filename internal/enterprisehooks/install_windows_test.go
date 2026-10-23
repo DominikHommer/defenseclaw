@@ -1046,6 +1046,52 @@ func TestInstallWindowsClaudeAutoHealsDeletedManagedPolicyFromExactState(t *test
 	}
 }
 
+func TestEnsureWindowsClaudeRestoresDeletedPolicyForEnrolledTargets(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(
+		t,
+		map[string]interface{}{"allowManagedHooksOnly": true},
+	)
+	previousStandalone := windowsEnterpriseStandaloneProcess
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
+	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previousStandalone })
+	if _, err := Install(context.Background(), windowsManagedInstallOptions(fixture)); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(filepath.Dir(fixture.policyPath), windowsClaudeManagedStateFile)
+	expectedPolicy, err := os.ReadFile(fixture.policyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedState, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(fixture.policyPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ReadWindowsClaudeManagedPolicyTargets(); err == nil {
+		t.Fatal("missing policy with enrolled ownership state was accepted as inactive")
+	}
+	if err := EnsureWindowsStandaloneClaudeManagedPolicy(connector.SetupOpts{
+		APIAddr:        "127.0.0.1:18970",
+		HookExecutable: fixture.hookExe,
+	}); err != nil {
+		t.Fatalf("restore configured policy with enrolled targets: %v", err)
+	}
+	policy, err := os.ReadFile(fixture.policyPath)
+	if err != nil || !bytes.Equal(policy, expectedPolicy) {
+		t.Fatalf("restored policy differs: read error = %v", err)
+	}
+	state, err := os.ReadFile(statePath)
+	if err != nil || !bytes.Equal(state, expectedState) {
+		t.Fatalf("restored enrollment changed: read error = %v", err)
+	}
+	targets, active, err := ReadWindowsClaudeManagedPolicyTargets()
+	if err != nil || !active || len(targets) != 1 || targets[0] != fixture.targetSID.String() {
+		t.Fatalf("restored targets = %v, active = %t, error = %v", targets, active, err)
+	}
+}
+
 func TestInstallWindowsClaudeDeletedPolicyRejectsMismatchedState(t *testing.T) {
 	tests := []struct {
 		name                 string
@@ -2643,6 +2689,44 @@ func TestRemoveWindowsClaudeManagedPolicyRemovesLastOwnedTarget(t *testing.T) {
 	}
 	if err := RemoveManagedPolicy(context.Background(), opts); err != nil {
 		t.Fatalf("idempotent RemoveManagedPolicy: %v", err)
+	}
+}
+
+func TestWindowsStandaloneClaudeEmptyEnrollmentKeepsMachinePolicy(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+	previousStandalone := windowsEnterpriseStandaloneProcess
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
+	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previousStandalone })
+	if _, err := Install(context.Background(), windowsManagedInstallOptions(fixture)); err != nil {
+		t.Fatal(err)
+	}
+	if err := PublishWindowsClaudeManagedPolicyTargets(nil); err != nil {
+		t.Fatal(err)
+	}
+	targets, active, err := ReadWindowsClaudeManagedPolicyTargets()
+	if err != nil || !active || len(targets) != 0 {
+		t.Fatalf("zero-target Claude policy: active=%t targets=%v err=%v", active, targets, err)
+	}
+	if _, err := os.Stat(fixture.policyPath); err != nil {
+		t.Fatalf("configured Claude hook disappeared with its final enrollment: %v", err)
+	}
+	runtime, err := ResolveWindowsManagedHookRuntime(fixture.hookExe, "claudecode")
+	if err == nil || !strings.Contains(err.Error(), WindowsManagedSIDUnregisteredReason) ||
+		!runtime.PolicyActive || runtime.Registered {
+		t.Fatalf("unenrolled Claude account: runtime=%+v err=%v", runtime, err)
+	}
+	if err := DeactivateWindowsClaudeManagedPolicy(); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureWindowsStandaloneClaudeManagedPolicy(connector.SetupOpts{
+		APIAddr:        "127.0.0.1:18970",
+		HookExecutable: fixture.hookExe,
+	}); err != nil {
+		t.Fatalf("restore an older release's missing Claude machine guard: %v", err)
+	}
+	targets, active, err = ReadWindowsClaudeManagedPolicyTargets()
+	if err != nil || !active || len(targets) != 0 {
+		t.Fatalf("restored Claude policy: active=%t targets=%v err=%v", active, targets, err)
 	}
 }
 

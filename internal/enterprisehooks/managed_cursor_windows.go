@@ -676,8 +676,11 @@ func validateWindowsCursorManagedStateIdentity(
 		return artifacts, err
 	}
 	targets, err := canonicalWindowsCursorManagedTargets(state.Targets, false)
-	if err != nil || len(targets) == 0 {
+	if err != nil {
 		return artifacts, errors.New("enterprise hooks: invalid Cursor managed target set")
+	}
+	if len(targets) == 0 && (state.TargetFailModes != nil || cursorManagedPolicyFailMode(state) != "closed") {
+		return artifacts, errors.New("enterprise hooks: empty Cursor enrollment must retain a closed machine hook")
 	}
 	state.Targets = targets
 	// The per-target delivery modes must be consistent with the enrollment
@@ -942,6 +945,12 @@ func cursorManagedSetTargetFailMode(state *windowsCursorManagedPolicyState, sid,
 }
 
 func cursorManagedNarrowState(state windowsCursorManagedPolicyState, targets []WindowsCursorManagedRuntimeTarget) (windowsCursorManagedPolicyState, error) {
+	if len(targets) == 0 {
+		state.Targets = []WindowsCursorManagedRuntimeTarget{}
+		state.TargetFailModes = nil
+		state.HookFailMode = "closed"
+		return state, nil
+	}
 	modes := make(map[string]string, len(targets))
 	for _, target := range targets {
 		mode, ok := state.TargetFailModes[target.SID]
@@ -1101,17 +1110,20 @@ func installWindowsCursorManagedPolicy(
 	targetSID *windows.SID,
 	dataDir string,
 ) (func() error, error) {
-	if targetSID == nil {
-		return nil, errors.New("enterprise hooks: Cursor target SID is required")
-	}
-	targets, err := canonicalWindowsCursorManagedTargets([]WindowsCursorManagedRuntimeTarget{{
-		SID: targetSID.String(), DataDir: dataDir,
-	}}, true)
-	if err != nil {
-		return nil, err
+	targets := []WindowsCursorManagedRuntimeTarget{}
+	if targetSID != nil {
+		var err error
+		targets, err = canonicalWindowsCursorManagedTargets([]WindowsCursorManagedRuntimeTarget{{
+			SID: targetSID.String(), DataDir: dataDir,
+		}}, true)
+		if err != nil {
+			return nil, err
+		}
+	} else if !windowsEnterpriseStandaloneProcess() {
+		return nil, errors.New("enterprise hooks: Cursor target SID is required outside standalone mode")
 	}
 	var rollback func() error
-	err = withWindowsCursorManagedTransaction(func() error {
+	err := withWindowsCursorManagedTransaction(func() error {
 		before, err := snapshotWindowsCursorManagedArtifacts()
 		if err != nil {
 			return err
@@ -1163,8 +1175,16 @@ func installWindowsCursorManagedPolicy(
 			state.GatewayAddr != gateway || state.GatewayServiceName != service) {
 			return errors.New("enterprise hooks: Cursor machine identity differs from the active protected deployment")
 		}
+		if targetSID == nil && current.active {
+			return nil
+		}
 		state.SchemaVersion = 1
-		cursorManagedSetTargetFailMode(&state, targets[0].SID, opts.HookFailMode)
+		if targetSID != nil {
+			cursorManagedSetTargetFailMode(&state, targets[0].SID, opts.HookFailMode)
+		} else {
+			state.HookFailMode = "closed"
+			state.TargetFailModes = nil
+		}
 		state.HookExecutable = filepath.Clean(opts.HookExecutable)
 		state.GatewayAddr = gateway
 		state.GatewayServiceName = service
@@ -1437,8 +1457,8 @@ func ReadWindowsCursorManagedPolicyTargets() ([]WindowsCursorManagedRuntimeTarge
 
 // PublishWindowsCursorManagedPolicyTargets narrows or replaces the active
 // protected registry after every per-user runtime has been independently
-// reconciled. An empty set deactivates the global hook and leaves an inert
-// adapter tombstone for already-running Cursor processes.
+// reconciled. On standalone hosts an empty set retains a closed machine hook.
+// Secure Client retains its previous empty-set teardown behavior.
 func PublishWindowsCursorManagedPolicyTargets(
 	raw []WindowsCursorManagedRuntimeTarget,
 ) error {
@@ -1465,6 +1485,44 @@ func PublishWindowsCursorManagedPolicyTargets(
 	})
 }
 
+// EnsureWindowsStandaloneCursorManagedPolicy installs the machine hook even
+// when there is no enrolled Cursor account. The adapter and protected empty
+// registry make every account fail the enrollment check until authorized.
+func EnsureWindowsStandaloneCursorManagedPolicy(setup connector.SetupOpts) error {
+	if !windowsEnterpriseStandaloneProcess() {
+		return errors.New("enterprise hooks: empty-enrollment Cursor policy is standalone-only")
+	}
+	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
+		return err
+	}
+	if err := windowsEnterpriseHookTrustCheck(setup.HookExecutable); err != nil {
+		return fmt.Errorf("enterprise hooks: Cursor machine hook executable is untrusted: %w", err)
+	}
+	setup.ManagedEnterprise = true
+	setup.HookFailMode = "closed"
+	_, err := installWindowsCursorManagedPolicy(setup, nil, "")
+	return err
+}
+
+// DeactivateWindowsCursorManagedPolicy removes a machine hook after the
+// administrator removes Cursor from the protected connector configuration.
+func DeactivateWindowsCursorManagedPolicy() error {
+	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
+		return err
+	}
+	return withWindowsCursorManagedTransaction(func() error {
+		current, err := snapshotWindowsCursorManagedArtifacts()
+		if err != nil {
+			return err
+		}
+		artifacts, err := validateWindowsCursorManagedArtifactsReclaimingOrphans(current)
+		if err != nil || !artifacts.active {
+			return err
+		}
+		return deactivateWindowsCursorManagedPolicyUnlocked(artifacts)
+	})
+}
+
 func publishWindowsCursorManagedPolicyTargetsUnlocked(
 	artifacts windowsCursorManagedArtifacts,
 	targets []WindowsCursorManagedRuntimeTarget,
@@ -1479,6 +1537,9 @@ func publishWindowsCursorManagedPolicyTargetsUnlocked(
 			return err
 		}
 		return windowsManagedPolicyWriter(artifacts.state.path, body, true)
+	}
+	if windowsEnterpriseStandaloneProcess() {
+		return narrowWindowsCursorManagedTargetModes(artifacts, targets)
 	}
 	return deactivateWindowsCursorManagedPolicyUnlocked(artifacts)
 }
@@ -1731,7 +1792,7 @@ func windowsCursorOptionsAllowState(
 	if err != nil || gateway != state.GatewayAddr ||
 		!sameWindowsEnterprisePath(opts.HookExecutable, state.HookExecutable) ||
 		opts.GatewayServiceName != state.GatewayServiceName ||
-		len(state.Targets) == 0 || len(state.Targets) > len(targets) {
+		len(state.Targets) > len(targets) {
 		return errors.New("enterprise hooks: Cursor machine enrollment is outside the protected lifecycle")
 	}
 	allowed := make(map[string]string, len(targets))
@@ -1772,7 +1833,7 @@ func validateWindowsCursorLifecycleRestoreSource(
 		}
 		return windowsCursorOptionsAllowState(validated.parsed, allowedCurrent)
 	}
-	if (!snapshot.PolicyActive && len(prior.Targets) != 0) || len(allowedCurrent.Targets) == 0 {
+	if !snapshot.PolicyActive && len(prior.Targets) != 0 {
 		return strictErr
 	}
 	if !current.adapter.existed || bytes.Equal(current.adapter.data, windowsCursorManagedTombstone()) ||
@@ -1989,7 +2050,7 @@ func validateWindowsCursorManagedTeardownSnapshot(
 		return nil
 	}
 	if !snapshot.HooksExisted || !snapshot.AdapterExisted || !snapshot.StateExisted ||
-		!snapshot.ReceiptExisted || len(opts.Targets) == 0 {
+		!snapshot.ReceiptExisted {
 		return errors.New("enterprise hooks: active Cursor snapshot is incomplete")
 	}
 	if err := validateWindowsCursorPrivateReceiptMetadata(windowsCursorManagedFileMetadata{
@@ -2021,7 +2082,7 @@ func validateWindowsCursorManagedTeardownSnapshot(
 		return err
 	}
 	targets, err := canonicalWindowsCursorManagedTargets(state.Targets, false)
-	if err != nil || len(targets) == 0 {
+	if err != nil || (len(targets) == 0 && (state.TargetFailModes != nil || cursorManagedPolicyFailMode(state) != "closed")) {
 		return errors.New("enterprise hooks: Cursor snapshot has an invalid target set")
 	}
 	state.Targets = targets
