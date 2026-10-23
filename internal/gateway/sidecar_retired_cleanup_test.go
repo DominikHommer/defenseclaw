@@ -383,3 +383,26 @@ func TestRemovedConnectorBootChangesOnlyTheScriptAndTokens(t *testing.T) {
 		})
 	}
 }
+
+// GAP-0564: the upgrade cleanup of a removed connector logs each file it
+// leaves for the user, with the step: an OmniGent config.yaml that still
+// names the policy module, here with a second handler key the user added
+// under DefenseClaw's policy (so it is not valid YAML any more).
+func TestRetiredConnectorCleanupLogsTheConfigItLeaves(t *testing.T) {
+	h := stageRetiredOmnigent(t)
+	writeRetiredFile(t, h.configPath, retiredPatchedConfig+"    handler: corp_policy.check\n")
+	var err error
+	out := captureStderr(t, func() {
+		err = retireOrDropUnregisteredConnector(context.Background(), connector.NewDefaultRegistry(), h.dataDir, "omnigent", "removed", nil)
+	})
+	if err != nil {
+		t.Fatalf("retire: %v", err)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "removed connector omnigent left "+h.configPath+":") &&
+			strings.Contains(line, "defenseclaw_guardrail") {
+			return
+		}
+	}
+	t.Fatalf("no log line names %s and the defenseclaw_guardrail policy:\n%s", h.configPath, out)
+}
