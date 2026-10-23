@@ -8,6 +8,8 @@
 # release before GAP-1322 refuses the contractless Kiro bundles 1.0.1 wrote).
 # Releases through 1.0.2 also refuse an unselected open-mode generation that
 # 1.0.3 or later left when the older Setup committed a downgrade (GAP-0762).
+# The same retire text for a non-1 schema or foreign bundle must retain the
+# journal before the next Setup opens a transaction.
 # Every later Setup upgrade, ensure and uninstall then failed retiring it
 # with that same installed gateway. A standalone lifecycle now removes that
 # exact journal, records why, and goes on; any other retire failure, a
@@ -53,7 +55,14 @@ try {
         $layout = @{
             ManagedHooksLifecycleJournalPath = [IO.Path]::Combine($Root, 'managed-hooks-lifecycle-journal.json')
             PendingPath = [IO.Path]::Combine($Root, 'pending.json')
+            ManifestPath = [IO.Path]::Combine($Root, 'targets.yaml')
+            HookPath = [IO.Path]::Combine($Root, 'defenseclaw-hook.exe')
         }
+        $dataDir = [IO.Path]::Combine($Root, 'user', '.defenseclaw')
+        $hooksDir = [IO.Path]::Combine($dataDir, 'hooks')
+        [void][IO.Directory]::CreateDirectory($hooksDir)
+        $targetSID = 'S-1-5-21-1-2-3-1017'
+        $generationID = '0123456789abcdef0123456789abcdef'
         # Each is the error the installed gateway puts in its retire report.
         $gcRefusal = 'retire kiro managed runtime generations for SID S-1-5-21-1-2-3-1017: enterprise hooks: refusing to collect an invalid managed runtime bundle'
         $openGenerationRefusal = 'retire claudecode managed runtime generations for SID S-1-5-21-1-2-3-1017: enterprise hooks: managed runtime bundle does not match its protected selector'
@@ -81,10 +90,81 @@ try {
             return [pscustomobject]@{ ok = $true }
         }
         $run = {
-            param([string]$Name, [string]$EnterpriseProfile, [string]$RetireError, [bool]$Pending, [bool]$WantThrow, [bool]$WantRemoved, [string]$Shape = 'report')
+            param([string]$Name, [string]$EnterpriseProfile, [string]$RetireError, [bool]$Pending, [bool]$WantThrow, [bool]$WantRemoved, [string]$Shape = 'report', [string]$BundleCase = 'open')
             $script:TestRetireShape = $Shape
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile $EnterpriseProfile
-            [IO.File]::WriteAllText($layout.ManagedHooksLifecycleJournalPath, '{"schema_version":4,"phase":"captured"}')
+            $journal = [ordered]@{
+                schema_version = 4
+                phase = 'captured'
+                manifest_path = $layout.ManifestPath
+                hook_binary = $layout.HookPath
+                gateway_addr = '127.0.0.1:18970'
+                gateway_service_name = 'DefenseClawGateway'
+                targets = @([ordered]@{
+                    connector = 'claudecode'
+                    sid = $targetSID
+                    data_dir = $dataDir
+                })
+            }
+            [IO.File]::WriteAllText($layout.ManagedHooksLifecycleJournalPath, ($journal | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 5 -Compress))
+            $bundle = [ordered]@{
+                schema_version = 1
+                generation_id = $generationID
+                connector = 'claudecode'
+                target_sid = $targetSID
+                data_dir = $dataDir
+                hook_executable = $layout.HookPath
+                gateway_addr = '127.0.0.1:18970'
+                gateway_service_name = 'DefenseClawGateway'
+                fail_mode = 'open'
+                scoped_token = 'test token'
+                hook_contract_id = 'claude-hooks-v1'
+                hook_contract_lock_updated_at = '2026-10-23T00:00:00Z'
+                hook_contract_entry_updated_at = '2026-10-23T00:00:00Z'
+            }
+            switch ($BundleCase) {
+                'schema 2' { $bundle.schema_version = 2 }
+                'schema string' { $bundle.schema_version = '1' }
+                'closed' { $bundle.fail_mode = 'closed' }
+                'invalid fail mode' { $bundle.fail_mode = 'permissive' }
+                'foreign generation' { $bundle.generation_id = 'fedcba9876543210fedcba9876543210' }
+                'foreign connector' { $bundle.connector = 'cursor' }
+                'foreign SID' { $bundle.target_sid = 'S-1-5-21-1-2-3-1018' }
+                'foreign data directory' { $bundle.data_dir = [IO.Path]::Combine($Root, 'other', '.defenseclaw') }
+                'foreign hook' { $bundle.hook_executable = [IO.Path]::Combine($Root, 'other-hook.exe') }
+                'foreign gateway address' { $bundle.gateway_addr = '127.0.0.1:18971' }
+                'foreign gateway service' { $bundle.gateway_service_name = 'OtherGateway' }
+                'nonstring token' { $bundle.scoped_token = 1 }
+                'unknown field' { $bundle['unexpected'] = 'value' }
+            }
+            $bundlePath = [IO.Path]::Combine($hooksDir, ".managed-runtime-claudecode-$generationID.json")
+            if ($BundleCase -cne 'absent') {
+                $content = if ($BundleCase -ceq 'malformed') { '{' } else { $bundle | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 5 -Compress }
+                if ($BundleCase -ceq 'duplicate key') {
+                    $content = $content.Replace('"schema_version":1,', '"schema_version":1,"schema_version":1,')
+                }
+                if ($BundleCase -ceq 'noncanonical whitespace') {
+                    $content += ' '
+                }
+                if ($BundleCase -ceq 'extra newline') {
+                    $content += [char]10
+                }
+                $encoding = if ($BundleCase -ceq 'UTF-16') { [Text.Encoding]::Unicode } else { [Text.UTF8Encoding]::new($false) }
+                [IO.File]::WriteAllText($bundlePath, ($content + [char]10), $encoding)
+            }
+            if ($BundleCase -cin @('second invalid', 'second closed')) {
+                $bundle.generation_id = 'fedcba9876543210fedcba9876543210'
+                if ($BundleCase -ceq 'second invalid') {
+                    $bundle.schema_version = 2
+                }
+                else {
+                    $bundle.fail_mode = 'closed'
+                }
+                [IO.File]::WriteAllText(
+                    [IO.Path]::Combine($hooksDir, '.managed-runtime-claudecode-fedcba9876543210fedcba9876543210.json'),
+                    (($bundle | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 5 -Compress) + [char]10)
+                )
+            }
             if ($Pending) {
                 [IO.File]::WriteAllText($layout.PendingPath, '{}')
             }
@@ -117,11 +197,26 @@ try {
             }
             [IO.File]::Delete($layout.ManagedHooksLifecycleJournalPath)
             [IO.File]::Delete($layout.PendingPath)
+            foreach ($file in [IO.Directory]::GetFiles($hooksDir)) {
+                [IO.File]::Delete($file)
+            }
         }
         try {
             & $run 'retired' 'Standalone' '' $false $false $true
             & $run 'legacy bundle refused' 'Standalone' $gcRefusal $false $false $true
             & $run 'older gateway refuses prior open generation' 'Standalone' $openGenerationRefusal $false $false $true
+            & $run 'older gateway refuses open beside selected closed' 'Standalone' $openGenerationRefusal $false $false $true 'report' 'second closed'
+            foreach ($bundleCase in @(
+                    'schema 2', 'schema string', 'closed', 'invalid fail mode',
+                    'foreign generation', 'foreign connector', 'foreign SID',
+                    'foreign data directory', 'foreign hook',
+                    'foreign gateway address', 'foreign gateway service',
+                    'nonstring token', 'unknown field', 'malformed', 'absent',
+                    'second invalid', 'duplicate key', 'noncanonical whitespace',
+                    'extra newline', 'UTF-16'
+                )) {
+                & $run "selector mismatch with $bundleCase bundle" 'Standalone' $openGenerationRefusal $false $true $false 'report' $bundleCase
+            }
             & $run 'prior open generation, pending transaction' 'Standalone' $openGenerationRefusal $true $true $false
             & $run 'prior open generation, Secure Client' 'SecureClient' $openGenerationRefusal $false $true $false
             & $run 'prior open generation text outside a gateway report' 'Standalone' $openGenerationRefusal $false $true $false 'plain'

@@ -20791,6 +20791,178 @@ function Get-DefenseClawCommittedRetireRefusal {
     return ''
 }
 
+function Test-DefenseClawLegacyOpenRuntimeGeneration {
+    <#
+        The old gateway's selector-mismatch error has no bundle path: schema
+        drift produces the same text as an open-mode bundle. Its validated
+        retire report identifies the connector and SID. Check every matching
+        generation in that target's captured, protected journal scope before
+        discarding the journal. The new gateway's GC visits the whole folder,
+        so one incompatible bundle makes the exception unsafe.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][Management.Automation.ErrorRecord]$Failure
+    )
+    try {
+        $errorText = [string]$Failure.Exception.Data[
+            'DefenseClawLifecycleReportError'
+        ]
+        $pattern = '^retire (?<connector>[a-z0-9_-]+) managed runtime generations for SID (?<sid>S-1-[0-9]+(-[0-9]+)+)( \([^\r\n]+?\))?: enterprise hooks: managed runtime bundle does not match its protected selector$'
+        if ($errorText -cnotmatch $pattern) {
+            return $false
+        }
+        $connector = [string]$Matches['connector']
+        $sid = [string]$Matches['sid']
+        $journalPath = [string]$Layout.ManagedHooksLifecycleJournalPath
+        Assert-DefenseClawNoReparsePath -Path $journalPath
+        $journalFile = Microsoft.PowerShell.Management\Get-Item `
+            -LiteralPath $journalPath -Force
+        if ($journalFile.PSIsContainer -or
+            [int64]$journalFile.Length -gt 33554432) {
+            return $false
+        }
+        $journal = [IO.File]::ReadAllText($journalPath) |
+            Microsoft.PowerShell.Utility\ConvertFrom-Json -ErrorAction Stop
+        if ($journal.schema_version -isnot [int] -and
+            $journal.schema_version -isnot [int64]) {
+            return $false
+        }
+        if ([int64]$journal.schema_version -ne 4 -or
+            [string]$journal.phase -cnotin @('captured', 'restored') -or
+            [string]$journal.manifest_path -cne [string]$Layout.ManifestPath -or
+            [string]$journal.hook_binary -cne [string]$Layout.HookPath -or
+            [string]$journal.gateway_service_name -cne $GatewayServiceName -or
+            $journal.targets -isnot [array] -or
+            @($journal.targets).Count -gt 384) {
+            return $false
+        }
+        $targets = @($journal.targets | Microsoft.PowerShell.Core\Where-Object {
+                [string]$_.connector -ceq $connector -and
+                [string]$_.sid -ceq $sid
+            })
+        if ($targets.Count -ne 1) {
+            return $false
+        }
+        $dataDir = [string]$targets[0].data_dir
+        if (-not [IO.Path]::IsPathRooted($dataDir) -or
+            [IO.Path]::GetFullPath($dataDir) -cne $dataDir -or
+            [IO.Path]::GetFileName($dataDir) -cne '.defenseclaw') {
+            return $false
+        }
+        $hooksDir = [IO.Path]::Combine($dataDir, 'hooks')
+        Assert-DefenseClawNoReparsePath -Path $hooksDir
+        $filePrefix = '.managed-runtime-' + $connector + '-'
+        $filePattern = '^\' + $filePrefix + '(?<generation>[0-9a-f]{32})\.json$'
+        $candidates = 0
+        $open = 0
+        $fields = @(
+            'schema_version', 'generation_id', 'connector', 'target_sid',
+            'data_dir', 'hook_executable', 'gateway_addr',
+            'gateway_service_name', 'fail_mode', 'scoped_token',
+            'hook_contract_id', 'hook_contract_lock_updated_at',
+            'hook_contract_entry_updated_at'
+        )
+        # Go's bundle writer emits these fields in this order, on one line
+        # followed by LF. Reject a second JSON document, duplicate/unknown
+        # keys, or altered structure before interpreting any field.
+        $jsonString = '"(?:\\.|[^"\\\x00-\x1f])*"'
+        $bundleShape = '^\{"schema_version":1'
+        foreach ($field in $fields[1..($fields.Count - 1)]) {
+            $bundleShape += ',"' + $field + '":' + $jsonString
+        }
+        $bundleShape += '\}' + [char]10 + '\z'
+        foreach ($path in [IO.Directory]::EnumerateFileSystemEntries($hooksDir)) {
+            $leaf = [IO.Path]::GetFileName($path)
+            if ($leaf -cnotmatch $filePattern) {
+                continue
+            }
+            $generation = [string]$Matches['generation']
+            $candidates++
+            if ($candidates -gt 256) {
+                return $false
+            }
+            Assert-DefenseClawNoReparsePath -Path $path
+            $file = Microsoft.PowerShell.Management\Get-Item `
+                -LiteralPath $path -Force
+            if ($file.PSIsContainer -or
+                [int64]$file.Length -gt 131072) {
+                return $false
+            }
+            $stream = [IO.FileStream]::new(
+                $path,
+                [IO.FileMode]::Open,
+                [IO.FileAccess]::Read,
+                [IO.FileShare]::Read
+            )
+            try {
+                if ($stream.Length -gt 131072) {
+                    return $false
+                }
+                $reader = [IO.BinaryReader]::new($stream)
+                $bytes = $reader.ReadBytes(131073)
+                if ($bytes.Length -ne $stream.Length) {
+                    return $false
+                }
+            }
+            finally {
+                $stream.Dispose()
+            }
+            $rawBundle = [Text.UTF8Encoding]::new($false, $true).GetString(
+                $bytes
+            )
+            if ($rawBundle -cnotmatch $bundleShape) {
+                return $false
+            }
+            $bundle = $rawBundle |
+                Microsoft.PowerShell.Utility\ConvertFrom-Json -ErrorAction Stop
+            if (@($bundle.PSObject.Properties).Count -ne $fields.Count) {
+                return $false
+            }
+            foreach ($field in $fields) {
+                if ($null -eq $bundle.PSObject.Properties[$field]) {
+                    return $false
+                }
+            }
+            if (($bundle.schema_version -isnot [int] -and
+                    $bundle.schema_version -isnot [int64]) -or
+                [int64]$bundle.schema_version -ne 1 -or
+                $bundle.generation_id -isnot [string] -or
+                $bundle.generation_id -cne $generation -or
+                $bundle.connector -isnot [string] -or
+                $bundle.connector -cne $connector -or
+                $bundle.target_sid -isnot [string] -or
+                $bundle.target_sid -cne $sid -or
+                $bundle.data_dir -isnot [string] -or
+                $bundle.data_dir -cne $dataDir -or
+                $bundle.hook_executable -isnot [string] -or
+                $bundle.hook_executable -cne [string]$Layout.HookPath -or
+                $bundle.gateway_addr -isnot [string] -or
+                $bundle.gateway_addr -cne [string]$journal.gateway_addr -or
+                $bundle.gateway_service_name -isnot [string] -or
+                $bundle.gateway_service_name -cne $GatewayServiceName -or
+                $bundle.fail_mode -isnot [string] -or
+                $bundle.fail_mode -cnotin @('open', 'closed') -or
+                $bundle.scoped_token -isnot [string] -or
+                $bundle.hook_contract_id -isnot [string] -or
+                ($bundle.hook_contract_lock_updated_at -isnot [string] -and
+                    $bundle.hook_contract_lock_updated_at -isnot [datetime]) -or
+                ($bundle.hook_contract_entry_updated_at -isnot [string] -and
+                    $bundle.hook_contract_entry_updated_at -isnot [datetime])) {
+                return $false
+            }
+            if ($bundle.fail_mode -ceq 'open') {
+                $open++
+            }
+        }
+        return $open -gt 0
+    }
+    catch {
+        return $false
+    }
+}
+
 function Invoke-DefenseClawCommittedManagedHooksLifecycleRetire {
     <#
         Retires the managed-hook lifecycle journal an earlier, committed
@@ -20837,6 +21009,13 @@ function Invoke-DefenseClawCommittedManagedHooksLifecycleRetire {
                 $message
             )
         }
+        throw $failure
+    }
+    if ($refusal -ceq 'legacy_open_bundle' -and
+        -not (Test-DefenseClawLegacyOpenRuntimeGeneration `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Failure $failure)) {
         throw $failure
     }
     # The journal only lets the installed release's retire collect old
