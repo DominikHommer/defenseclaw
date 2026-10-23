@@ -167,8 +167,9 @@ func ownedHookCommandNeedlesFor(goos string, opts SetupOpts, conn Connector) []s
 // (heal needed) when any watched config file is missing entirely or no longer
 // references our hook command.
 //
-// Connectors with no hook config paths or no owned hook command (proxy/plugin
-// connectors) are reported as present so the guard never tries to heal them.
+// Connectors that own no hook runtime (proxy/plugin connectors) are reported
+// as present so the guard never tries to heal them; a hook owner whose config
+// path or owned command does not resolve is an error (not verified).
 type ownedHookContractInspector interface {
 	ownedHookContractPresent(SetupOpts) (bool, error)
 }
@@ -237,9 +238,17 @@ func OwnedHooksAbsentReason(conn Connector, opts SetupOpts) string {
 	return ""
 }
 
+// ownedHooksPresentInConfig reads the hook registrations in conn's agent
+// config files. A connector that owns no hook runtime (a proxy or plugin
+// connector) has none to read and is reported present, so the guard never
+// tries to heal it. A hook owner whose config path or owned command does
+// not resolve is not verified: nothing was read, so nothing was proved.
 func ownedHooksPresentInConfig(conn Connector, opts SetupOpts) (bool, error) {
 	paths := HookConfigPathsForConnector(conn, opts)
 	if len(paths) == 0 {
+		if OwnsManagedHookRuntime(conn) {
+			return false, fmt.Errorf("%s hooks not verified: no hook config path resolved", conn.Name())
+		}
 		return true, nil
 	}
 	if hookOnly, ok := conn.(*hookOnlyConnector); ok && hookOnly.rendersExactHookEntries() {
@@ -257,7 +266,7 @@ func ownedHooksPresentInConfig(conn Connector, opts SetupOpts) (bool, error) {
 	}
 	needles := ownedHookCommandNeedles(opts, conn)
 	if len(needles) == 0 {
-		return true, nil
+		return false, fmt.Errorf("%s hooks not verified: no owned hook command resolved", conn.Name())
 	}
 	for _, path := range paths {
 		present, err := configFileReferencesHook(path, needles)
