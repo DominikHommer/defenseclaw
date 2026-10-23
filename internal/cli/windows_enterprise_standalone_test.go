@@ -2933,6 +2933,40 @@ func TestWindowsEnterprisePolicyReportsWhetherTheGatewayAppliedIt(t *testing.T) 
 	}
 }
 
+// Status, verify and the change actions name a policy digest they could not
+// read instead of omitting the policy block silently: the installed CLI the
+// custody check refuses to run (rel-1-0-4 GAP-0594), a run that fails, and a
+// report with no digest. A policy that cannot be built keeps its own warning.
+func TestWindowsEnterprisePolicyNamesADigestItCouldNotRead(t *testing.T) {
+	previous := windowsEnterprisePolicyDigest
+	t.Cleanup(func() { windowsEnterprisePolicyDigest = previous })
+	for name, c := range map[string]struct {
+		out      string
+		err      error
+		code     string
+		contains string
+	}{
+		"custody refused": {err: errors.New(`refuse to run the installed CLI: C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe is writable by BUILTIN\Users`),
+			code: "policy_unverified", contains: "refuse to run the installed CLI"},
+		"run failed":    {err: errors.New("exit status 1"), code: "policy_unverified", contains: "exit status 1"},
+		"no digest":     {out: `{}`, code: "policy_unverified", contains: "no effective policy digest"},
+		"not buildable": {out: `{"error":"rule pack \"p\": digest does not match","gateway_reported_digest":"sha256:aa"}`, code: "policy_not_buildable"},
+	} {
+		for _, action := range []string{"status", "verify", "ensure"} {
+			t.Run(name+" "+action, func(t *testing.T) {
+				windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) { return []byte(c.out), c.err }
+				result := newWindowsEnterpriseStandaloneResult(action, &windowsEnterpriseLifecycleOptions{})
+				result.Installed, result.Readiness.Gateway = true, true
+				applyWindowsEnterprisePolicy(context.Background(), result)
+				if result.Policy != nil || len(result.Warnings) != 1 || result.Warnings[0].Code != c.code ||
+					!strings.Contains(result.Warnings[0].Message, c.contains) {
+					t.Fatalf("policy=%+v warnings=%+v, want only %s naming %q", result.Policy, result.Warnings, c.code, c.contains)
+				}
+			})
+		}
+	}
+}
+
 // An applied change action records policy-state.json beside deployment.json;
 // status does not (GAP-0037).
 func TestWindowsEnterprisePolicyStateIsRecordedBesideTheDeployment(t *testing.T) {

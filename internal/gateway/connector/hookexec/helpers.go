@@ -139,21 +139,15 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string, bl
 		if opts.FailureLogHome != nil {
 			home = opts.FailureLogHome()
 		}
-		if home == "" {
-			return
-		}
-		// Managed hooks can run for accounts with no prior per-user install.
-		// Their diagnostic directory is independent of the protected runtime.
-		if err := os.MkdirAll(home, 0o700); err != nil {
-			return
-		}
 	}
 	if home == "" {
 		return
 	}
-	// Never create the enforcement home for a log line: a managed hook whose
-	// protected folder was missing recreated it here, and the next event's
-	// hook found a folder and no longer said it was missing (GAP-0154).
+	// Never create the DefenseClaw folder for a log line: a managed hook whose
+	// protected folder was missing recreated it here, user-owned with the
+	// profile's inherited access control, and the next event's hook found a
+	// folder and no longer said it was missing (GAP-0154, rel-1-0-4
+	// GAP-0593). A managed account with no such folder writes no row.
 	if info, err := os.Stat(home); err != nil || !info.IsDir() {
 		return
 	}
