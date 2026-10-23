@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -35,6 +36,8 @@ func TestFreshDirectoryReadUsesCompletedTimedOutLookup(t *testing.T) {
 		}
 		return useridentity.DirectoryFacts{Groups: []string{"current"}, ResolvedAt: time.Now()}, nil
 	})
+	// Keep the coalescing interval under test independent of scheduler pauses.
+	cache.now = func() time.Time { return time.Unix(1_000_000, 0) }
 	if _, ok := cache.getFresh("501", 5*time.Millisecond); ok {
 		t.Fatal("slow lookup answered before release")
 	}
@@ -52,6 +55,9 @@ func TestFreshDirectoryReadUsesCompletedTimedOutLookup(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+	// Simulate a busy race runner pausing after publication. The cache's
+	// controlled clock still puts both reads in the same hook interval.
+	time.Sleep(identityDirectoryFreshCoalesce + 10*time.Millisecond)
 	for i := 0; i < 2; i++ {
 		if facts, ok := cache.getFresh("501", 5*time.Millisecond); !ok || !slices.Equal(facts.Groups, []string{"current"}) {
 			t.Fatalf("read %d lost the completed groups: %+v, ok=%t", i, facts, ok)
@@ -59,6 +65,97 @@ func TestFreshDirectoryReadUsesCompletedTimedOutLookup(t *testing.T) {
 	}
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("fresh reads started %d lookups, want one", got)
+	}
+}
+
+func TestFreshDirectoryReadRejectsOldTimedOutAnswer(t *testing.T) {
+	firstRelease, secondRelease := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() { close(secondRelease) })
+	var calls atomic.Int32
+	var clock atomic.Int64
+	clock.Store(time.Unix(1_000_000, 0).UnixNano())
+	cache := newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
+		if calls.Add(1) == 1 {
+			<-firstRelease
+		} else {
+			<-secondRelease
+		}
+		return useridentity.DirectoryFacts{Groups: []string{"relaxed"}, ResolvedAt: time.Now()}, nil
+	})
+	cache.now = func() time.Time { return time.Unix(0, clock.Load()) }
+	if _, ok := cache.getFresh("501", 5*time.Millisecond); ok {
+		t.Fatal("slow lookup answered before release")
+	}
+	close(firstRelease)
+	deadline := time.Now().Add(time.Second)
+	for {
+		cache.mu.Lock()
+		ready := cache.entries["501"].inflight == nil
+		cache.mu.Unlock()
+		if ready {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("completed lookup was not published")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	clock.Add(int64(identityDirectoryRetry + time.Nanosecond))
+	if facts, ok := cache.getFresh("501", 5*time.Millisecond); ok {
+		t.Fatalf("old relaxed group selected after the next hook began: %+v", facts)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("old answer did not trigger a new lookup: calls=%d", got)
+	}
+}
+
+func TestManagedMacUnassignedUPNExemptionPersistsAcrossHooks(t *testing.T) {
+	previousFresh := managedHookDirectoryNeedsFresh
+	previousHosted, previousFacts, previousBlocking := managedServiceHosted.Load(), identityFactsEnabled.Load(), identityLookupBlocking.Load()
+	previousConfirmed, previousDirectory := managedHookPeerAccountsConfirmed, managedHookPeerDirectory
+	managedHookDirectoryNeedsFresh = true
+	setManagedServiceHosted(true)
+	setIdentityFactsEnabled(true)
+	setIdentityLookupBlocking(false)
+	managedHookPeerAccountsConfirmed = func() bool { return true }
+	t.Cleanup(func() {
+		managedHookDirectoryNeedsFresh = previousFresh
+		setManagedServiceHosted(previousHosted)
+		setIdentityFactsEnabled(previousFacts)
+		setIdentityLookupBlocking(previousBlocking)
+		managedHookPeerAccountsConfirmed = previousConfirmed
+		managedHookPeerDirectory = previousDirectory
+	})
+	const uid = 41965
+	cache := &managedHookPeerHomeCache{newResolver: func() unixidentity.Resolver {
+		return &fakePeerHomeResolver{accounts: map[int]unixidentity.Account{uid: {Name: "alice", UID: uid, Home: "/Users/alice"}}}
+	}, now: time.Now}
+	var clock atomic.Int64
+	clock.Store(time.Unix(1_000_000, 0).UnixNano())
+	cache.directoriesOnce.Do(func() {
+		cache.directories = newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
+			return useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
+				Source: useridentity.SourceMacOSOpenDirectory, Assurance: useridentity.AssuranceVerified,
+				Domain: "corp.example.com", AccountDomain: "CORP", Realm: "CORP.EXAMPLE.COM",
+				Principal: "alice@corp.example.com", ResolvedAt: time.Now()}, nil
+		})
+		cache.directories.now = func() time.Time { return time.Unix(0, clock.Load()) }
+	})
+	managedHookPeerDirectory = cache.directory
+	peer := managedHookPeer{UID: uid, Name: "alice"}
+	z := newManagedHookAuthorizer(config.EnterpriseEnrollmentConfig{ExemptUsers: []string{"alice@corp.example.com"}}, nil,
+		func() (managedHookLedger, error) { return managedHookLedger{}, nil })
+	for i := 0; i < 3; i++ {
+		decision := z.decide(peer, "claudecode", "cli")
+		if !decision.Allow || !decision.Exempt {
+			t.Fatalf("hook %d refused an exempt UPN: %+v", i+1, decision)
+		}
+		clock.Add(int64(identityDirectoryFreshCoalesce + time.Nanosecond))
+	}
+	other := newManagedHookAuthorizer(config.EnterpriseEnrollmentConfig{ExemptUsers: []string{"alice@other.example.com"}}, nil,
+		func() (managedHookLedger, error) { return managedHookLedger{}, nil })
+	if decision := other.decide(peer, "claudecode", "cli"); decision.Allow || decision.Exempt {
+		t.Fatalf("unverified UPN gained an exemption: %+v", decision)
 	}
 }
 
@@ -81,12 +178,16 @@ func TestManagedMacNonblockingDirectoryReadDoesNotWait(t *testing.T) {
 		return &fakePeerHomeResolver{accounts: map[int]unixidentity.Account{uid: {Name: "macuser", UID: uid, Home: "/Users/macuser"}}}
 	}, now: time.Now}
 	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
+	releaseLookup := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseLookup)
+	var clock atomic.Int64
+	clock.Store(time.Unix(1_000_000, 0).UnixNano())
 	cache.directoriesOnce.Do(func() {
 		cache.directories = newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
 			<-release
 			return useridentity.DirectoryFacts{ResolvedAt: time.Now()}, nil
 		})
+		cache.directories.now = func() time.Time { return time.Unix(0, clock.Load()) }
 	})
 	started := time.Now()
 	if _, ok := cache.directory(uid, false); ok {
@@ -94,6 +195,26 @@ func TestManagedMacNonblockingDirectoryReadDoesNotWait(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
 		t.Fatalf("nonblocking directory read waited %s", elapsed)
+	}
+	releaseLookup()
+	deadline := time.Now().Add(time.Second)
+	for {
+		cache.directories.mu.Lock()
+		ready := cache.directories.entries[strconv.Itoa(uid)].inflight == nil
+		cache.directories.mu.Unlock()
+		if ready {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("background lookup was not published")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	for i := 0; i < 3; i++ {
+		clock.Add(int64(identityDirectoryFreshCoalesce + time.Nanosecond))
+		if facts, ok := cache.directory(uid, false); !ok || facts.ResolvedAt.IsZero() {
+			t.Fatalf("cached nonblocking read %d lost directory facts: %+v, ok=%t", i, facts, ok)
+		}
 	}
 }
 

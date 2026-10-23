@@ -551,7 +551,7 @@ func (c *managedHookPeerHomeCache) directory(uid int, block bool) (useridentity.
 	forgetOnSpoolAccountChange(cache, key, time.Now())
 	if managedHookDirectoryNeedsFresh && identityFactsEnabled.Load() && managedServiceHosted.Load() {
 		if !block {
-			return cache.getFresh(key, 0)
+			return cache.getNonblocking(key)
 		}
 		return cache.getFresh(key, identityDirectoryBudget)
 	}

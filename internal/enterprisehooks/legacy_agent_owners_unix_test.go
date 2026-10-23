@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -109,7 +110,12 @@ func TestCorruptPre104AgentOwnersMapDoesNotStopIdentitySpool(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			if err := os.WriteFile(filepath.Join(dir, oldLegacyAgentOwnersFile), tc.data, 0o640); err != nil {
+			oldPath := filepath.Join(dir, oldLegacyAgentOwnersFile)
+			if err := os.WriteFile(oldPath, tc.data, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			old := time.Now().Add(-2 * IdentitySpoolMaxAge)
+			if err := os.Chtimes(oldPath, old, old); err != nil {
 				t.Fatal(err)
 			}
 			previous := identitySpoolCollect
@@ -128,10 +134,53 @@ func TestCorruptPre104AgentOwnersMapDoesNotStopIdentitySpool(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(dir, oldLegacyAgentOwnersFile)); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("bad map still visible to rollback readers: %v", err)
 			}
+			bad, err := filepath.Glob(filepath.Join(dir, "legacy-agent-owners-corrupt-*.bad"))
+			if err != nil || len(bad) != 1 {
+				t.Fatalf("quarantined map was removed during this pass: paths=%v err=%v", bad, err)
+			}
+			if contents, err := os.ReadFile(bad[0]); err != nil || !bytes.Equal(contents, tc.data) {
+				t.Fatalf("quarantine lost the original map: size=%d err=%v", len(contents), err)
+			}
 			if len(logs) == 0 || !strings.Contains(strings.Join(logs, "\n"), "invalid previous agent identity migration map") {
 				t.Fatalf("bad map not explained: %v", logs)
 			}
 		})
+	}
+}
+
+func TestTransientLegacyAgentOwnersReadErrorKeepsValidMap(t *testing.T) {
+	dir := t.TempDir()
+	owners := map[int]LegacyAgentOwner{501: {User: "alice", Token: "home:1:2"}}
+	if written, err := WriteLegacyAgentOwners(dir, owners, time.Now(), nil); err != nil || !written {
+		t.Fatalf("write migration map: written=%t err=%v", written, err)
+	}
+	oldPath := filepath.Join(dir, oldLegacyAgentOwnersFile)
+	if err := os.Rename(filepath.Join(dir, LegacyAgentOwnersFile), oldPath); err != nil {
+		t.Fatal(err)
+	}
+	previousOpen := legacyAgentOwnersOpen
+	t.Cleanup(func() { legacyAgentOwnersOpen = previousOpen })
+	legacyAgentOwnersOpen = func(path string) (*os.File, error) {
+		if path == oldPath {
+			return nil, syscall.EMFILE
+		}
+		return previousOpen(path)
+	}
+	if err := WriteIdentitySpool(context.Background(), dir, nil, nil, nil, nil); !errors.Is(err, syscall.EMFILE) {
+		t.Fatalf("transient open error did not stop migration: %v", err)
+	}
+	if _, err := os.Stat(oldPath); err != nil {
+		t.Fatalf("valid map moved on an I/O error: %v", err)
+	}
+	if bad, _ := filepath.Glob(filepath.Join(dir, "legacy-agent-owners-corrupt-*.bad")); len(bad) != 0 {
+		t.Fatalf("valid map was quarantined: %v", bad)
+	}
+	legacyAgentOwnersOpen = previousOpen
+	if err := WriteIdentitySpool(context.Background(), dir, nil, nil, nil, nil); err != nil {
+		t.Fatalf("retry migration: %v", err)
+	}
+	if got, ok := ReadLegacyAgentOwners(dir, nil); !ok || got[501] != owners[501] {
+		t.Fatalf("retry changed the binding: %+v, ok=%t", got, ok)
 	}
 }
 

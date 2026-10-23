@@ -131,8 +131,8 @@ type identityCacheEntry[T any] struct {
 	ok        bool
 	fetchedAt time.Time
 	// generation identifies a successful current lookup. A fresh read that
-	// timed out may use its completion on the next call, and nearby reads
-	// within one hook interval share that answer.
+	// timed out may use its completion shortly after it finishes, and nearby
+	// reads within one hook interval share that answer.
 	generation, servedGeneration uint64
 	pendingFresh                 bool
 	freshUntil                   time.Time
@@ -189,6 +189,10 @@ func newIdentityCache[T any](resolve func(string) (T, error)) *identityCache[T] 
 // lookup did not finish within the budget (or, after the first request for
 // key, the caller did not ask to block).
 func (c *identityCache[T]) get(key string, block bool) (T, bool) {
+	return c.getWithColdWait(key, block, true)
+}
+
+func (c *identityCache[T]) getWithColdWait(key string, block, waitCold bool) (T, bool) {
 	var zero T
 	if c == nil || key == "" || c.resolve == nil {
 		return zero, false
@@ -257,7 +261,7 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 	}
 	wait := entry.inflight
 	c.mu.Unlock()
-	if (!block && !first) || wait == nil {
+	if (!block && (!first || !waitCold)) || wait == nil {
 		return zero, false
 	}
 	timer := time.NewTimer(identityDirectoryBudget)

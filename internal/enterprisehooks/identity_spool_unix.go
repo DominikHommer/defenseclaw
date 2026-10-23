@@ -236,7 +236,8 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 	var withdrawErr error
 	for _, entry := range entries {
 		// The migration map is written once and kept for good.
-		if keep[entry.Name()] || entry.Name() == LegacyAgentOwnersFile {
+		if keep[entry.Name()] || entry.Name() == LegacyAgentOwnersFile ||
+			strings.HasPrefix(entry.Name(), "legacy-agent-owners-corrupt-") && strings.HasSuffix(entry.Name(), ".bad") {
 			continue
 		}
 		if info, err := entry.Info(); err == nil && time.Since(info.ModTime()) < IdentitySpoolMaxAge && !left[entry.Name()] &&
