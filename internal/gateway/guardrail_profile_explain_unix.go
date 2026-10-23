@@ -201,7 +201,7 @@ func profileExplainUID(name string, lookupErr error) (profileSubject, bool) {
 	}
 	return profileSubject{
 		UserID: name, IDKind: useridentity.KindForID(name), UserName: userName,
-		LookupFailed: identityLookupBlocking.Load(), LookupError: reason,
+		LookupFailed: identityLookupBlocking.Load(), LookupError: reason, accountUnresolved: true,
 	}, true
 }
 

@@ -1759,6 +1759,42 @@ func TestProfileQualifiedUserMatchesVerifiedAccountDomain(t *testing.T) {
 	}
 }
 
+// A qualified-name SSSD host can have the same short account name in two
+// trusted domains. Neither account may receive a relaxed profile by that
+// short name; the administrator must use a qualified name or uid.
+func TestSSSDQualifiedNamesDoNotGrantBareNamesakeProfile(t *testing.T) {
+	previous := identityFactsEnabled.Load()
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(previous) })
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"strict": {Mode: "action", BlockAt: "low"}, "relaxed": {Mode: "observe"},
+	}
+	cfg.Guardrail.DefaultProfile = "strict"
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{{
+		Profile: "relaxed", Match: config.ProfileMatch{Users: []string{"dcad-r103-eng1"}},
+	}}
+	set, err := newGuardrailProfileSet(cfg, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ uid, domain, source string }{
+		{"94404135", "dclab.test", useridentity.SourceSSSD},
+		{"844201107", "dclab2.test", useridentity.SourceSSSDInfoPipe},
+	} {
+		subject := profileSubjectFromVerified(VerifiedSubject{
+			UserID: tc.uid, UserName: "dcad-r103-eng1@" + tc.domain,
+			Directory: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
+				Source: tc.source, Domain: tc.domain, ResolvedAt: time.Now()},
+		}, true)
+		if got := set.match(&subject, profileSubjectVerified, "claudecode", ""); got.Name != "strict" || got.Refused == "" ||
+			got.Match != profileMatchDefaultLookupFailed {
+			t.Errorf("%s: bare namesake decision %+v; want strict refusal", tc.domain, got)
+		}
+	}
+}
+
 // PM-13: a bare users entry selects the directory account of that name and
 // never a local namesake, which falls to default_profile on Linux (SSSD next
 // to /etc/passwd), Windows (the domain next to the computer's SAM) and macOS

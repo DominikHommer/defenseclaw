@@ -182,7 +182,7 @@ How the keys combine:
   copy-paste sources produce it.
 - **A bare name selects directory accounts, never a local namesake.** It is
   the name without its domain, so `alice` matches the directory account
-  `alice@corp.example.com` (and an `alice` of another directory domain), but
+  `alice@corp.example.com` on a host that uses short account names, but
   not a local account `alice` that someone created on the host: that account
   is another person and gets the next assignment or the default profile.
   Select a local account by its uid or SID, or as `.\alice`. Requests and
@@ -194,7 +194,11 @@ How the keys combine:
   only by its uid. Use the principal, the uid or the SID to tell two people of
   the same short name apart. When a bare name selects a directory account,
   `explain`, `status` and `doctor` warn and name the principal to write
-  instead.
+  instead. On an SSSD Active Directory host that reports qualified account
+  names, a bare entry may name accounts in multiple trusted domains. It is
+  treated as ambiguous: affected requests are refused when that assignment
+  could change the profile. Write `alice@corp.example.com`, `DOMAIN\\alice`
+  or the uid to select one account.
 - **`DOMAIN\user` names the verified account domain.** The domain part is the
   NetBIOS name (or DNS name) the directory confirms for the account: winbind,
   also with `use default domain = yes` where accounts have bare names; SSSD
@@ -333,6 +337,12 @@ What follows when the identity is missing:
   remain as SIDs. Use a group SID in the assignment when the named group may
   be beyond that limit; `profile explain` warns about unresolved names.
 - **macOS group facts must be newer than the account listing.** A group fact newer than the last account listing is not proven. A request that finds the listing expired waits up to 250 ms for a new one. Until a listing confirms the account, or after the account's own record changed since the listing, its groups are unproven and a group-dependent assignment refuses the request with the missing group fact named.
+- **Managed macOS hooks check secondary groups on each call.** The gateway
+  waits up to two seconds for a current Open Directory answer. If it cannot
+  obtain one, a group-dependent assignment is unproven and the hook refuses
+  when that assignment could change the profile. `profile-explain` uses the
+  same fresh lookup. A group removal takes effect on the first hook after
+  Open Directory reports it.
 - **Group changes take time.** SSSD caches the account first (90 minutes by
   default). The gateway caches each successful directory lookup for up to
   15 minutes from the last successful lookup, then starts a background refresh
@@ -350,10 +360,11 @@ What follows when the identity is missing:
   that changes `guardrail.profiles`, `guardrail.profile_assignments` or
   `guardrail.default_profile` has each account refresh its facts at its next
   request, so a pushed assignment applies to a group the user already joined.
-  On a bound Mac the longer delay is Open Directory's own membership cache
+  On a bound Mac the longer delay can be Open Directory's own membership cache
   (a removed member stayed in the group for more than ten minutes): flush it
   with `dscacheutil -flushcache` and `dsmemberutil flushcache`, then explain
-  the account, restart the gateway, or wait for its 15-minute refresh. On Windows, group profiles use a current desktop sign-in token. After sign-out,
+  the account, or restart the gateway. Managed macOS hooks check again on
+  every call after Open Directory reports the change. On Windows, group profiles use a current desktop sign-in token. After sign-out,
   group membership is unknown: a group-dependent assignment refuses an SSH
   or scheduled-task agent until the user signs in at the desktop again. A membership change also needs a new
   desktop sign-in. While the directory does not answer, the gateway keeps using a

@@ -150,8 +150,10 @@ type enterpriseHookDirectoryFlush struct {
 //
 // An identity fact that is not proven never withdraws a record: a record
 // goes at once only for an account the settings leave out (exclude_users,
-// or out of the manifest) whose hook calls the gateway no longer accepts in
-// any way (caller), and, for a name entry, only when the account its uid
+// or out of the manifest). A stale protected-target authorization cannot
+// keep an explicitly excluded account enrolled; explicit exemption and a
+// machine policy that still inspects every caller keep their records.
+// For a name entry, only when the account its uid
 // holds now is shown to be the excluded one (enterpriseHookLeftOutAccounts
 // withdraws). A hook call the gateway accepts keeps the profile its UPN
 // selects until the gateway stops accepting it, and a reused uid never
@@ -174,7 +176,13 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 	// inspects under the account's own profile. Such an account keeps a
 	// refreshed record.
 	caller := func(uid int, names ...string) bool {
-		return accepted.has(uid, names...) || leftOut.exempts(uid, names...)
+		if leftOut.exempts(uid, names...) {
+			return true
+		}
+		if leftOut.withdraws(uid, names...) && !accepted.everyone && !accepted.unknown {
+			return false
+		}
+		return accepted.has(uid, names...)
 	}
 	left := map[int]bool{}
 	leave := func(uid int) {
@@ -259,8 +267,13 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 	// keeps a refreshed record, also when this run's rows do not name it (the
 	// reconcile could not rewrite the authorization).
 	for _, uid := range accepted.listedUIDs() {
-		if !seen[uid] {
-			list(uid, canonicalUser(uid))
+		if !seen[uid] && !left[uid] {
+			user := canonicalUser(uid)
+			if !caller(uid, user) && leftOut.withdraws(uid, user) {
+				leave(uid)
+			} else {
+				list(uid, user)
+			}
 		}
 	}
 	// A caller the gateway accepts by name only (an exempt_users entry, or
@@ -269,9 +282,8 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 	// uid of the record that names it: a record a pass does not list ages
 	// out after an hour, and the gateway then lost the profile its UPN
 	// selects while it still accepted the caller (GAP-0399, GAP-0442). An
-	// exclude_users entry leaves out the account's enrollment, not the
-	// gateway's acceptance of its hooks: an accepted caller keeps its
-	// record, as every other accepted caller does.
+	// An explicit exemption or an all-account machine policy keeps its
+	// record. A stale protected-target entry does not override exclude_users.
 	for _, uid := range enterpriseHookNameCallerUIDs(ctx, dir, leftOut, accepted) {
 		if seen[uid] || left[uid] {
 			continue

@@ -103,7 +103,8 @@ func TestProfileExplainUIDTheDirectoryCannotNameMatchesItsUsersEntry(t *testing.
 	profileExplainCachedSubject = func(string, time.Time) (profileSubject, error) { return profileSubject{}, errNoCachedHolder }
 	setIdentityLookupBlocking(true)
 	subject, err := profileExplainUnresolved("94404076", unixidentity.ErrNotFound)
-	if err != nil || subject.UserID != "94404076" || !subject.LookupFailed || !strings.Contains(subject.LookupError, "i/o timeout") {
+	if err != nil || subject.UserID != "94404076" || !subject.LookupFailed || !subject.accountUnresolved ||
+		!strings.Contains(subject.LookupError, "i/o timeout") {
 		t.Fatalf("subject %+v, err %v; want the uid with the lookup failure", subject, err)
 	}
 	set := &guardrailProfileSet{
