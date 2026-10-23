@@ -716,12 +716,20 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 			Findings:   []string{"STATIC-BLOCK"},
 		}
 	}
-	// An explicit allow skips rule/pattern/AID/judge scanning. Write tools
-	// still run CodeGuard on their content (D2): the allow bypasses the
-	// scan gate, not code-content inspection.
+	// An explicit allow skips ordinary rule/pattern/AID/judge scanning. A
+	// resolved high-severity write is still inspected: allowing the tool name
+	// cannot authorize an active instruction-file mutation. Write tools also
+	// keep CodeGuard inspection of their content (D2).
 	allowed, err := pe.IsToolAllowedForConnector(req.Tool, req.Connector)
 	if err != nil {
 		return toolPolicyLookupErrorVerdict("inspect", "allow-list", req.Tool, req.Connector, err)
+	}
+	if allowed {
+		cfg := a.decisionConfig(ctx)
+		if (cfg == nil || !cfg.SecureClientIntegration()) &&
+			len(provedHighWriteFindings(ctx, action, nil)) != 0 {
+			allowed = false
+		}
 	}
 	if allowed {
 		if !isWriteToolName(strings.ToLower(req.Tool)) {
@@ -751,7 +759,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		)
 	}
 	ruleFindings := dispatchTrustedAction(ctx, action)
-	ruleFindings, provedHighWrite := provedHighWriteFindings(ctx, action, ruleFindings)
+	ruleFindings = provedHighWriteFindings(ctx, action, ruleFindings)
 
 	// CodeGuard: scan file content for any file-write tool.
 	//
@@ -792,9 +800,6 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		runtimeAction := guardrailActionForConnectorFindings(
 			a.decisionConfig(ctx), req.Connector, ruleFindings, true,
 		)
-		if provedHighWrite {
-			runtimeAction = guardrailActionBlock
-		}
 		if enforceableSeverity != "NONE" {
 			codeGuardAction := guardrailActionForConnector(
 				a.decisionConfig(ctx), req.Connector, enforceableSeverity, true,
