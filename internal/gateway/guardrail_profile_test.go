@@ -112,7 +112,7 @@ func TestGuardrailProfileRemovalUsesReloadedBaseForUnmatchedHook(t *testing.T) {
 	live := startup
 	api.SetGenerationSource(func() *Generation { return &Generation{Config: live} })
 	ctx := api.withGuardrailProfileDecision(t.Context(), "opencode")
-	if got := hookModeForConfig(api.decisionConfig(ctx), "opencode"); got != "observe" {
+	if got := api.decisionConfig(ctx).HookModeForConnector("opencode"); got != "observe" {
 		t.Fatalf("startup unmatched hook mode = %q", got)
 	}
 	reloaded := *startup
@@ -122,7 +122,7 @@ func TestGuardrailProfileRemovalUsesReloadedBaseForUnmatchedHook(t *testing.T) {
 	reloaded.Guardrail.ProfileAssignments = nil
 	live = &reloaded
 	api.setGuardrailProfiles(nil)
-	if got := hookModeForConfig(api.decisionConfig(ctx), "opencode"); got != "action" {
+	if got := api.decisionConfig(ctx).HookModeForConnector("opencode"); got != "action" {
 		t.Fatalf("reloaded unmatched hook mode = %q, want action", got)
 	}
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/guardrail/profiles/resolve?connector=opencode", nil)
@@ -1369,7 +1369,7 @@ func TestProfileExplainReportsTheLiveMode(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("%v: %s", err, rec.Body.String())
 	}
-	if out.Effective.Mode != hookModeForConfig(live, "codex") || out.Effective.Mode != "action" {
+	if out.Effective.Mode != live.HookModeForConnector("codex") || out.Effective.Mode != "action" {
 		t.Fatalf("effective mode = %q, want the live action mode: %s", out.Effective.Mode, rec.Body.String())
 	}
 }

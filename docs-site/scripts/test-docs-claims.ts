@@ -14,6 +14,14 @@ function page(name: string): string {
   return readFileSync(join(site, 'content/docs', name), 'utf8').split(/\s+/).join(' ');
 }
 
+describe('Rollback gateway state', () => {
+  it('qualifies automatic startup and names the command for a stopped gateway', () => {
+    const text = page('get-started/upgrade.mdx').split('## Rollback')[1].split('## Update notices')[0];
+    assert.match(text, /stopped[^.]*stopped/);
+    assert.match(text, /`defenseclaw-gateway start`/);
+  });
+});
+
 describe('Intune base config versus the signed bundle', () => {
   it('names exactly the blocks the packager compares', () => {
     const packager = readFileSync(
@@ -44,7 +52,7 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
     for (const name of ['reference/connectors/copilot.mdx']) {
       const text = page(name);
       assert.ok(!/no fail-closed hook transport/i.test(text), name);
-      assert.ok(text.includes('in fail mode `closed`, the default'), name);
+      assert.match(text, /in fail mode `closed`, the default/i, name);
     }
     for (const name of ['reference/connectors/antigravity.mdx']) {
       const text = page(name);

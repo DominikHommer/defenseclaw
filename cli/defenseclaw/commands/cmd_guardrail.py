@@ -2221,22 +2221,115 @@ _HERMES_UPSTREAM_TIMEOUT_NOTE = (
 )
 
 
-def _action_profiles_for(gc, connector: str) -> list[str]:
-    """Names of the guardrail profiles that put *connector* in action mode.
+def _profile_connector_policies(gc, connector: str) -> list[tuple[str, str]]:
+    """``(profile, mode)`` for each guardrail profile, for *connector*.
 
-    A profile's own per-connector mode wins over its profile-wide mode, as
-    the gateway resolves it; an unset value inherits and is not counted.
+    *mode* is the mode the profile itself sets for the connector, "" when it
+    inherits. A profile's own per-connector value wins over its profile-wide
+    one, as the gateway resolves it (applyGuardrailProfile).
     """
-    names: list[str] = []
+    rows: list[tuple[str, str]] = []
     target = normalize_connector(connector)
     for pname, profile in sorted((getattr(gc, "profiles", None) or {}).items()):
         mode = str(getattr(profile, "mode", "") or "").strip().lower()
         for cname, override in (getattr(profile, "connectors", None) or {}).items():
             if normalize_connector(cname) == target and str(getattr(override, "mode", "") or "").strip():
                 mode = str(override.mode).strip().lower()
-        if mode == "action":
-            names.append(str(pname))
-    return names
+        rows.append((str(pname), mode))
+    return rows
+
+
+def _action_profiles_for(gc, connector: str) -> list[str]:
+    """Names of the guardrail profiles that put *connector* in action mode.
+
+    An unset mode inherits and is not counted.
+    """
+    return [name for name, mode in _profile_connector_policies(gc, connector) if mode == "action"]
+
+
+def _hilt_preview_lines(app: AppContext, key: str, label: str, enabled: bool, min_severity: str) -> list[str]:
+    """What saving this connector HILT block does, line by line.
+
+    The hook mode and HILT come from the gateway's own resolvers
+    (``defenseclaw-gateway connector hilt-preview``), never from a Python
+    copy: a legacy ``claude_code.mode``, ``codex.mode`` or
+    ``connector_hooks.<c>.mode`` wins over the guardrail mode there, and a
+    guardrail profile that sets a mode or its own HILT block changes what its
+    accounts get. When the gateway cannot answer, the preview says so and
+    promises nothing.
+    """
+    from defenseclaw import config_inspect
+
+    try:
+        preview = config_inspect.connector_hilt_preview(
+            normalize_connector(key),
+            enabled=enabled,
+            min_severity=min_severity,
+            config_path=str(config_path_for_data_dir(app.cfg.data_dir)),
+        )
+    except config_inspect.ConfigInspectError as exc:
+        return [
+            f"Could not resolve {label}'s hook mode with the gateway ({exc}). The saved HILT policy pauses "
+            f"actions only where {label} runs in action mode; check an account with: "
+            f"defenseclaw guardrail profile explain --user <name> --connector {normalize_connector(key)}"
+        ]
+    base = preview.base
+    if base.mode != "action":
+        lines = [
+            f"{label} is in {base.mode} mode, which does not pause actions for approval. "
+            "The saved HILT policy applies when the connector uses action mode."
+        ]
+    elif base.enabled:
+        # A connector without a native approval prompt alerts instead.
+        lines = [_hilt_enable_notice(key, base.min_severity)]
+    else:
+        lines = [f"{label} will NOT prompt — actions resolve straight to allow/alert/block."]
+    return lines + _hilt_profile_notes(preview, label)
+
+
+def _hilt_profile_notes(preview, label: str) -> list[str]:
+    """What a saved connector HILT change does for accounts on guardrail profiles.
+
+    *preview* is the gateway's answer (``connector_hilt_preview``). A profile
+    with its own HILT block is not reached by the change. One that follows it
+    but runs the connector in another hook mode than the accounts on no
+    profile pauses (action) or does not (observe) where the base line says the
+    opposite, so its accounts get their own line.
+    """
+    base = preview.base
+    action: list[str] = []
+    passive: list[str] = []
+    own: list[str] = []
+    for scope in preview.profiles:
+        if not scope.follows_connector_hilt:
+            own.append(scope.profile)
+        elif scope.mode != base.mode:
+            (action if scope.mode == "action" else passive).append(scope.profile)
+    notes: list[str] = []
+    if action:
+        names = ", ".join(action)
+        if base.enabled:
+            notes.append(
+                f"Guardrail profile(s) {names} put {label} in action mode: their accounts will be prompted "
+                f"for approval on confirmable actions at/above {base.min_severity} (CRITICAL findings still block "
+                "outright)."
+            )
+        else:
+            notes.append(
+                f"Guardrail profile(s) {names} put {label} in action mode: their accounts will NOT be prompted; "
+                "actions resolve straight to allow/alert/block."
+            )
+    if passive:
+        notes.append(
+            f"Guardrail profile(s) {', '.join(passive)} put {label} in observe mode: "
+            "their accounts are not paused for approval."
+        )
+    if own:
+        notes.append(
+            f"Guardrail profile(s) {', '.join(own)} set their own HILT policy: this change does not apply to "
+            "their accounts."
+        )
+    return notes
 
 
 def _warn_still_fail_open(gc, open_names: list[str]) -> None:
@@ -2355,16 +2448,8 @@ def _set_connector_hilt(
         f"enabled={ux.accent(str(new_enabled).lower())} "
         f"min_severity={ux.accent(new_min)}"
     )
-    if new_enabled:
-        ux.subhead(
-            _hilt_enable_notice(key, new_min),
-            indent="  ",
-        )
-    else:
-        ux.subhead(
-            f"{label} will NOT prompt — actions resolve straight to allow/alert/block.",
-            indent="  ",
-        )
+    for line in _hilt_preview_lines(app, key, label, new_enabled, new_min):
+        ux.subhead(line, indent="  ")
     click.echo()
 
     if not yes and not _confirm_proceed():
@@ -4158,6 +4243,22 @@ def use_pack_cmd(
         path = candidate
         pack_name, kind = policy_catalog.pack_name_for_path(app.cfg, path)
 
+    # A directory spelling is the same pinned pack even when its key differs
+    # from the basename (or it is reached through a symlink). Check every pin
+    # for that directory so conflicting aliases cannot silently re-pin it.
+    path_pins = []
+    if kind != "preset":
+        canonical = os.path.normcase(os.path.realpath(path))
+        path_pins = [
+            (name, pin)
+            for name, pin in sorted((getattr(gc, "custom_packs", None) or {}).items())
+            if getattr(pin, "path", "")
+            and os.path.normcase(os.path.realpath(policy_catalog.normalize_pack_path(pin.path))) == canonical
+        ]
+        if path_pins and kind != "registered":
+            pack_name = path_pins[0][0]
+            kind = "registered"
+
     if kind == "preset" and not os.path.isdir(path):
         _finish(
             ok=False,
@@ -4221,12 +4322,35 @@ def use_pack_cmd(
                 )
             # The pin covers the pack's own files, not the embedded defaults.
             digest = str((result.summary or {}).get("files_digest", "") or "")
-            pinned = str(getattr(registered, "digest", "") or "").strip().lower().removeprefix("sha256:")
+            # The pin of this pack: its key, or the key of the pin that names
+            # this directory when it was given by path (path_pins).
+            own_pin = registered if registered is not None else dict(path_pins).get(pack_name)
+            pinned = str(getattr(own_pin, "digest", "") or "").strip().lower().removeprefix("sha256:")
             if kind == "registered" and digest.lower() != pinned:
                 old_pin = f"sha256:{pinned}" if pinned else ""
                 if not repin:
                     _refuse_stale_pin(old_pin)
                 repinned = (old_pin, f"sha256:{digest}")
+            # Another key that pins the same directory must not hide a stale
+            # pin either; --repin replaces only this pack's own pin.
+            for pin_name, pin in path_pins:
+                if pin_name == pack_name:
+                    continue
+                pinned = str(getattr(pin, "digest", "") or "").strip().lower().removeprefix("sha256:")
+                if digest and digest.lower() == pinned:
+                    continue
+                _finish(
+                    ok=False,
+                    exit_code=1,
+                    pack_name=pack_name,
+                    path=path,
+                    validation=validation,
+                    message=(
+                        f"Rule pack {pin_name!r} no longer matches the digest registered for it. Review the pack, "
+                        f"then pin it: defenseclaw config set guardrail.custom_packs.{pin_name}.digest "
+                        f"sha256:{digest}. Nothing was changed."
+                    ),
+                )
 
     _preflight_config_write(app)
     changes: list = []
@@ -4256,10 +4380,13 @@ def use_pack_cmd(
                 config_writer.Change(f"guardrail.custom_packs.{name}", {"path": path, "digest": f"sha256:{digest}"})
             )
     elif repinned is not None:
+        # Keep the path the pin records, also when the pack was given by a
+        # directory that pin names (path_pins).
+        pin = registered if registered is not None else dict(path_pins).get(name)
         changes.append(
             config_writer.Change(
                 f"guardrail.custom_packs.{name}",
-                {"path": str(getattr(registered, "path", "") or ""), "digest": repinned[1]},
+                {"path": str(getattr(pin, "path", "") or ""), "digest": repinned[1]},
             )
         )
     shared: list[str] = []

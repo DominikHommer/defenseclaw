@@ -3133,33 +3133,7 @@ func (a *APIServer) agentHookMode(ctx context.Context, name string) string {
 	if a == nil {
 		return "observe"
 	}
-	return hookModeForConfig(a.decisionConfig(ctx), name)
-}
-
-// hookModeForConfig resolves a connector's hook mode in cfg: the legacy
-// per-connector hook mode when set, else the guardrail chain.
-func hookModeForConfig(cfg *config.Config, name string) string {
-	mode := "observe"
-	if cfg != nil {
-		hookCfg := cfg.ConnectorHookConfig(name)
-		mode = strings.TrimSpace(hookCfg.Mode)
-		if mode == "" || strings.EqualFold(mode, "inherit") {
-			// Per-connector guardrail override (guardrail.connectors[name].mode)
-			// wins over the global mode; EffectiveMode encapsulates that
-			// precedence and falls back to the global mode then "observe".
-			mode = strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector(name))
-		}
-	}
-	return normalizeAgentHookMode(mode)
-}
-
-func normalizeAgentHookMode(mode string) string {
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "action", "enforce":
-		return "action"
-	default:
-		return "observe"
-	}
+	return a.decisionConfig(ctx).HookModeForConnector(name)
 }
 
 // isRelayedSandboxRequest reports whether ctx is a sandbox call the managed

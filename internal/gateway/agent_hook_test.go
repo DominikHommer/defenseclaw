@@ -84,15 +84,6 @@ func TestCursorProfileEmptyOfficialResultDoesNotUseGenericDecoy(t *testing.T) {
 	}
 }
 
-func TestNormalizeAgentHookMode_EnforceAlias(t *testing.T) {
-	if got := normalizeAgentHookMode("enforce"); got != "action" {
-		t.Fatalf("normalizeAgentHookMode(enforce) = %q, want action", got)
-	}
-	if got := normalizeAgentHookMode("warn"); got != "observe" {
-		t.Fatalf("normalizeAgentHookMode(warn) = %q, want observe", got)
-	}
-}
-
 func TestNormalizeAgentHookRequest_AntigravityNilToolArgsProjectionUsesEmptyObject(t *testing.T) {
 	raw := []byte(`{"hookEventName":"PreToolUse","toolCall":{"name":"run_command"}}`)
 	var payload map[string]interface{}

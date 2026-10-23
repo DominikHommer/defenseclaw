@@ -1497,8 +1497,182 @@ class PerConnectorFailModeTests(unittest.TestCase):
         app.cfg.save.assert_not_called()
 
 
+def _fake_hilt_preview(base_mode: str, profiles: dict | None = None, calls: list | None = None):
+    """A stand-in for the gateway's connector hilt-preview answer.
+
+    *profiles* maps a profile name to ``(mode, own_hilt)``, where *own_hilt*
+    is ``None`` when the profile follows the connector's HILT block, else the
+    ``(enabled, min_severity)`` of its own.
+    """
+    from defenseclaw.config_inspect import ConnectorHILTPreview, HILTPreviewScope
+
+    def fake(connector, *, enabled, min_severity, config_path, gateway_binary=None):
+        if calls is not None:
+            calls.append((connector, enabled, min_severity, config_path))
+        scopes = []
+        for name, (mode, own_hilt) in sorted((profiles or {}).items()):
+            own_enabled, own_min = own_hilt if own_hilt is not None else (enabled, min_severity)
+            scopes.append(HILTPreviewScope(name, mode, own_enabled, own_min, own_hilt is None))
+        base = HILTPreviewScope("", base_mode, enabled, min_severity, True)
+        return ConnectorHILTPreview(connector, base, tuple(scopes))
+
+    return fake
+
+
 class HILTCommandTests(unittest.TestCase):
     """`guardrail hilt [on|off] [--min-severity X] [--connector Y]`."""
+
+    def setUp(self):
+        # The per-connector preview asks the gateway binary; no test reaches
+        # an installed one.
+        from defenseclaw.config_inspect import ConfigInspectError
+
+        patcher = patch(
+            "defenseclaw.config_inspect.connector_hilt_preview",
+            side_effect=ConfigInspectError("defenseclaw-gateway is not installed; run defenseclaw upgrade"),
+        )
+        self.hilt_preview = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_connector_preview_explains_effective_observe_mode(self):
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        app.cfg.guardrail.mode = "action"
+        app.cfg.guardrail.connectors["claudecode"].mode = "observe"
+        self.hilt_preview.side_effect = _fake_hilt_preview("observe")
+        result = CliRunner().invoke(
+            cmd_guardrail.hilt_cmd, ["on", "--connector", "claudecode"], obj=app, input="n\n",
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("observe mode", result.output)
+        self.assertIn("does not pause actions for approval", result.output)
+        self.assertNotIn("will prompt for approval", result.output)
+        app.cfg.save.assert_not_called()
+
+        app.cfg.guardrail.connectors["claudecode"].mode = "action"
+        self.hilt_preview.side_effect = _fake_hilt_preview("action")
+        result = CliRunner().invoke(
+            cmd_guardrail.hilt_cmd, ["on", "--connector", "claudecode"], obj=app, input="n\n",
+        )
+        self.assertIn("will prompt for approval", result.output)
+
+    def test_connector_preview_uses_the_gateway_hook_mode(self):
+        """A legacy claude_code.mode: action wins over an observe guardrail mode (gateway precedence)."""
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        app.cfg.guardrail.mode = "observe"
+        app.cfg.guardrail.connectors["claudecode"].mode = "observe"
+        calls: list = []
+        # What the gateway resolves for this config.yaml plus claude_code.mode: action.
+        self.hilt_preview.side_effect = _fake_hilt_preview("action", calls=calls)
+        result = CliRunner().invoke(
+            cmd_guardrail.hilt_cmd,
+            ["on", "--min-severity", "medium", "--connector", "Claude-Code"],
+            obj=app,
+            input="n\n",
+        )
+        out = " ".join(result.output.split())
+        self.assertIn("Claude Code will prompt for approval on supported confirmable actions at/above MEDIUM", out)
+        self.assertNotIn("does not pause", out)
+        self.assertEqual(calls, [("claudecode", True, "MEDIUM", os.path.join("/tmp/dc", "config.yaml"))])
+        app.cfg.save.assert_not_called()
+
+        self.hilt_preview.side_effect = _fake_hilt_preview("action")
+        result = CliRunner().invoke(
+            cmd_guardrail.hilt_cmd, ["off", "--connector", "claudecode"], obj=app, input="n\n",
+        )
+        self.assertIn("Claude Code will NOT prompt", result.output)
+
+    def test_connector_preview_promises_nothing_without_the_gateway(self):
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        app.cfg.guardrail.connectors["claudecode"].mode = "action"
+        result = CliRunner().invoke(
+            cmd_guardrail.hilt_cmd, ["on", "--connector", "claudecode"], obj=app, input="n\n",
+        )
+        out = " ".join(result.output.split())
+        self.assertIn("Could not resolve Claude Code's hook mode with the gateway", out)
+        self.assertIn("defenseclaw guardrail profile explain --user <name> --connector claudecode", out)
+        self.assertNotIn("will prompt for approval", out)
+        self.assertNotIn("does not pause", out)
+        app.cfg.save.assert_not_called()
+
+    def test_connector_preview_names_action_mode_profiles(self):
+        """An observe connector still prompts accounts a profile puts in action mode."""
+        from defenseclaw.config import GuardrailProfile, HILTConfig, PerConnectorGuardrailConfig
+
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        gc = app.cfg.guardrail
+        gc.profiles = {
+            "ops": GuardrailProfile(mode="action"),
+            "dev": GuardrailProfile(connectors={"claude-code": PerConnectorGuardrailConfig(mode="action")}),
+            "own": GuardrailProfile(mode="action", hilt=HILTConfig(enabled=False)),
+            "own-conn": GuardrailProfile(
+                connectors={"claudecode": PerConnectorGuardrailConfig(mode="action", hilt=HILTConfig())}
+            ),
+            "codex-only": GuardrailProfile(connectors={"codex": PerConnectorGuardrailConfig(mode="action")}),
+            "quiet": GuardrailProfile(mode="action", connectors={"claudecode": PerConnectorGuardrailConfig(mode="observe")}),
+        }
+        # The gateway's answer for those profiles.
+        self.hilt_preview.side_effect = _fake_hilt_preview(
+            "observe",
+            {
+                "ops": ("action", None),
+                "dev": ("action", None),
+                "own": ("action", (False, "HIGH")),
+                "own-conn": ("action", (False, "")),
+                "codex-only": ("observe", None),
+                "quiet": ("observe", None),
+            },
+        )
+        result = CliRunner().invoke(
+            cmd_guardrail.hilt_cmd,
+            ["on", "--min-severity", "MEDIUM", "--connector", "claudecode"],
+            obj=app,
+            input="n\n",
+        )
+        out = " ".join(result.output.split())
+        self.assertIn("does not pause actions for approval", out)
+        self.assertIn(
+            "Guardrail profile(s) dev, ops put Claude Code in action mode: their accounts will be prompted "
+            "for approval on confirmable actions at/above MEDIUM",
+            out,
+        )
+        self.assertIn("Guardrail profile(s) own, own-conn set their own HILT policy", out)
+        self.assertNotIn("codex-only", out)
+        self.assertNotIn("quiet", out)
+        app.cfg.save.assert_not_called()
+
+        result = CliRunner().invoke(
+            cmd_guardrail.hilt_cmd, ["off", "--connector", "claudecode"], obj=app, input="n\n",
+        )
+        out = " ".join(result.output.split())
+        self.assertIn("Guardrail profile(s) dev, ops put Claude Code in action mode: their accounts will NOT be prompted", out)
+
+    def test_connector_preview_names_observe_mode_profiles(self):
+        """An action connector does not prompt accounts a profile puts in observe mode."""
+        from defenseclaw.config import GuardrailProfile
+
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        gc = app.cfg.guardrail
+        gc.connectors["claudecode"].mode = "action"
+        gc.profiles = {
+            "audit": GuardrailProfile(mode="observe"),
+            "same": GuardrailProfile(mode="action"),
+            "plain": GuardrailProfile(block_at="HIGH"),
+        }
+        self.hilt_preview.side_effect = _fake_hilt_preview(
+            "action", {"audit": ("observe", None), "same": ("action", None), "plain": ("action", None)}
+        )
+        result = CliRunner().invoke(
+            cmd_guardrail.hilt_cmd, ["on", "--connector", "claudecode"], obj=app, input="n\n",
+        )
+        out = " ".join(result.output.split())
+        self.assertIn("Claude Code will prompt for approval", out)
+        self.assertIn(
+            "Guardrail profile(s) audit put Claude Code in observe mode: their accounts are not paused for approval.",
+            out,
+        )
+        self.assertNotIn("same", out)
+        self.assertNotIn("plain", out)
+        self.assertNotIn("in action mode:", out)
 
     def test_show_global_when_no_args(self):
         runner = CliRunner()

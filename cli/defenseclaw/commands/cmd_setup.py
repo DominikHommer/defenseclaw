@@ -16724,6 +16724,7 @@ _SPLUNK_LOCAL_HEC_DEFAULTS = {
 }
 
 _SPLUNK_BRIDGE_ENV_REL = os.path.join("splunk-bridge", "env", ".env")
+_SPLUNK_BRIDGE_DEFAULT_HEC_URL = "https://127.0.0.1:8088/services/collector/event"
 
 # Every name authored by the current bridge env contract, plus names shipped
 # by earlier supported bundles and the native controller's generated token.
@@ -17057,15 +17058,16 @@ def setup_splunk(
                     "  HEC endpoint",
                     default="https://splunk.example.com:8088/services/collector/event",
                 )
-            resolved_hec_token = hec_token or os.environ.get("DEFENSECLAW_SPLUNK_HEC_TOKEN", "")
+            # Only an explicit input: a saved credential belongs to another destination.
+            resolved_hec_token = hec_token or ""
             if not resolved_hec_token and non_interactive:
                 click.echo(
-                    "  error: --hec-token required (or set DEFENSECLAW_SPLUNK_HEC_TOKEN env var)",
+                    "  error: --hec-token required (or set DEFENSECLAW_SETUP_SPLUNK_HEC_TOKEN)",
                     err=True,
                 )
                 raise SystemExit(1)
             if not resolved_hec_token:
-                resolved_hec_token = _prompt_splunk_hec_token(None)
+                resolved_hec_token = _prompt_splunk_hec_token()
             if not resolved_hec_token:
                 click.echo("  error: HEC token is required for Splunk Enterprise", err=True)
                 raise SystemExit(1)
@@ -17406,19 +17408,10 @@ def _prompt_splunk_token(current: str | None) -> str:
     return current or env_val
 
 
-def _prompt_splunk_hec_token(current: str | None) -> str:
-    env_val = os.environ.get("DEFENSECLAW_SPLUNK_HEC_TOKEN", "")
-    if current:
-        hint = _mask(current)
-    elif env_val:
-        hint = f"from env: {_mask(env_val)}"
-    else:
-        hint = "(not set)"
-
-    val = click.prompt(f"  HEC token [{hint}]", default="", show_default=False, hide_input=True)
-    if val:
-        return val
-    return current or env_val
+def _prompt_splunk_hec_token() -> str:
+    # Each remote Splunk destination has its own credential, so the prompt
+    # never offers one saved for another destination.
+    return click.prompt("  HEC token", default="", show_default=False, hide_input=True)
 
 
 def _interactive_logs(app: AppContext) -> bool:
@@ -17438,7 +17431,7 @@ def _interactive_logs(app: AppContext) -> bool:
     source = click.prompt("  Source", default="defenseclaw")
     sourcetype = click.prompt("  Sourcetype", default="defenseclaw:json")
 
-    _apply_logs_config(app, index=index, source=source, sourcetype=sourcetype, bootstrap_bridge=True)
+    _apply_logs_config(app, index=index, source=source, sourcetype=sourcetype)
     return True
 
 
@@ -17452,7 +17445,7 @@ def _interactive_enterprise(app: AppContext, *, skip_test: bool = False) -> None
         "  HEC endpoint",
         default="https://splunk.example.com:8088/services/collector/event",
     )
-    token = _prompt_splunk_hec_token(None)
+    token = _prompt_splunk_hec_token()
     if not token:
         click.echo("  error: HEC token is required for Splunk Enterprise", err=True)
         raise SystemExit(1)
@@ -17542,7 +17535,6 @@ def _setup_logs(
         index=index or "defenseclaw_local",
         source=source or "defenseclaw",
         sourcetype=sourcetype or "defenseclaw:json",
-        bootstrap_bridge=True,
         s3_export=s3_export,
         s3_bucket=s3_bucket,
         s3_prefix=s3_prefix,
@@ -17577,15 +17569,16 @@ def _setup_enterprise(
             default="https://splunk.example.com:8088/services/collector/event",
         )
 
-    token = hec_token or os.environ.get("DEFENSECLAW_SPLUNK_HEC_TOKEN", "")
+    # Only an explicit input: a saved credential belongs to another destination.
+    token = hec_token or ""
     if not token and non_interactive:
         click.echo(
-            "  error: --hec-token required (or set DEFENSECLAW_SPLUNK_HEC_TOKEN env var)",
+            "  error: --hec-token required (or set DEFENSECLAW_SETUP_SPLUNK_HEC_TOKEN)",
             err=True,
         )
         raise SystemExit(1)
     if not token:
-        token = _prompt_splunk_hec_token(None)
+        token = _prompt_splunk_hec_token()
     if not token:
         click.echo("  error: HEC token is required for Splunk Enterprise", err=True)
         raise SystemExit(1)
@@ -17650,10 +17643,14 @@ def _apply_v8_observability_preset(
     name: str | None = None,
     signals: tuple[str, ...] | None = None,
     secret_value: str | None = None,
-    secret_env_name: str | None = None,
+    local_stack: dict[str, str] | None = None,
     allow_private_networks: bool = False,
 ) -> str:
-    """Write one setup alias through the canonical v8 destination writer."""
+    """Write one setup alias through the canonical v8 destination writer.
+
+    Only local Splunk setup passes *local_stack*, the record of the container
+    it started; that sink alone uses the isolated local credential reference.
+    """
 
     from defenseclaw.commands.cmd_setup_observability import (
         _add_v8_destination,
@@ -17664,10 +17661,6 @@ def _apply_v8_observability_preset(
 
     _require_v8_operator_status(app.cfg.data_dir)
     preset = resolve_preset(preset_id)
-    if secret_env_name:
-        # Local Splunk owns a generated token that must remain independent
-        # from the operator-provided remote Enterprise token.
-        preset = replace(preset, token_env=secret_env_name)
     resolved = resolve_inputs(preset, inputs)
     resolved_name = destination_name(preset, name, resolved)
     _add_v8_destination(
@@ -17681,6 +17674,7 @@ def _apply_v8_observability_preset(
         target=None,
         dry_run=False,
         allow_private_networks=allow_private_networks,
+        local_stack=local_stack,
     )
     return resolved_name
 
@@ -17732,22 +17726,19 @@ def _apply_logs_config(
     index: str,
     source: str,
     sourcetype: str,
-    bootstrap_bridge: bool,
     s3_export: bool = False,
     s3_bucket: str | None = None,
     s3_prefix: str | None = None,
     aws_region: str | None = None,
     refresh_bundle: bool = True,
 ) -> None:
-    """Configure the local Splunk bridge as a canonical HEC destination."""
-    native_windows = bootstrap_bridge and _native_windows_local_splunk()
-    gateway_token_env = (
-        _validated_splunk_gateway_token_env_name(
-            _configured_gateway_token_env_name(app.cfg),
-            platform_name="nt" if native_windows else None,
-        )
-        if bootstrap_bridge
-        else ""
+    """Start the local Splunk stack and record its sink as a canonical HEC destination."""
+    from defenseclaw.observability.v8_presets import local_splunk_destination_name, local_splunk_record
+
+    native_windows = _native_windows_local_splunk()
+    gateway_token_env = _validated_splunk_gateway_token_env_name(
+        _configured_gateway_token_env_name(app.cfg),
+        platform_name="nt" if native_windows else None,
     )
     if native_windows:
         _apply_native_windows_logs_config(
@@ -17764,27 +17755,27 @@ def _apply_logs_config(
         )
         return
 
-    contract: dict[str, str] | None = None
-    if bootstrap_bridge:
-        contract = _bootstrap_bridge(
-            app.cfg.data_dir,
-            gateway_token_env=gateway_token_env,
-            s3_export=s3_export,
-            s3_bucket=s3_bucket,
-            s3_prefix=s3_prefix,
-            aws_region=aws_region,
-            refresh_bundle=refresh_bundle,
-        )
-        if not contract:
-            raise SystemExit(1)
+    # Refuse a destination local setup did not record before the stack is
+    # refreshed, restarted or started. The name comes from the address the
+    # bridge will report, which a custom bridge env file can change.
+    _local_splunk_sink_name_or_exit(app, local_splunk_destination_name(_planned_local_splunk_hec_url(app.cfg.data_dir)))
+    contract = _bootstrap_bridge(
+        app.cfg.data_dir,
+        gateway_token_env=gateway_token_env,
+        s3_export=s3_export,
+        s3_bucket=s3_bucket,
+        s3_prefix=s3_prefix,
+        aws_region=aws_region,
+        refresh_bundle=refresh_bundle,
+    )
+    if not contract:
+        raise SystemExit(1)
 
-    hec_url = (contract or {}).get("hec_url", _SPLUNK_LOCAL_HEC_DEFAULTS["hec_endpoint"])
-    hec_token = (contract or {}).get("hec_token", "")
-
-    # Pull host/port from the contract URL so the preset writer derives a
-    # stable name ("splunk-hec-127-0-0-1") and the endpoint matches exactly.
-    from urllib.parse import urlparse
-
+    hec_url = contract.get("hec_url", _SPLUNK_LOCAL_HEC_DEFAULTS["hec_endpoint"])
+    hec_token = contract.get("hec_token", "")
+    # The record (the container setup started, with DefenseClaw's marker) is
+    # what makes this the local sink; its name and address never do.
+    record = local_splunk_record(_local_splunk_container_id(gateway_token_env))
     parsed = urlparse(hec_url)
     host = parsed.hostname or "127.0.0.1"
     port = str(parsed.port or 8088)
@@ -17804,11 +17795,52 @@ def _apply_logs_config(
             "sourcetype": sourcetype,
             "verify_tls": "false",
         },
+        name=_local_splunk_sink_name_or_exit(app, local_splunk_destination_name(hec_url)),
         secret_value=hec_token or None,
+        local_stack=record,
         # The local Splunk container listens on this computer.
         allow_private_networks=True,
     )
     _reload_cfg_from_data_dir(app)
+
+
+def _planned_local_splunk_hec_url(data_dir: str) -> str:
+    """The HEC address the macOS and Linux bridge will report, read without changing anything.
+
+    The bridge reports ``DEFENSECLAW_HEC_URL`` from its private env file. A
+    first setup creates that file from the seeded template.
+    """
+
+    env_file = os.path.join(data_dir, _SPLUNK_BRIDGE_ENV_REL)
+    reject_symlink(env_file, what="Splunk bridge env file")
+    entries = _load_dotenv(env_file) if os.path.isfile(env_file) else _load_splunk_bridge_example_env(data_dir)
+    return entries.get("DEFENSECLAW_HEC_URL") or _SPLUNK_BRIDGE_DEFAULT_HEC_URL
+
+
+def _local_splunk_sink_name_or_exit(app: AppContext, preferred: str) -> str:
+    """The destination local setup writes; refuse one it did not record."""
+
+    from defenseclaw.commands.cmd_setup_observability import _local_splunk_sink_name, _v8_authored_destinations
+
+    try:
+        return _local_splunk_sink_name(_v8_authored_destinations(app.cfg.data_dir), preferred)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+def _local_splunk_container_id(gateway_token_env: str) -> str:
+    """The full ID of the Splunk container the macOS and Linux bridge started."""
+
+    from defenseclaw.observability.local_splunk import running_splunk_container_id
+    from defenseclaw.observability.local_stack import CommandRunner, LocalStackError
+
+    docker = shutil.which("docker")
+    try:
+        if not docker:
+            raise LocalStackError("docker is not on PATH")
+        return running_splunk_container_id(docker, CommandRunner(), _splunk_bridge_child_env(gateway_token_env))
+    except LocalStackError as exc:
+        raise click.ClickException(f"could not record the local Splunk container: {exc}") from exc
 
 
 def _apply_native_windows_logs_config(
@@ -17834,9 +17866,11 @@ def _apply_native_windows_logs_config(
     from defenseclaw.observability.local_splunk import (
         LOCAL_TOKEN_ENV,
         NativeSplunkSetupTransaction,
+        running_splunk_container_id,
         start_native_local_splunk,
     )
     from defenseclaw.observability.local_stack import LocalStackError
+    from defenseclaw.observability.v8_presets import NATIVE_LOCAL_SPLUNK_DESTINATION, local_splunk_record
 
     config_path = str(config_path_for_data_dir(app.cfg.data_dir))
     dotenv_path = os.path.join(app.cfg.data_dir, ".env")
@@ -17853,6 +17887,8 @@ def _apply_native_windows_logs_config(
     transaction: NativeSplunkSetupTransaction | None = None
     contract = None
     config_mutated = False
+    # Refuse a destination local setup did not record before the stack starts.
+    sink_name = _local_splunk_sink_name_or_exit(app, NATIVE_LOCAL_SPLUNK_DESTINATION)
     click.echo("  Pre-flight checks:")
     try:
         transaction = start_native_local_splunk(
@@ -17870,6 +17906,12 @@ def _apply_native_windows_logs_config(
         )
         contract = transaction.contract
         click.echo("    Docker Desktop, Compose v2, Linux containers, assets, and ports... ok")
+        controller = transaction.controller
+        # The record of the container started here is what makes this the
+        # local sink; its name and address never do.
+        record = local_splunk_record(
+            running_splunk_container_id(controller.docker_path, controller.runner, controller.environment)
+        )
 
         # Readiness is complete before the first DefenseClaw configuration
         # byte or root dotenv secret is changed.
@@ -17886,9 +17928,9 @@ def _apply_native_windows_logs_config(
                 "sourcetype": contract.sourcetype,
                 "verify_tls": "false",
             },
-            name="local-splunk",
+            name=sink_name,
             secret_value=contract.hec_token,
-            secret_env_name=LOCAL_TOKEN_ENV,
+            local_stack=record,
             allow_private_networks=True,
         )
         _reload_cfg_from_data_dir(app)
@@ -18352,10 +18394,7 @@ def _ensure_private_splunk_bridge_env(data_dir: str) -> str:
             "SPLUNK_GENERAL_TERMS": "--accept-sgt-current-at-splunk-com",
             "SPLUNK_PASSWORD": f"DefenseClawLocal-{secrets.token_hex(16)}!",
             "SPLUNK_HEC_TOKEN": hec_token,
-            "DEFENSECLAW_HEC_URL": entries.get(
-                "DEFENSECLAW_HEC_URL",
-                "https://127.0.0.1:8088/services/collector/event",
-            ),
+            "DEFENSECLAW_HEC_URL": entries.get("DEFENSECLAW_HEC_URL", _SPLUNK_BRIDGE_DEFAULT_HEC_URL),
             "DEFENSECLAW_HEC_TOKEN": hec_token,
             "DEFENSECLAW_INDEX": entries.get("DEFENSECLAW_INDEX", "defenseclaw_local"),
             "DEFENSECLAW_SOURCETYPE": entries.get("DEFENSECLAW_SOURCETYPE", "defenseclaw:json"),
@@ -18512,19 +18551,16 @@ def _port_in_use(port: int) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _is_local_splunk_destination(dest) -> bool:
-    return _is_local_hec_endpoint(str(getattr(dest, "endpoint", "") or ""))
+def _recorded_local_splunk_names(data_dir: str) -> set[str]:
+    """Names of the destinations local Splunk setup recorded as its own.
 
+    Every other Splunk destination is remote, whatever its address.
+    """
 
-def _is_owned_native_local_splunk_destination(dest) -> bool:
-    """Return whether *dest* is the exact enabled sink owned by native setup."""
+    from defenseclaw.commands.cmd_setup_observability import _v8_authored_destinations
+    from defenseclaw.observability.v8_presets import is_recorded_local_splunk
 
-    return (
-        getattr(dest, "name", "") == "local-splunk"
-        and getattr(dest, "kind", "") == "splunk_hec"
-        and bool(getattr(dest, "enabled", False))
-        and _is_local_splunk_destination(dest)
-    )
+    return {str(item.get("name")) for item in _v8_authored_destinations(data_dir) if is_recorded_local_splunk(item)}
 
 
 def _splunk_o11y_realm(endpoint: str) -> str:
@@ -18538,12 +18574,6 @@ def _splunk_o11y_realm(endpoint: str) -> str:
         return ""
     realm = host[len(prefix) : -len(suffix)]
     return realm if realm and "." not in realm else ""
-
-
-def _is_local_hec_endpoint(endpoint: str) -> bool:
-    parsed = urlparse(endpoint if "://" in endpoint else f"https://{endpoint}")
-    host = (parsed.hostname or "").lower()
-    return host in ("localhost", "127.0.0.1", "::1")
 
 
 def _disable_splunk(
@@ -18578,6 +18608,7 @@ def _disable_splunk(
     native_was_running = False
     native_s3_export = False
     native_s3_overrides: dict[str, str] = {}
+    failed_hec_disable: list[str] = []
     config_snapshot: tuple[bytes | None, int | None] | None = None
     config_path = str(config_path_for_data_dir(app.cfg.data_dir))
 
@@ -18587,10 +18618,20 @@ def _disable_splunk(
     )
 
     dests = _require_v8_operator_status(app.cfg.data_dir).destinations
+    recorded_local = _recorded_local_splunk_names(app.cfg.data_dir)
+    unrecorded_enabled = [
+        destination.name
+        for destination in dests
+        if destination.kind == "splunk_hec" and destination.enabled and destination.name not in recorded_local
+    ]
+    # Without a recorded local sink, a running stack came from an older setup,
+    # and an enabled destination --logs leaves alone may still send to it.
+    keep_local_stack = logs_only and manage_local and not recorded_local and bool(unrecorded_enabled)
     managed_assets_path = os.path.join(app.cfg.data_dir, "splunk-bridge")
-    native_disable = native_disable_requested and (
-        any(_is_owned_native_local_splunk_destination(destination) for destination in dests)
-        or os.path.lexists(managed_assets_path)
+    native_disable = (
+        native_disable_requested
+        and not keep_local_stack
+        and (any(destination.name in recorded_local for destination in dests) or os.path.lexists(managed_assets_path))
     )
     if native_disable:
         # Prove Docker, assets, volumes, ports, and exact Compose ownership
@@ -18626,12 +18667,10 @@ def _disable_splunk(
             for destination in dests:
                 if destination.kind != "splunk_hec" or not destination.enabled:
                     continue
-                is_local = _is_local_splunk_destination(destination)
+                # Only the sink local setup recorded is local; a remote
+                # Splunk through a loopback tunnel is remote.
+                is_local = destination.name in recorded_local
                 if is_local and not manage_local:
-                    continue
-                if is_local and _native_windows_local_splunk() and getattr(destination, "name", "") != "local-splunk":
-                    # Loopback alone is not ownership. Native disable manages
-                    # only the exact sink created by this controller.
                     continue
                 if not disable_both:
                     if logs_only and not is_local:
@@ -18645,19 +18684,42 @@ def _disable_splunk(
                     else:
                         disabled_enterprise = True
                 except click.ClickException:
+                    failed_hec_disable.append(destination.name)
                     continue
             if (disable_both or logs_only) and manage_local:
-                suffix = "" if disabled_local else " (no active local sinks found)"
-                click.echo(f"    Local Splunk (HEC): disabled{suffix}")
+                if any(name in recorded_local for name in failed_hec_disable):
+                    click.echo("    Local Splunk (HEC): sink could not be disabled")
+                elif disabled_local:
+                    click.echo("    Local Splunk (HEC): sink disabled")
+                else:
+                    click.echo("    Local Splunk (HEC): no active recorded sink found")
+                if keep_local_stack:
+                    _echo_local_splunk_kept(unrecorded_enabled)
+                elif failed_hec_disable:
+                    _echo_local_splunk_disable_failed(failed_hec_disable, disable_both=disable_both)
+                elif not disabled_local and logs_only and unrecorded_enabled:
+                    click.echo(
+                        f"    Local setup did not record {', '.join(unrecorded_enabled)}, so it counts as remote; "
+                        "disable one with defenseclaw setup observability disable <name>."
+                    )
             if disable_both or enterprise_only:
-                suffix = "" if disabled_enterprise else " (no active Enterprise sinks found)"
-                click.echo(f"    Splunk Enterprise (HEC): disabled{suffix}")
+                if any(name not in recorded_local for name in failed_hec_disable):
+                    click.echo("    Splunk Enterprise (HEC): some sinks could not be disabled")
+                else:
+                    suffix = "" if disabled_enterprise else " (no active Enterprise sinks found)"
+                    click.echo(f"    Splunk Enterprise (HEC): disabled{suffix}")
 
         _reload_cfg_from_data_dir(app)
         if native_disable:
-            if native_controller is not None and native_was_running:
+            if native_controller is not None and native_was_running and not failed_hec_disable:
                 native_controller.down()
-        elif (disable_both or logs_only) and manage_local and not native_windows:
+        elif (
+            (disable_both or logs_only)
+            and manage_local
+            and not native_windows
+            and not keep_local_stack
+            and not failed_hec_disable
+        ):
             _stop_bridge(
                 app.cfg.data_dir,
                 gateway_token_env=gateway_token_env,
@@ -18704,6 +18766,35 @@ def _disable_splunk(
         if disable_both or enterprise_only:
             parts.append("enterprise=disabled")
         _log_setup_action(app, ACTION_SETUP_SPLUNK, " ".join(parts), allow_offline=True)
+
+
+def _echo_local_splunk_kept(names: list[str]) -> None:
+    """Say why --logs left local Splunk running, and how to stop it."""
+
+    click.echo(
+        f"    Local Splunk was not stopped: {', '.join(names)} "
+        f"{'is' if len(names) == 1 else 'are'} enabled, and local setup did not record "
+        f"{'it' if len(names) == 1 else 'them'}, so DefenseClaw cannot tell whether "
+        f"{'it sends' if len(names) == 1 else 'they send'} to local Splunk."
+    )
+    click.echo("    For an older local sink, or once you no longer need a destination, disable it:")
+    for name in names:
+        click.echo(f"      defenseclaw setup observability disable {name}")
+    click.echo("    then run defenseclaw setup splunk --disable --logs again.")
+    click.echo(
+        "    To keep remote destinations sending, run defenseclaw setup splunk --logs --accept-splunk-license "
+        "once so local setup records its own sink, then run defenseclaw setup splunk --disable --logs again."
+    )
+
+
+def _echo_local_splunk_disable_failed(names: list[str], *, disable_both: bool) -> None:
+    """Keep a possible local receiver running while any HEC sink remains enabled."""
+
+    click.echo(f"    Local Splunk was not stopped: {', '.join(names)} could not be disabled.")
+    for name in names:
+        click.echo(f"      defenseclaw setup observability disable {name}")
+    command = "defenseclaw setup splunk --disable" + ("" if disable_both else " --logs")
+    click.echo(f"    After resolving those destinations, run {command} again.")
 
 
 def _stop_bridge(data_dir: str, *, gateway_token_env: str = "") -> None:
@@ -18824,8 +18915,9 @@ def _print_splunk_status(app: AppContext) -> None:
         click.echo(f"    Service:     {svc}")
         click.echo()
 
+    recorded_local = _recorded_local_splunk_names(app.cfg.data_dir) if hec_destinations else set()
     for destination in hec_destinations:
-        hec_label = "Local Splunk (HEC)" if _is_local_hec_endpoint(destination.endpoint) else "Splunk Enterprise (HEC)"
+        hec_label = "Local Splunk (HEC)" if destination.name in recorded_local else "Splunk Enterprise (HEC)"
         suffix = f" [{destination.name}]" if len(hec_destinations) > 1 else ""
         click.echo(f"  {hec_label}{suffix}:")
         click.echo(f"    Status:      {'enabled' if destination.enabled else 'disabled'}")

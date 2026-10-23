@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
@@ -465,7 +466,7 @@ func hookDecisionV8Outcome(action, result string) observability.Outcome {
 }
 
 func hookDecisionV8Mode(value string) string {
-	if normalizeAgentHookMode(value) == "action" {
+	if config.NormalizeHookMode(value) == "action" {
 		return "enforce"
 	}
 	return "observe"

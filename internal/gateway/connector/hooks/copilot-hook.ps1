@@ -6,7 +6,7 @@
 # launcher is missing, fails or times out, a closed fail mode denies a tool
 # call with Copilot's native answer (Copilot ignores a failed hook process);
 # only an open one lets it run.
-[CmdletBinding()]
+{{if .SecureClientDelivery}}[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [ValidateSet(
@@ -18,7 +18,24 @@ param(
     [string]$Event
 )
 
-$ErrorActionPreference = 'Stop'
+{{else}}# Parse the binding ourselves: PowerShell parameter validation exits before
+# the adapter can print Copilot's native denial, which the agent requires.
+$Event = ''
+if ($args.Count -eq 2 -and $args[0] -ieq '-Event') {
+    $Event = [string]$args[1]
+}
+$reviewedEvents = @(
+    'sessionStart', 'sessionEnd', 'userPromptSubmitted', 'userPromptTransformed',
+    'preToolUse', 'postToolUse', 'permissionRequest', 'agentStop',
+    'subagentStart', 'subagentStop', 'postToolUseFailure', 'errorOccurred',
+    'preCompact', 'notification'
+)
+if ($reviewedEvents -cnotcontains $Event) {
+    [Console]::Out.WriteLine('{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook has no reviewed event binding; run defenseclaw setup copilot","behavior":"deny","message":"DefenseClaw hook has no reviewed event binding; run defenseclaw setup copilot"}')
+    exit 0
+}
+
+{{end}}$ErrorActionPreference = 'Stop'
 $hook = '{{.HookBinaryPS}}'
 $timeoutMS = {{.CopilotHookTimeoutMS}}
 $process = $null

@@ -68,6 +68,19 @@ for current behavior.
 
 - **Local Splunk setup reports a failed prerequisite.** Missing Docker, a stopped daemon or a busy port now exits nonzero in both command and wizard setup, before local Splunk configuration is written.
 
+||||||| 755c2467f1
+- **Rollback guidance explains a stopped gateway.** When both the current and saved gateway states are stopped, rollback leaves the restored gateway stopped and the upgrade guide names the command to start it, including 0.8.x round trips.
+
+- **Local Splunk starts under a private umask.** Both packagers make the nonsecret app archive readable by the container. Setup reports ready only after the installed app, Web UI and HEC are available, and refuses incomplete startup with a repair command.
+
+- **Local and remote Splunk credentials stay separate.** Local Splunk setup records the container it started in the destination it creates (`local_stack` in the destination's config), and only that destination is local: disable, status and a rerun of local setup act on the record, never on an address, so a remote Splunk through a loopback tunnel stays remote. Each remote Splunk destination stores its token under its own reference (`DEFENSECLAW_SPLUNK_HEC_TOKEN_<NAME>`), so one setup never changes another destination's token, and `setup splunk --enterprise` takes the token only from `--hec-token`, `DEFENSECLAW_SETUP_SPLUNK_HEC_TOKEN` or the prompt, no longer from a saved `DEFENSECLAW_SPLUNK_HEC_TOKEN`. A local destination from 1.0.3 or earlier has no record, counts as remote and keeps working; local setup will not take it over, and names the `setup observability remove` command to run first. Local setup checks the destination name against the address in the bridge's env file and checks for a shared local credential reference before it touches the stack. `setup splunk --disable --logs` does not stop the local container while an unrecorded destination is enabled; neither `--logs` nor the combined disable stops it if a destination write fails, and the command names each destination to resolve.
+
+- **Copilot on Windows denies an invalid hook event binding.** Missing, empty, unknown or wrongly cased bindings receive both native denial shapes with the setup command before input or runtime checks. Secure Client delivery is unchanged.
+
+- **HILT previews explain observe mode.** A connector in observe mode does not pause actions for approval; the preview distinguishes the saved policy from action-mode prompts. The connector preview also names the guardrail profiles that put the connector in a different mode or set their own HILT policy, so accounts on an action-mode profile are told they will be prompted. The preview takes the hook mode and HILT from the gateway's own resolver (`defenseclaw-gateway connector hilt-preview`), so a legacy `claude_code.mode`, `codex.mode` or `connector_hooks.<connector>.mode` that keeps a connector in action mode under an observe guardrail mode is shown as prompting. When the gateway cannot answer, the preview says so instead of guessing.
+
+- **Rule-pack switches preserve existing pins.** Selecting a directory keeps its registered identity and refuses a stale digest through any alias. Pins used by application protection survive a global pack switch.
+
 - **MicroVM disks of OpenShell 0.1.4 and later are found again.** From 0.1.4 OpenShell names each prepared MicroVM disk by a hash of the image ID (NVIDIA/OpenShell#4342), and `sandbox image rm`, `image prune`, teardown and the first-start disk check did not recognize those names, so the disks (about 5 GB each) stayed behind. Both naming forms are recognized now.
 
 ### Removed
