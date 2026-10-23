@@ -417,6 +417,31 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 		return ""
 	}
 	program := programBase(words[0])
+	// A directly executable script is an interpreter launch too. Route it
+	// through the same cwd, argument and body proof as an explicit launcher.
+	interpreter := ""
+	switch filepath.Ext(program) {
+	case ".sh", ".bash", ".dash":
+		interpreter = "sh"
+	case ".zsh":
+		interpreter = "zsh"
+	case ".ksh":
+		interpreter = "ksh"
+	case ".py":
+		interpreter = "python3"
+	case ".js", ".mjs", ".cjs":
+		interpreter = "node"
+	case ".rb":
+		interpreter = "ruby"
+	case ".pl":
+		interpreter = "perl"
+	case ".ps1", ".cmd", ".bat":
+		return "nested-shell"
+	}
+	if interpreter != "" {
+		child := append([]string{interpreter}, words...)
+		return actionChildDecision(child, stmt, cwd, home, depth+1)
+	}
 	protected := newProtectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
 	for i, word := range words[1:] {
