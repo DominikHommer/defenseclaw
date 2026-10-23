@@ -63,7 +63,7 @@ func TestAgentIdentitiesRecordUPNAndSubagentsAcrossTheV9Upgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	// After a gateway restart the same sub-agent hooks again: counted once.
-	// A sighting without a UPN keeps the one recorded.
+	// A later sighting without a UPN clears the one recorded.
 	again := carol
 	again.UPN, again.SessionIDs, again.SessionsSeen, again.LastSeen = "", nil, 0, t0.Add(time.Hour)
 	if err := st.UpsertAgentIdentityBatch(ctx, []AgentIdentityRecord{again}, nil,
@@ -75,8 +75,8 @@ func TestAgentIdentitiesRecordUPNAndSubagentsAcrossTheV9Upgrade(t *testing.T) {
 		t.Fatalf("rows = %+v, err %v", rows, err)
 	}
 	got := rows[0]
-	if got.UPN != "carol@corp.example.com" || got.SubagentsSeen != 2 || got.LastSubagentID != "ais-00000000000000b2" || got.SessionsSeen != 5 {
-		t.Fatalf("row = %+v; want the UPN, two sub-agents (last ais-00000000000000b2) and five sessions", got)
+	if got.UPN != "" || got.SubagentsSeen != 2 || got.LastSubagentID != "ais-00000000000000b2" || got.SessionsSeen != 5 {
+		t.Fatalf("row = %+v; want no UPN, two sub-agents (last ais-00000000000000b2) and five sessions", got)
 	}
 	var orphans int
 	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM agent_identity_subagents WHERE agent_id = 'agt-0000000000000099'`).Scan(&orphans); err != nil || orphans != 0 {

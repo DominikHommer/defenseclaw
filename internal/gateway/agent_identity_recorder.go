@@ -116,9 +116,8 @@ func (r *agentIdentityRecorder) observe(facts agentIdentityFacts, sessionID stri
 	if facts.UserIncarnation != "" {
 		rec.UserIncarnation = facts.UserIncarnation
 	}
-	if facts.UserUPN != "" {
-		rec.UPN = facts.UserUPN
-	}
+	rec.UPN = facts.UserUPN
+	rec.UPNUnavailable = facts.UPNUnavailable
 	sessionID = strings.TrimSpace(sessionID)
 	if _, sub := r.subSessions[subSessionKey(facts.ID, sessionID)]; sub {
 		sessionID = ""
@@ -280,9 +279,6 @@ func (r *agentIdentityRecorder) restore(
 		cur.SessionsSeen += max(old.SessionsSeen-int64(len(old.SessionIDs)), 0)
 		if cur.UserName == "" {
 			cur.UserName = old.UserName
-		}
-		if cur.UPN == "" {
-			cur.UPN = old.UPN
 		}
 		if cur.LastSessionID == "" {
 			cur.LastSessionID = old.LastSessionID
@@ -757,9 +753,8 @@ func mergeAgentIdentityRows(
 		if buffered.UserIncarnation != "" {
 			rec.UserIncarnation = buffered.UserIncarnation
 		}
-		if buffered.UPN != "" {
-			rec.UPN = buffered.UPN
-		}
+		rec.UPN = buffered.UPN
+		rec.UPNUnavailable = buffered.UPNUnavailable
 		// With a store, buffered.SubagentsSeen contains only instance IDs
 		// absent from it and LastSubagentID was ordered against its keys.
 		rec.SubagentsSeen += buffered.SubagentsSeen

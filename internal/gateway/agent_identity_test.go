@@ -32,6 +32,68 @@ func agentIdentityTestSetup(t *testing.T) {
 	InstallSharedAgentRegistry("", "")
 }
 
+// A hook after a restart can have no cached directory UPN. Its API row and
+// the next stored row must not keep the UPN from an earlier hook.
+func TestAgentIdentityUPNClearsAfterUnavailableHook(t *testing.T) {
+	agentIdentityTestSetup(t)
+	store, err := inventory.NewInventoryStore(filepath.Join(t.TempDir(), "inventory.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	recorder := &agentIdentityRecorder{pending: map[string]*inventory.AgentIdentityRecord{}}
+	facts := agentIdentityFacts{ID: "agt-upn", UserID: "S-1-5-21-1-2-3-1104", Connector: "codex", MachineHash: "m", UserUPN: "carol@corp.example.com"}
+	recorder.observe(facts, "s1", true)
+	if err := recorder.flush(ctx, store); err != nil {
+		t.Fatal(err)
+	}
+
+	// A second recorder models the gateway restarting with no UPN cached.
+	recorder = &agentIdentityRecorder{pending: map[string]*inventory.AgentIdentityRecord{}}
+	previous := sharedAgentIdentities
+	sharedAgentIdentities = recorder
+	recorder.setStoreSource(func() *inventory.InventoryStore { return store }, nil, nil)
+	t.Cleanup(func() { sharedAgentIdentities = previous })
+	facts.UserUPN, facts.UPNUnavailable = "", true
+	recorder.observe(facts, "s2", true)
+	pending, hints, _ := recorder.snapshot()
+	stored, _, err := store.ListAgentIdentities(ctx, inventory.AgentIdentityFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows := mergeAgentIdentityRows(stored, pending, hints, inventory.AgentIdentityFilter{}); len(rows) != 1 || rows[0].UPN != "" {
+		t.Fatalf("buffered API rows = %+v; want no stale UPN", rows)
+	}
+	if row := listedAgentIdentityRows(t)[facts.ID]; row == nil {
+		t.Fatal("agent identity missing from API")
+	} else if _, named := row["upn"]; named {
+		t.Fatalf("API row = %+v; want no stale UPN", row)
+	}
+	if err := recorder.flush(ctx, store); err != nil {
+		t.Fatal(err)
+	}
+	stored, _, err = store.ListAgentIdentities(ctx, inventory.AgentIdentityFilter{})
+	if err != nil || len(stored) != 1 || stored[0].UPN != "" {
+		t.Fatalf("stored rows = %+v, err %v; want no stale UPN", stored, err)
+	}
+}
+
+func TestAgentIdentityUPNFailedFlushKeepsNewerUnavailableSighting(t *testing.T) {
+	recorder := &agentIdentityRecorder{pending: map[string]*inventory.AgentIdentityRecord{}}
+	facts := agentIdentityFacts{ID: "agt-upn", UserID: "S-1-5-21-1-2-3-1104", Connector: "codex", MachineHash: "m", UserUPN: "carol@corp.example.com"}
+	recorder.observe(facts, "s1", true)
+	batch, _, _ := recorder.take()
+	// The older batch fails to write while a newer hook has no cached UPN.
+	facts.UserUPN, facts.UPNUnavailable = "", true
+	recorder.observe(facts, "s2", true)
+	recorder.restore(batch, nil, nil)
+	pending, _, _ := recorder.snapshot()
+	if row := pending[facts.ID]; row.UPN != "" || !row.UPNUnavailable {
+		t.Fatalf("restored row = %+v; want the newer unavailable UPN", row)
+	}
+}
+
 // GAP-0097: an agent identity records the account as the host names it, so
 // an SSSD account keeps its qualified name for the admin views.
 func TestHookAgentIdentityKeepsQualifiedAccountName(t *testing.T) {

@@ -35,7 +35,28 @@ func TestAgentIdentityOfASIDRecordsTheCachedUPN(t *testing.T) {
 	}
 	ctx := context.WithValue(context.Background(), verifiedUserScopedIdentityContextKey{}, strings.ToLower(sid))
 	facts := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: "codex"})
-	if facts.ID == "" || facts.UserUPN != "ivan@corp.example.com" {
+	if facts.ID == "" || facts.UserUPN != "ivan@corp.example.com" || facts.UPNUnavailable {
 		t.Fatalf("agent identity %q recorded UPN %q, want ivan@corp.example.com", facts.ID, facts.UserUPN)
+	}
+
+	// After a gateway restart an AD lookup can still be running. That is
+	// distinct from a local account whose verified facts have no UPN.
+	windowsDirectories = newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
+		return useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory, ResolvedAt: time.Now()}, nil
+	})
+	if _, ok := windowsDirectories.get(sid, true); !ok {
+		t.Fatal("the AD facts did not cache")
+	}
+	if cold := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: "codex"}); cold.UserUPN != "" || !cold.UPNUnavailable {
+		t.Fatalf("cold AD UPN = %q, unavailable %t; want unavailable", cold.UserUPN, cold.UPNUnavailable)
+	}
+	windowsDirectories = newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
+		return useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal, ResolvedAt: time.Now()}, nil
+	})
+	if _, ok := windowsDirectories.get(sid, true); !ok {
+		t.Fatal("the local facts did not cache")
+	}
+	if local := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: "codex"}); local.UserUPN != "" || local.UPNUnavailable {
+		t.Fatalf("local UPN = %q, unavailable %t; want verified absence", local.UserUPN, local.UPNUnavailable)
 	}
 }

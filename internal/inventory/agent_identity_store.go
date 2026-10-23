@@ -60,17 +60,19 @@ type AgentIdentityRecord struct {
 	// one, it tells two accounts of one uid apart where their domains may
 	// overlap. "" for a row written before, or while none was known.
 	UserIncarnation string `json:"-"`
-	// UPN is the userPrincipalName of the account when the agent was last
-	// seen, from the directory facts the gateway holds for its uid or SID
-	// (inventory.db v9). "" for an account the directory gives none, a
-	// local account among them.
-	UPN           string    `json:"upn,omitempty"`
-	Connector     string    `json:"connector"`
-	InstallFP     string    `json:"install_fp,omitempty"`
-	MachineHash   string    `json:"machine_hash"`
-	FirstSeen     time.Time `json:"first_seen"`
-	LastSeen      time.Time `json:"last_seen"`
-	LastSessionID string    `json:"last_session_id,omitempty"`
+	// UPN is the userPrincipalName in the directory facts cached when the
+	// agent was last seen (inventory.db v9). An unavailable lookup stores
+	// NULL; a verified absence stores an empty string. Neither is listed.
+	UPN string `json:"upn,omitempty"`
+	// UPNUnavailable distinguishes an unavailable lookup from a verified
+	// absence while keeping the API's optional upn field unchanged.
+	UPNUnavailable bool      `json:"-"`
+	Connector      string    `json:"connector"`
+	InstallFP      string    `json:"install_fp,omitempty"`
+	MachineHash    string    `json:"machine_hash"`
+	FirstSeen      time.Time `json:"first_seen"`
+	LastSeen       time.Time `json:"last_seen"`
+	LastSessionID  string    `json:"last_session_id,omitempty"`
 	// SessionsSeen is the session count. In an UpsertAgentIdentities batch
 	// it is the number of sessions this process first saw since the previous
 	// flush.
@@ -265,7 +267,7 @@ func (s *InventoryStore) UpsertAgentIdentityBatch(
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(agent_id) DO UPDATE SET
 				user_name = COALESCE(NULLIF(excluded.user_name, ''), agent_identities.user_name),
-				user_upn = COALESCE(NULLIF(excluded.user_upn, ''), agent_identities.user_upn),
+				user_upn = excluded.user_upn,
 				user_domain = COALESCE(NULLIF(excluded.user_domain, ''), agent_identities.user_domain),
 				user_incarnation = COALESCE(NULLIF(excluded.user_incarnation, ''), agent_identities.user_incarnation),
 				first_seen = min(agent_identities.first_seen, excluded.first_seen),
@@ -334,10 +336,14 @@ func (s *InventoryStore) UpsertAgentIdentityBatch(
 			if lastSessionWasNamed && lastNewSessionID != rec.LastSessionID {
 				lastSessionID = lastNewSessionID
 			}
+			upn := any(strings.TrimSpace(rec.UPN))
+			if rec.UPNUnavailable {
+				upn = nil
+			}
 			if _, err := stmt.ExecContext(ctx, rec.AgentID, rec.UserID, rec.UserName, rec.Connector,
 				rec.InstallFP, rec.MachineHash, formatAgentIdentityTime(first), formatAgentIdentityTime(last),
 				lastSessionID, sessions, strings.TrimSpace(rec.UserDomain), strings.TrimSpace(rec.UserIncarnation),
-				strings.TrimSpace(rec.UPN)); err != nil {
+				upn); err != nil {
 				return err
 			}
 		}
@@ -644,7 +650,7 @@ func (s *InventoryStore) ListAgentIdentities(ctx context.Context, filter AgentId
 	}
 	query := `SELECT agent_id, user_id, COALESCE(user_name, ''), connector, COALESCE(install_fp, ''), machine_hash,
 		first_seen, last_seen, COALESCE(last_session_id, ''), sessions_seen, COALESCE(user_domain, ''), COALESCE(user_incarnation, ''),
-		COALESCE(user_upn, ''), subagents_seen, COALESCE(last_subagent_id, '')` + from + where +
+		user_upn, subagents_seen, COALESCE(last_subagent_id, '')` + from + where +
 		` ORDER BY last_seen DESC, agent_id`
 	// The user filter runs in Go (useridentity.AccountFilter), so a
 	// bare name selects a row stored as user@realm or DOMAIN\user, and the
@@ -689,11 +695,13 @@ func (s *InventoryStore) ListAgentIdentities(ctx context.Context, filter AgentId
 	for rows.Next() {
 		var rec AgentIdentityRecord
 		var first, last string
+		var upn sql.NullString
 		if err := rows.Scan(&rec.AgentID, &rec.UserID, &rec.UserName, &rec.Connector, &rec.InstallFP,
 			&rec.MachineHash, &first, &last, &rec.LastSessionID, &rec.SessionsSeen, &rec.UserDomain, &rec.UserIncarnation,
-			&rec.UPN, &rec.SubagentsSeen, &rec.LastSubagentID); err != nil {
+			&upn, &rec.SubagentsSeen, &rec.LastSubagentID); err != nil {
 			return nil, 0, err
 		}
+		rec.UPN, rec.UPNUnavailable = upn.String, !upn.Valid
 		if user != "" && !account.MatchesIn(rec.UserID, rec.UserName, rec.UserDomain, rec.UserIncarnation) {
 			continue
 		}

@@ -88,18 +88,24 @@ describe('agent identity rows (rel-1-0-4 GAP-0596)', () => {
 
   it('explains when a cold Windows AD UPN reaches an existing row', () => {
     const identity = source('internal/gateway/agent_identity.go');
+    const recorder = source('internal/gateway/agent_identity_recorder.go');
+    const store = source('internal/inventory/agent_identity_store.go');
     const windows = source('internal/gateway/identity_resolve_windows.go');
-    assert.match(identity, /func agentIdentityAccountUPN\(userID string\)[\s\S]*?peerDirectoryCache\(\)\.peek\(userID\)/);
+    assert.match(identity, /func agentIdentityAccountUPN\(userID string\) \(upn string, known bool\)[\s\S]*?peerDirectoryCache\(\)\.peek\(userID\)/);
     assert.match(windows, /wait := time\.Duration\(0\)[\s\S]*?if identityLookupBlocking\.Load\(\)/);
+    assert.ok(recorder.includes('rec.UPN = facts.UserUPN'));
+    assert.ok(recorder.includes('rec.UPN = buffered.UPN'));
+    assert.ok(store.includes('user_upn = excluded.user_upn'));
 
     const api = page('reference/apis/gateway-api.mdx');
     const upn = api.slice(api.indexOf('`upn` is the account'), api.indexOf('`total` counts'));
-    assert.ok(upn.includes('a cold Active Directory lookup can still be running when the first hook records the row'));
-    assert.ok(upn.includes('a later hook runs after the cache has the UPN'));
-    assert.ok(upn.includes('If no later hook runs, the row remains without a UPN'));
+    assert.ok(upn.includes('if the cache has no UPN, whether the lookup is unavailable or the account has a verified absence, `upn` is omitted'));
+    assert.ok(upn.includes('The directory cache can still serve its last good UPN during a lookup outage'));
+    assert.ok(upn.includes('A completed background lookup does not update the row by itself; another hook must run'));
 
     const reference = page('enterprise/identity/reference.mdx');
     assert.ok(reference.includes('another hook runs after the directory cache has the UPN'));
+    assert.ok(reference.includes('A later hook without a cached UPN clears an earlier one from the row'));
   });
 });
 
