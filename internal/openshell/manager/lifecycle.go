@@ -342,8 +342,13 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 var errLegacyFlushUnconfirmed = errors.New("the MicroVM's disk flush could not be confirmed")
 
 // stopWithFlush requires a confirmed in-guest sync only for an automatic
-// stop of a legacy MicroVM. An explicit user stop keeps its existing
-// loss-aware behavior when the guest cannot flush.
+// stop of a legacy MicroVM, and only while that VM's network is proven
+// closed: a legacy supervisor never keeps running with open egress, so a
+// VM whose containment failed is stopped without the flush, and the feed
+// says what that may have lost (fail closed). An explicit user stop keeps
+// its existing loss-aware behavior when the guest cannot flush. The loss
+// is published once OpenShell takes the stop, never for a stop that was
+// refused or not made.
 func (m *Manager) stopWithFlush(ctx context.Context, b *box, requireFlush bool) error {
 	gw, err := m.gateway(ctx)
 	if err != nil {
@@ -352,7 +357,7 @@ func (m *Manager) stopWithFlush(ctx context.Context, b *box, requireFlush bool) 
 	ctx, cancel := context.WithTimeout(ctx, defaultOpTimeout)
 	defer cancel()
 	m.mu.Lock()
-	name, reason, driver := b.rec.Name, b.rec.PhaseReason, b.rec.Driver
+	name, reason, driver, release := b.rec.Name, b.rec.PhaseReason, b.rec.Driver, b.rec.SessionRelease
 	// OpenShell stops nothing of a sandbox whose workload ended: its phase
 	// stays until OpenShell reports another.
 	ended := b.phase == audit.SandboxPhaseCompleted ||
@@ -365,9 +370,18 @@ func (m *Manager) stopWithFlush(ctx context.Context, b *box, requireFlush bool) 
 	// and its terminal ends as after /exit (graceful.go); a detached run
 	// the stop ends is marked interrupted, and once the stop is published
 	// its log is kept for `sandbox logs` of the stopped sandbox (runlog.go).
-	run, flushed := m.endHarness(ctx, gw, b)
+	run, flushed, flushErr := m.endHarness(ctx, gw, b)
+	var uncontained error
 	if requireFlush && stopLosesWrites(driver) && !flushed {
-		return errLegacyFlushUnconfirmed
+		// The VM, whose unsynced writes a stop would lose, is kept only
+		// while its network is closed now.
+		if uncontained = m.proveOldSupervisorNetworkClosed(ctx, b); uncontained == nil {
+			if flushErr != nil {
+				return fmt.Errorf("%w: %v", errLegacyFlushUnconfirmed, flushErr)
+			}
+			return errLegacyFlushUnconfirmed
+		}
+		m.logf("old supervisor: stop %s without a confirmed flush: its network is not closed: %v", name, uncontained)
 	}
 	if !ended {
 		m.lifecycle(ctx, b, audit.SandboxPhaseStopping, audit.SandboxTriggerStop, false, nil, nil)
@@ -419,6 +433,14 @@ func (m *Manager) stopWithFlush(ctx context.Context, b *box, requireFlush bool) 
 		m.mu.Unlock()
 		m.lifecycle(ctx, b, ph, audit.SandboxTriggerStop, false, cond, stopped.Status.ExitCode)
 		return nil
+	}
+	// OpenShell took the stop: what the flush did not confirm is lost now.
+	if flushErr != nil {
+		m.flushFailed(name, flushErr)
+	}
+	if uncontained != nil {
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: name, Severity: "HIGH",
+			Reason: sandboxapi.ReasonOldSupervisor, Message: oldSupervisorUnflushedStop(name, release, uncontained)})
 	}
 	sb, err := gw.Client.WaitStopped(ctx, name)
 	if err != nil && transientGatewayError(err) {

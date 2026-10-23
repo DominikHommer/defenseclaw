@@ -939,11 +939,26 @@ func (a *App) managedPolicyCheck(ctx context.Context, m *sandboxapi.ManagedStatu
 	return c
 }
 
+// managedDefaultHarness is the harness the sandbox daemon's managed status
+// judges when openshell.harnesses names none (defaultManagedConnector in
+// internal/gateway): not the CLI's own defaultHarnesses, which setup
+// selects.
+const managedDefaultHarness = "claudecode"
+
 // legacyManagedPermission asks an older daemon's existing explain endpoint
-// for each harness this CLI can run. Its status did not carry the aggregate
-// authorization verdict, so absence must not mean a denial or an approval.
+// for each harness the daemon's own aggregate verdict covers: the
+// configured ones (openshell.harnesses), else managedDefaultHarness. Its
+// status did not carry that verdict, so absence must not mean a denial or
+// an approval, and the doctor judges what a newer daemon would.
 func (a *App) legacyManagedPermission(ctx context.Context) (bool, []string, error) {
-	specs, err := a.harnesses(nil)
+	var names []string
+	if a.Cfg != nil {
+		names = a.Cfg.OpenShell.Harnesses
+	}
+	if len(names) == 0 {
+		names = []string{managedDefaultHarness}
+	}
+	specs, err := a.harnesses(names)
 	if err != nil {
 		return false, nil, err
 	}

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -45,33 +46,48 @@ func managedStatusFixture() *sandboxapi.ManagedStatus {
 
 // An older managed daemon omits managed.allowed while it keeps an account's
 // running sandbox during an upgrade. The doctor can ask its existing explain
-// endpoint for the configured harnesses; an explicit denial still fails.
+// endpoint for the harnesses the daemon's own verdict covers: the configured
+// ones, else the daemon's default (claudecode), never the CLI's setup
+// defaults; an explicit denial of one of those still fails.
 func TestManagedDoctorUsesLegacyDaemonPolicyExplanation(t *testing.T) {
 	withManagedHost(t)
 	for _, tc := range []struct {
-		name   string
-		denied string
-		want   openshell.CheckStatus
+		name       string
+		configured []string
+		denied     string
+		want       openshell.CheckStatus
+		asked      []string
 	}{
-		{"permitted", "", openshell.StatusPass},
-		{"one harness denied", "codex", openshell.StatusFail},
+		{"permitted", nil, "", openshell.StatusPass, []string{"claudecode"}},
+		{"default harness denied", nil, "claudecode", openshell.StatusFail, []string{"claudecode"}},
+		{"unconfigured harness denied", nil, "codex", openshell.StatusPass, []string{"claudecode"}},
+		{"configured harness denied", []string{"claudecode", "codex"}, "codex", openshell.StatusFail, []string{"claudecode", "codex"}},
+		{"only a configured harness denied", []string{"codex"}, "codex", openshell.StatusFail, []string{"codex"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ta := newTestApp(t, "")
+			ta.Cfg.OpenShell.Harnesses = tc.configured
 			ta.daemon.status.Managed = managedStatusFixture()
 			ta.daemon.statusWithoutAllowed = true
+			var asked []string
 			ta.daemon.onExplain = func(req sandboxapi.ExplainRequest, ex *sandboxapi.Explain) {
+				if req.Harness != "" && !slices.Contains(asked, req.Harness) {
+					asked = append(asked, req.Harness)
+				}
 				ex.Managed = &sandboxapi.ManagedExplain{Allowed: req.Harness != tc.denied}
 			}
 			rep := ta.runDoctor(bg)
+			if !slices.Equal(asked, tc.asked) {
+				t.Fatalf("legacy daemon was asked about %v, want %v", asked, tc.asked)
+			}
 			row := rep.Get(CheckIDAdmin)
 			if row == nil || row.Status != tc.want {
 				t.Fatalf("organization policy for legacy daemon = %+v", row)
 			}
-			if tc.denied == "" && !rep.OK() {
+			if tc.want == openshell.StatusPass && !rep.OK() {
 				t.Fatalf("permitted running account was reported unready: %+v", rep.Checks)
 			}
-			if tc.denied != "" && !strings.Contains(row.Detail, tc.denied) {
+			if tc.want == openshell.StatusFail && !strings.Contains(row.Detail, tc.denied) {
 				t.Fatalf("denial did not name %s: %+v", tc.denied, row)
 			}
 		})

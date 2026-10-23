@@ -269,3 +269,139 @@ func TestAnOldSupervisorIsStoppedBeforeAnySandboxRunsOnIt(t *testing.T) {
 		t.Fatalf("a session on %s: phase %s, old supervisor %v", openshell.SupportedMin, got.Phase, got.OldSupervisor)
 	}
 }
+
+// legacyMicroVMWithBrokenSync is a ready 0.1.3 MicroVM named name with a
+// direct network rule, whose guest sync(1) fails.
+func legacyMicroVMWithBrokenSync(t *testing.T, name string) (*harnessEnv, *box) {
+	t.Helper()
+	e := newVMEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: name, Copy: true})
+	e.addNetworkRule(name, "direct", "background.example.org", 443)
+	b := e.boxOf(name)
+	e.m.mu.Lock()
+	b.rec.SessionRelease = "0.1.3"
+	e.m.mu.Unlock()
+	e.fake.HandleExec(e.workloadChecks(nil, func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+		if len(call.Command) > 0 && call.Command[0] == "/bin/sync" {
+			return openshelltest.ExecResponse{Err: errors.New("sync failed")}
+		}
+		return openshelltest.ExecResponse{Stdout: []byte("exited\n")}
+	}))
+	return e, b
+}
+
+// findingsSaying are the sandbox's old-supervisor findings that contain text.
+func findingsSaying(e *harnessEnv, name, text string) []sandboxapi.ActivityEvent {
+	var out []sandboxapi.ActivityEvent
+	for _, ev := range e.events(name, sandboxapi.ActivityFinding, sandboxapi.ReasonOldSupervisor) {
+		if strings.Contains(ev.Message, text) {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+// A legacy MicroVM whose sync fails is kept only while its network is
+// proven closed. When its containment fails too (a gateway-global policy,
+// under which DefenseClaw cannot change the sandbox's rules; OpenShell
+// refusing the policy update; a refusal that only comes after the first
+// containment succeeded), the automatic stop goes ahead without the flush
+// and the feed says what that may have lost: a legacy supervisor never
+// keeps running with open egress (fail closed).
+func TestLegacyMicroVMWhoseNetworkStaysOpenIsStoppedWithoutAFlush(t *testing.T) {
+	refuseUpdates := func(e *harnessEnv) {
+		e.fake.Intercept(func(method string) error {
+			if method == openshelltest.MethodUpdateConfig {
+				return &types.StatusError{Code: types.ErrorConflict, Message: "policy update refused"}
+			}
+			return nil
+		})
+	}
+	for _, tc := range []struct {
+		name string
+		// before breaks containment before the session is seen ready;
+		// later, when set, only after a first containment kept the VM.
+		before, later func(e *harnessEnv)
+		cause         string
+	}{
+		{name: "gateway-global policy", before: func(e *harnessEnv) { e.fake.SetGlobalPolicy(&openshell.SandboxPolicy{Version: 1}) },
+			cause: "gateway-global policy"},
+		{name: "policy update refused", before: refuseUpdates, cause: "policy update refused"},
+		{name: "global policy after the VM was kept", later: func(e *harnessEnv) { e.fake.SetGlobalPolicy(&openshell.SandboxPolicy{Version: 1}) },
+			cause: "gateway-global policy"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, b := legacyMicroVMWithBrokenSync(t, "leaky")
+			if tc.before != nil {
+				tc.before(e)
+			}
+			stops := e.fake.Calls(openshelltest.MethodStopSandbox)
+			e.m.lifecycle(t.Context(), b, audit.SandboxPhaseReady, audit.SandboxTriggerWatch, true, nil, nil)
+			e.m.tamperStops.Wait()
+			if tc.later != nil {
+				if got := e.get("leaky"); got.Phase != "ready" || !b.rec.OldSupervisorNetworkClosed {
+					t.Fatalf("a contained VM was not kept first: %+v", got)
+				}
+				tc.later(e)
+				must(t, e.m.Reconcile(t.Context()))
+				e.m.tamperStops.Wait()
+			}
+			if got := e.fake.Calls(openshelltest.MethodStopSandbox); got == stops {
+				t.Fatalf("a legacy MicroVM whose network could not be closed kept running: %+v", e.get("leaky"))
+			}
+			if got := e.get("leaky"); got.Phase != "stopped" {
+				t.Fatalf("legacy MicroVM with an open network = %+v", got)
+			}
+			if got := e.events("leaky", sandboxapi.ActivityLifecycle, "stop_unflushed"); len(got) != 1 {
+				t.Fatalf("the unflushed stop was not reported once: %+v", got)
+			}
+			if got := findingsSaying(e, "leaky", "stopped leaky's legacy MicroVM without a confirmed disk flush"); len(got) != 1 ||
+				!strings.Contains(got[0].Message, tc.cause) || got[0].Severity != "HIGH" {
+				t.Fatalf("no loss-aware finding naming %q: %+v", tc.cause, got)
+			}
+			if tc.later == nil {
+				if got := findingsSaying(e, "leaky", "DefenseClaw kept leaky's"); len(got) != 0 {
+					t.Fatalf("said the VM was kept: %+v", got)
+				}
+			}
+		})
+	}
+}
+
+// An automatic legacy stop that the unconfirmed flush aborted stopped
+// nothing: the feed says once that the VM was kept, however often reconcile
+// retries, and never that a stop lost its writes. A manual stop that
+// OpenShell refused lost nothing either; one it took says so.
+func TestAnAbortedLegacyAutoStopSaysItKeptTheVMOnce(t *testing.T) {
+	e, b := legacyMicroVMWithBrokenSync(t, "kept")
+	stops := e.fake.Calls(openshelltest.MethodStopSandbox)
+	e.m.lifecycle(t.Context(), b, audit.SandboxPhaseReady, audit.SandboxTriggerWatch, true, nil, nil)
+	e.m.tamperStops.Wait()
+	for range 3 {
+		must(t, e.m.Reconcile(t.Context()))
+		e.m.tamperStops.Wait()
+	}
+	if got := e.fake.Calls(openshelltest.MethodStopSandbox); got != stops {
+		t.Fatalf("stopped an unflushed, contained MicroVM: %d stop calls", got-stops)
+	}
+	if got := e.events("kept", sandboxapi.ActivityLifecycle, "stop_unflushed"); len(got) != 0 {
+		t.Fatalf("an aborted stop was reported as a stop that lost writes: %+v", got)
+	}
+	if got := findingsSaying(e, "kept", "DefenseClaw kept kept's legacy MicroVM"); len(got) != 1 {
+		t.Fatalf("the kept VM was not reported exactly once over four attempts: %+v", got)
+	}
+
+	// The user accepts the loss: OpenShell refuses the first stop, which
+	// lost nothing, and takes the second, which says what it may have lost.
+	e.fake.FailNext(openshelltest.MethodStopSandbox, &types.StatusError{Code: types.ErrorInternal, Message: "stop refused"})
+	if _, err := e.m.Stop(t.Context(), "kept"); err == nil {
+		t.Fatal("the refused stop succeeded")
+	}
+	if got := e.events("kept", sandboxapi.ActivityLifecycle, "stop_unflushed"); len(got) != 0 {
+		t.Fatalf("a refused stop was reported as one that lost writes: %+v", got)
+	}
+	e.stopBox("kept")
+	if got := e.events("kept", sandboxapi.ActivityLifecycle, "stop_unflushed"); len(got) != 1 {
+		t.Fatalf("the explicit unflushed stop was not reported once: %+v", got)
+	}
+}

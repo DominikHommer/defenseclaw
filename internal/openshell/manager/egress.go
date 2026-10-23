@@ -357,6 +357,25 @@ func (m *Manager) containOldSupervisorNetworkLocked(ctx context.Context, b *box)
 	}
 }
 
+// proveOldSupervisorNetworkClosed closes a ready legacy MicroVM's proxy
+// route and withdraws its direct OpenShell rules once more, confirmed
+// loaded, under the operation lock its caller holds (a containment queued
+// behind the caller has not run yet, and an earlier one may be stale). It
+// returns nil only when both are closed now, else why not.
+func (m *Manager) proveOldSupervisorNetworkClosed(ctx context.Context, b *box) error {
+	m.suspendOldSupervisorEgress(b)
+	m.containOldSupervisorNetworkLocked(ctx, b)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	switch {
+	case b.oldSupervisorNetworkErr != "":
+		return errors.New(b.oldSupervisorNetworkErr)
+	case !b.rec.OldSupervisorNetworkClosed:
+		return errors.New("DefenseClaw could not confirm that its direct OpenShell network rules are withdrawn")
+	}
+	return nil
+}
+
 func (m *Manager) withdrawOldSupervisorRules(ctx context.Context, b *box) error {
 	m.mu.Lock()
 	rec := b.rec
