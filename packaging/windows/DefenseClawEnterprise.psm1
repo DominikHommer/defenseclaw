@@ -191,7 +191,7 @@ $script:DefenseClawTrustMode = 'Authenticode'
 # Signed standalone modules authenticate the Python source even though a .py
 # file cannot carry embedded Authenticode. Keep this digest aligned with the
 # release checkout's edge-connector/tools/policy_compiler.py.
-$script:DefenseClawPolicyCompilerSHA256 = '67ea70960fe6282fd13769bd13b446c5c8c6abe08eba20d22452e5096dd66ac5'
+$script:DefenseClawPolicyCompilerSHA256 = 'b121e57aaae525dfe12133e863ebb2618d396c11166915803bc492213cb15796'
 # Standalone roots a standard user created and Install moved aside.
 $script:DefenseClawQuarantinedRoots = @()
 # Standalone pending-transaction recovery: the gateway of the running Setup
