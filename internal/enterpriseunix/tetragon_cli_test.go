@@ -679,8 +679,14 @@ func TestEnsureRestartsAHelperThatRunsAnotherTetragonMode(t *testing.T) {
 	if got := messagesOf(status.Warnings, codeKernelPolicyNotApplied); !strings.Contains(got, "runs Tetragon mode consume") || !strings.Contains(got, "renders off") {
 		t.Fatalf("status does not report the helper's other mode: %+v", status.Warnings)
 	}
+	h.services.afterStart = func(unit Unit) {
+		if unit.Name == unitSensorHelper {
+			published(kernelpolicy.ModeOff)
+		}
+	}
 	calls := len(h.services.calls)
 	r := h.run(Options{Action: ActionEnsure})
+	requireOK(t, r)
 	if r.Noop {
 		t.Fatalf("ensure is a no-op while the helper runs another mode: %+v", r)
 	}
@@ -691,7 +697,6 @@ func TestEnsureRestartsAHelperThatRunsAnotherTetragonMode(t *testing.T) {
 	if !strings.Contains(strings.Join(r.Changes, "\n"), "the sensor helper restarted into enterprise.tetragon mode off") {
 		t.Fatalf("ensure does not report the helper restart: %v", r.Changes)
 	}
-	published(kernelpolicy.ModeOff)
 	if r := h.run(Options{Action: ActionEnsure}); !r.Noop {
 		t.Fatalf("ensure does not settle once the helper runs the rendered mode: %+v", r)
 	}
