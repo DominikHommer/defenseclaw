@@ -5502,6 +5502,26 @@ func removeCopilotHookReferencesProfile(path string, secureClient bool, hookScri
 	}
 	if !secureClient {
 		if hooks, ok := pruned["hooks"].(map[string]interface{}); ok {
+			// Doctor and Setup claim an edited handler on any event in this
+			// DefenseClaw-owned file. Teardown must use the same predicate:
+			// the generic remover only recognizes exact commands in lists.
+			for event, raw := range hooks {
+				if entries, ok := raw.([]interface{}); ok {
+					remaining := make([]interface{}, 0, len(entries))
+					for _, entry := range entries {
+						if !copilotUnexpectedEventOwnsHook(entry, hookScript) {
+							remaining = append(remaining, entry)
+						}
+					}
+					if len(remaining) == 0 && len(entries) > 0 {
+						delete(hooks, event)
+					} else {
+						hooks[event] = remaining
+					}
+				} else if copilotUnexpectedEventOwnsHook(raw, hookScript) {
+					delete(hooks, event)
+				}
+			}
 			before, _ := cfg["hooks"].(map[string]interface{})
 			pruneNewlyEmptyHookEntries(before, hooks)
 			if len(hooks) == 0 {

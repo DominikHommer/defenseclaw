@@ -1012,3 +1012,66 @@ func TestCopilotSetupRemovesNonListOwnHandlerFromUnexpectedEvent(t *testing.T) {
 		})
 	}
 }
+
+func TestCopilotUnexpectedHandlerSetupAndTeardownAgree(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		for _, shape := range []string{"list", "mapping", "nested"} {
+			t.Run(goos+"/"+shape, func(t *testing.T) {
+				root := t.TempDir()
+				path := filepath.Join(root, "defenseclaw.json")
+				script := filepath.Join(root, "hooks", "copilot-hook.sh")
+				if goos == "windows" {
+					script = windowsCopilotPowerShellAdapterCommand(script)
+				}
+				command := copilotHookInvocationCommandForEvent(goos, "preToolUse", script)
+				field := "bash"
+				if goos == "windows" {
+					field = "powershell"
+				}
+				operator := map[string]interface{}{field: "echo operator"}
+				inject := func() {
+					t.Helper()
+					if err := patchCopilotHooksForOS(path, script, copilotCurrentHookEvents, goos); err != nil {
+						t.Fatal(err)
+					}
+					document := decodeHookFileForTest(t, path)
+					hooks := document["hooks"].(map[string]interface{})
+					owned := map[string]interface{}{field: "echo before; " + command}
+					switch shape {
+					case "list":
+						hooks["unexpectedEvent"] = []interface{}{owned, operator}
+					case "mapping":
+						hooks["unexpectedEvent"] = owned
+					case "nested":
+						hooks["unexpectedEvent"] = map[string]interface{}{"handlers": []interface{}{owned}}
+					}
+					hooks["operatorEvent"] = []interface{}{operator}
+					if err := writeJSONObject(path, document); err != nil {
+						t.Fatal(err)
+					}
+				}
+				inject()
+				if !copilotUnexpectedEventOwnsHook(decodeHookFileForTest(t, path)["hooks"].(map[string]interface{})["unexpectedEvent"], script) {
+					t.Fatal("Doctor's unexpected handler is not claimed for repair")
+				}
+				if err := patchCopilotHooksForOS(path, script, copilotCurrentHookEvents, goos); err != nil {
+					t.Fatal(err)
+				}
+				if got := decodeHookFileForTest(t, path)["hooks"].(map[string]interface{}); copilotUnexpectedEventOwnsHook(got["unexpectedEvent"], script) {
+					t.Fatalf("Setup left DefenseClaw's unexpected handler: %v", got["unexpectedEvent"])
+				}
+				inject()
+				if err := removeCopilotHookReferencesProfile(path, false, script); err != nil {
+					t.Fatal(err)
+				}
+				got := decodeHookFileForTest(t, path)["hooks"].(map[string]interface{})
+				if copilotUnexpectedEventOwnsHook(got["unexpectedEvent"], script) {
+					t.Fatalf("teardown left DefenseClaw's unexpected handler: %v", got["unexpectedEvent"])
+				}
+				if !sameHookJSON(got["operatorEvent"], []interface{}{operator}) {
+					t.Fatalf("teardown changed the operator handler: %v", got["operatorEvent"])
+				}
+			})
+		}
+	}
+}
