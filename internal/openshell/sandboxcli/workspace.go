@@ -646,23 +646,18 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 		if sb, err = api.Start(ctx, o.Name, sandboxapi.StartRequest{}); err != nil {
 			return apiError(err)
 		}
-		// Leave it as it was found, unless a session attached meanwhile:
-		// the count and the stop are made under the sandbox's exclusive
-		// gate (stopIfAlone), and a count that cannot be made keeps it
-		// running too. A session that attached and ended meanwhile (its
-		// hooks tell) may have changed the copy since the pull.
+		// Leave it as it was found.
 		defer func() {
-			stopped, keep, err := a.stopIfAlone(context.WithoutCancel(ctx), api, o.Name)
-			switch {
-			case keep != "":
-				a.note(o.Name + " keeps running: " + keep)
-				return
-			case err != nil:
+			// A session that attached meanwhile (its hooks tell one that
+			// has ended already) may have changed the copy since the pull.
+			quiet := a.attachedSessions(o.Name) == 0
+			stopped, err := api.Stop(context.WithoutCancel(ctx), o.Name)
+			if err != nil {
 				a.warn("could not stop " + o.Name + " again: " + apiError(err).Error())
 				return
 			}
 			a.note("stopped " + o.Name + " again")
-			if res != nil && (stopped == nil || !stopped.Hooks.LastHookAt.After(hooked)) {
+			if res != nil && quiet && (stopped == nil || !stopped.Hooks.LastHookAt.After(hooked)) {
 				a.markStoppedCopy(sb, handedOver, res.Result)
 			}
 		}()

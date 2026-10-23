@@ -811,8 +811,6 @@ type fakeCopy struct {
 	pulled    []workspace.PullOptions
 	// refreshErr is what Refresh fails with.
 	refreshErr error
-	// onPull runs as a Pull (not a reuse) reads the copy.
-	onPull func()
 	// diff is what Diff answers.
 	diff string
 }
@@ -907,9 +905,6 @@ func (f *fakeCopy) Pull(_ context.Context, o workspace.PullOptions) (*workspace.
 		return &r, nil
 	}
 	f.step("pull " + o.Name)
-	if f.onPull != nil {
-		f.onPull()
-	}
 	if f.pull != nil {
 		return f.pull, nil
 	}
@@ -1050,7 +1045,7 @@ func newTestApp(t *testing.T, input string, sandboxes ...sandboxapi.Sandbox) *te
 	cfg.Gateway.APIPort = 18970
 	cfg.OpenShell.Enabled = true
 	ta.App = &App{
-		Cfg: cfg, ConfigPath: filepath.Join(root, "data", "config.yaml"), API: ta.daemon.client(), LifecycleDir: filepath.Join(root, "openshell"),
+		Cfg: cfg, ConfigPath: filepath.Join(root, "data", "config.yaml"), API: ta.daemon.client(),
 		IO:       IO{In: ta.in, Out: ta.out, Err: ta.err, TTY: true},
 		Terminal: ta.term, Streamer: ta.stream, Images: ta.images, Workspace: ta.copy, Gateway: ta.gateway,
 		ExecProcess: func(path string, argv, _ []string) error {

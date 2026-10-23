@@ -48,7 +48,6 @@ func TestStandaloneForeignCleanupReportsOnlyRestoredCopilotLocalHookFile(t *test
 			MachinePolicy: config.EnterpriseMachinePolicyConfig{Connectors: map[string]config.EnterpriseConnectorPolicy{"copilot": {}}},
 		},
 	}
-	useStandaloneForeignHookFenceFixture(t)
 	enterpriseHookManifest = filepath.Join(root, "targets.yaml")
 	enterpriseHookForeignCleanupState.Lock()
 	enterpriseHookForeignCleanupState.last, enterpriseHookForeignCleanupState.fingerprint = time.Time{}, ""

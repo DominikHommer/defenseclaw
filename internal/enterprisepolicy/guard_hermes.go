@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -225,7 +226,7 @@ func (s *guardScan) scanHermesYAML(source hookSource, data []byte) []Finding {
 // way Setup writes it; every other byte of the file is kept, and the
 // original is backed up first. An unverifiable file is reported and left
 // alone (the hook keeps denying until the user fixes it).
-func cleanHermesYAMLSource(scan *guardScan, source hookSource, backupDir string, result *CleanupResult) error {
+func cleanHermesYAMLSource(scan *guardScan, source hookSource, backupDir string, scope CleanupScope, result *CleanupResult) error {
 	req := scan.req
 	data, exists, err := scan.readSource(source)
 	if err != nil {
@@ -248,7 +249,7 @@ func cleanHermesYAMLSource(scan *guardScan, source hookSource, backupDir string,
 		remove[finding.key] = true
 		removed = append(removed, finding)
 	}
-	if len(remove) == 0 {
+	if len(remove) == 0 || !scope.edits(source.path, removed, result) {
 		return nil
 	}
 	hooks, err := hermesHookEvents(data)
@@ -285,5 +286,18 @@ func cleanHermesYAMLSource(scan *guardScan, source hookSource, backupDir string,
 	if err != nil {
 		return err
 	}
-	return rewriteUserSource(req, source, data, rendered, removed, backupDir, result)
+	if err := backupUserFile(source.path, data, backupDir); err != nil {
+		return err
+	}
+	result.BackupDir = backupDir
+	info, err := os.Lstat(source.path)
+	if err != nil {
+		return err
+	}
+	if err := rewriteUserFile(source.path, rendered, info.Mode().Perm()); err != nil {
+		return err
+	}
+	result.Removed = append(result.Removed, removed...)
+	result.FilesTouch = appendUnique(result.FilesTouch, source.path)
+	return nil
 }

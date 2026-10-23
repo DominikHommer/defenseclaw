@@ -16,8 +16,6 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func TestHookCallerLimiterBoundsEachCallerSeparately(t *testing.T) {
@@ -316,11 +314,6 @@ func TestForeignHookSessionExchangesDoNotWaitOnOtherIdentities(t *testing.T) {
 	if !filepath.IsAbs(dataDir) {
 		t.Fatalf("test data dir %q is not absolute", dataDir)
 	}
-	guardianDir := t.TempDir()
-	t.Setenv(managed.HookGuardianAuthorizationDirEnv, guardianDir)
-	previous := validateManagedGuardianAuthorization
-	validateManagedGuardianAuthorization = func(string, string) error { return nil }
-	t.Cleanup(func() { validateManagedGuardianAuthorization = previous })
 	exchange := func(identity string) <-chan int {
 		done := make(chan int, 1)
 		go func() {
@@ -332,14 +325,14 @@ func TestForeignHookSessionExchangesDoNotWaitOnOtherIdentities(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/foreign-hook-session/claudecode", bytes.NewReader(body))
 			ctx := withAuthenticatedHookConnector(req.Context(), "claudecode")
 			ctx = context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, identity)
-			response := newDeadlineRecorder()
+			response := httptest.NewRecorder()
 			api.handleForeignHookSession(response, req.WithContext(ctx))
 			done <- response.Code
 		}()
 		return done
 	}
 
-	unlock := api.foreignHookSessionLocks.lock(enterprisepolicy.ForeignHookSessionStoreDir(dataDir, alice))
+	unlock := api.foreignHookSessionLocks.lock(foreignHookSessionStateDir(dataDir, alice))
 	aliceDone := exchange(alice)
 	select {
 	case code := <-exchange(bob):

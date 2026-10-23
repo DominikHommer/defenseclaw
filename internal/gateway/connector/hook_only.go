@@ -28,7 +28,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -5057,7 +5056,6 @@ func patchCopilotHooksForOS(path, hookScript string, events []string, goos strin
 			continue
 		}
 		remaining := removeOwnedFlatHooks(hooks[event], hookScript)
-		remaining = slices.DeleteFunc(remaining, copilotOldManagedCopyEntry)
 		if len(remaining) == 0 {
 			delete(hooks, event)
 		} else {
@@ -5312,7 +5310,7 @@ func reconcileCopilotFlatHook(raw interface{}, hookScript string, entry map[stri
 	replaced := false
 	edited := hookScriptBaseName(hookScript)
 	for _, item := range list {
-		if managedHookCommandEntry(item, hookScript) || editedDefenseClawHookEntry(item, edited) || copilotOldManagedCopyEntry(item) {
+		if managedHookCommandEntry(item, hookScript) || editedDefenseClawHookEntry(item, edited) {
 			if !replaced {
 				out = append(out, entry)
 				replaced = true
@@ -5325,37 +5323,6 @@ func reconcileCopilotFlatHook(raw interface{}, hookScript string, entry map[stri
 		out = append(out, entry)
 	}
 	return out
-}
-
-// copilotOldManagedCopyEntry recognizes a copied DefenseClaw launcher outside
-// the usual data directory. A stale registered copy can still answer open
-// after the current launcher is rendered closed. Only a regular script with
-// DefenseClaw's Copilot marker is claimed; an unrelated operator hook stays.
-func copilotOldManagedCopyEntry(raw interface{}) bool {
-	entry, ok := raw.(map[string]interface{})
-	if !ok {
-		return false
-	}
-	for _, key := range []string{"bash", "command"} {
-		command, _ := entry[key].(string)
-		word, rest, parsed := posixHookCommandSplit(strings.TrimSpace(command))
-		if !parsed || !filepath.IsAbs(word) || filepath.Clean(word) != word ||
-			(rest != "" && !strings.HasPrefix(rest, " --event ")) {
-			continue
-		}
-		body, err := safefile.ReadRegularFileBounded(word, 1<<20)
-		if err != nil {
-			continue
-		}
-		if len(body) > 512 {
-			body = body[:512]
-		}
-		if bytes.Contains(body, []byte("# defenseclaw-managed-hook v")) &&
-			bytes.Contains(body, []byte("DefenseClaw Copilot CLI hook")) {
-			return true
-		}
-	}
-	return false
 }
 
 func appendUniqueMatcherHookGroup(raw interface{}, hookScript string, group map[string]interface{}) []interface{} {

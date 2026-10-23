@@ -89,8 +89,7 @@ func TestADockerSandboxMadeBefore015StartsOn015(t *testing.T) {
 		mu.Lock()
 		moved = append(moved, id)
 		mu.Unlock()
-		moved, _, err := openshell.MigrateDockerBootstrap(stateHome, id)
-		return moved, err
+		return openshell.MigrateDockerBootstrap(stateHome, id)
 	}
 	e.stopBox("oldbox")
 	starts := e.fake.Calls(openshelltest.MethodStartSandbox)
