@@ -259,7 +259,7 @@ func (r *doctorRun) linuxMicroVMHost(ctx context.Context) *MicroVMHost {
 	}
 	m.E2fsprogs = e2fsprogsIn(r.E2fsprogsDirs)
 	m.DriverRunning = r.running.Name == DriverVM
-	m.DriverBinary = r.findVMDriver(ctx)
+	m.DriverBinary, m.userRepairDir = r.findVMDriver(ctx)
 	if m.DriverBinary != "" && r.gateway.Version != (Version{}) {
 		if v, err := r.vmDriverVersion(ctx, m.DriverBinary); err == nil {
 			m.DriverVersion = v.String()
@@ -291,21 +291,46 @@ func (r *doctorRun) vmDriverVersion(ctx context.Context, path string) (Version, 
 	return ParseVersion(fields[len(fields)-1])
 }
 
-// vmDriverFix installs the pinned driver where the gateway selected an old
-// one. A new copy in another directory would leave the old one effective.
+// vmDriverFix installs the pinned driver where the gateway selects an old
+// one. A PATH-adjacent driver is searched after the user's default directory,
+// so a new copy there wins without writing beside the gateway.
 func (m *MicroVMHost) vmDriverFix(goarch string) *Fix {
 	if m.DriverOlderThan == "" || m.DriverBinary == "" {
 		return InstallVMDriverFix(goarch)
 	}
 	dir := filepath.Dir(m.DriverBinary)
 	var fix *Fix
-	if slices.Contains(AdminVMDriverDirs("linux"), dir) || dir == "/usr/local/libexec" {
+	if m.userRepairDir != "" && !vmDriverDirNeedsSudo(m.userRepairDir) {
+		fix = installVMDriverFixIn(goarch, m.userRepairDir)
+	} else if vmDriverDirNeedsSudo(dir) {
 		fix = adminVMDriverFixIn("linux", goarch, dir)
 	} else {
 		fix = installVMDriverFixIn(goarch, dir)
 	}
 	fix.Summary += "; restart the OpenShell gateway and run `defenseclaw sandbox doctor` to verify its effective driver"
 	return fix
+}
+
+// vmDriverDirNeedsSudo uses the first existing directory in the target's
+// ancestry. The directory itself may be missing, but the repair will need
+// to create it in that ancestor. An unknown owner or access check chooses
+// the administrator's install rather than suggesting a command that fails.
+func vmDriverDirNeedsSudo(dir string) bool {
+	for {
+		info, err := os.Stat(dir)
+		if err == nil {
+			uid, known := fileUID(info)
+			return !info.IsDir() || !known || uid == 0 || !writableByCaller(dir)
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return true
+		}
+		dir = parent
+	}
 }
 
 // linuxMicroVMChecks makes, once, the machine checks of a Linux host

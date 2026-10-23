@@ -125,20 +125,82 @@ func f13(gw string) string {
 // The configured driver wins even when the default directory has a newer
 // copy. A repair must replace the copy the gateway actually selects.
 func TestOldMicroVMDriverRepairUsesConfiguredDirectory(t *testing.T) {
-	f := newDoctorFixture(t)
-	f.onLinuxMicroVMs()
-	f.atRelease(openshell.InstallerVersion)
-	dir := filepath.Join(f.home, "custom driver")
-	driver := filepath.Join(dir, "openshell-driver-vm")
-	touchExecutable(t, driver)
-	f.writeTOML(strings.Replace(linuxVMTOML, "[openshell.drivers.vm]\n", "[openshell.drivers.vm]\ndriver_dir = \""+dir+"\"\n", 1), f.started.Add(-time.Minute))
-	f.runner.On(driver+" --version", "openshell-driver-vm 0.1.3\n", nil)
-	f.runner.On(f.linuxDriverPath()+" --version", "openshell-driver-vm "+openshell.InstallerVersion+"\n", nil)
-	r := f.run()
-	c := expectCheck(t, r, openshell.CheckIDVMDriver, openshell.StatusFail, f13(openshell.InstallerVersion))
-	if c.Fix == nil || !strings.Contains(c.Fix.Summary, dir) ||
-		!strings.Contains(c.Fix.Command, "'"+dir+"'") || strings.Contains(c.Fix.Command, "~/.local/libexec/openshell") {
-		t.Fatalf("driver %s, repair = %+v", r.MicroVM.DriverBinary, c.Fix)
+	for _, tc := range []struct {
+		name string
+		sudo bool
+	}{{"writable", false}, {"not writable", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDoctorFixture(t)
+			f.onLinuxMicroVMs()
+			f.atRelease(openshell.InstallerVersion)
+			dir := filepath.Join(f.home, "custom driver")
+			driver := filepath.Join(dir, "openshell-driver-vm")
+			touchExecutable(t, driver)
+			if tc.sudo {
+				if err := os.Chmod(dir, 0o555); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+			}
+			f.writeTOML(strings.Replace(linuxVMTOML, "[openshell.drivers.vm]\n", "[openshell.drivers.vm]\ndriver_dir = \""+dir+"\"\n", 1), f.started.Add(-time.Minute))
+			f.runner.On(driver+" --version", "openshell-driver-vm 0.1.3\n", nil)
+			f.runner.On(f.linuxDriverPath()+" --version", "openshell-driver-vm "+openshell.InstallerVersion+"\n", nil)
+			r := f.run()
+			c := expectCheck(t, r, openshell.CheckIDVMDriver, openshell.StatusFail, f13(openshell.InstallerVersion))
+			if c.Fix == nil || c.Fix.Sudo != tc.sudo || !strings.Contains(c.Fix.Summary, dir) ||
+				!strings.Contains(c.Fix.Command, "'"+dir+"'") || strings.Contains(c.Fix.Command, "~/.local/libexec/openshell") {
+				t.Fatalf("driver %s, repair = %+v", r.MicroVM.DriverBinary, c.Fix)
+			}
+		})
+	}
+}
+
+// Without driver_dir, a driver beside the gateway on PATH is searched after
+// the user's default directory. Use that earlier directory when writable;
+// otherwise repair the selected directory itself.
+func TestOldMicroVMDriverBesideGatewayRepairsUserDirectory(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		userDirNotWritable bool
+	}{{"writable user directory", false}, {"unwritable user directory", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDoctorFixture(t)
+			f.onLinuxMicroVMs()
+			f.atRelease(openshell.InstallerVersion)
+			if err := os.Remove(f.linuxDriverPath()); err != nil {
+				t.Fatal(err)
+			}
+			userDir := filepath.Dir(f.linuxDriverPath())
+			if tc.userDirNotWritable {
+				if err := os.Chmod(userDir, 0o555); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(userDir, 0o755) })
+			}
+			binDir := filepath.Join(f.home, "gateway-bin")
+			gw := filepath.Join(binDir, openshell.GatewayBinary)
+			driver := filepath.Join(binDir, "openshell-driver-vm")
+			touchExecutable(t, gw)
+			touchExecutable(t, driver)
+			lookPath := f.doctor.LookPath
+			f.doctor.LookPath = func(name string) (string, error) {
+				if name == openshell.GatewayBinary {
+					return gw, nil
+				}
+				return lookPath(name)
+			}
+			f.runner.On(driver+" --version", "openshell-driver-vm 0.1.3\n", nil)
+			r := f.run()
+			c := expectCheck(t, r, openshell.CheckIDVMDriver, openshell.StatusFail, f13(openshell.InstallerVersion))
+			wantDir, wrongDir := userDir, binDir
+			if tc.userDirNotWritable {
+				wantDir, wrongDir = binDir, userDir
+			}
+			if r.MicroVM.DriverBinary != driver || c.Fix == nil || c.Fix.Sudo ||
+				!strings.Contains(c.Fix.Command, wantDir+"/openshell-driver-vm") || strings.Contains(c.Fix.Command, wrongDir+"/openshell-driver-vm") {
+				t.Fatalf("driver %q, repair = %+v", r.MicroVM.DriverBinary, c.Fix)
+			}
+		})
 	}
 }
 
@@ -216,7 +278,13 @@ func TestDoctorChecksWhatLinuxMicroVMsNeed(t *testing.T) {
 			f.atRelease(openshell.InstallerVersion)
 			f.runner.On(f.linuxDriverPath()+" --version", "openshell-driver-vm 0.1.3\n", nil)
 		}, want: checkWant{"vm-driver", fail, f13(openshell.InstallerVersion)},
-			fix: &fixWant{text: "restart the OpenShell gateway and run `defenseclaw sandbox doctor`", manual: true}},
+			fix: &fixWant{text: "restart the OpenShell gateway and run `defenseclaw sandbox doctor`", manual: true},
+			then: func(t *testing.T, f *doctorFixture, r *openshell.DoctorReport) {
+				want := filepath.Dir(f.linuxDriverPath())
+				if command := r.Get(openshell.CheckIDVMDriver).Fix.Command; !strings.Contains(command, " "+want+"/openshell-driver-vm") {
+					t.Fatalf("repair does not replace the selected driver in %q: %s", want, command)
+				}
+			}},
 		{name: "driver of the gateway's release", setup: func(f *doctorFixture) {
 			f.atRelease(openshell.InstallerVersion)
 			f.runner.On(f.linuxDriverPath()+" --version", "openshell-driver-vm "+openshell.InstallerVersion+"\n", nil)
