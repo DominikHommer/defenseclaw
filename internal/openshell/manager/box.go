@@ -126,6 +126,12 @@ type box struct {
 	// oldSupervisorStop is set while a stop of a session on an old
 	// supervisor is scheduled (scheduleOldSupervisorStop).
 	oldSupervisorStop bool
+	// oldSupervisorNetworkErr is the last failure to withdraw the direct
+	// network rules of a completed or failed MicroVM on an old supervisor.
+	oldSupervisorNetworkErr string
+	// oldSupervisorNetworkBusy prevents duplicate containment workers while
+	// a lifecycle operation holds op.
+	oldSupervisorNetworkBusy bool
 	// toolHostsSaid are the harness tool hosts whose refusal the feed
 	// explained (firstToolHostRefusal).
 	toolHostsSaid map[string]bool
@@ -537,6 +543,13 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: rec.Name, Severity: "HIGH",
 			Reason: sandboxapi.ReasonOldSupervisor, Message: oldSupervisorMessage(rec.Name, rec.SessionRelease, m.upgradeWayOn(release))})
 		m.scheduleOldSupervisorStop(b)
+	} else if oldSupervisorLingering(phase, rec) {
+		// OpenShell returns a completed or failed MicroVM's stop unchanged.
+		// Keep its compute and disk, but withdraw its two external network
+		// paths while the legacy supervisor is still alive.
+		m.containOldSupervisorNetwork(ctx, b)
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: rec.Name, Severity: "HIGH",
+			Reason: sandboxapi.ReasonOldSupervisor, Message: oldSupervisorLingeringMessage(rec.Name, rec.SessionRelease)})
 	}
 	m.syncGuard(b, phase)
 	m.syncObserve(b, phase)
@@ -731,6 +744,29 @@ const oldSupervisorWarning = "this session may run the supervisor of an OpenShel
 	"DefenseClaw stops it, `defenseclaw sandbox exec` runs nothing in it, and `defenseclaw sandbox connect` stops it and starts it again " +
 	"on OpenShell " + openshell.SupportedMin + " or later"
 
+const oldSupervisorLingeringWarning = "this MicroVM may still run background work on an OpenShell supervisor older than " + openshell.SupportedMin +
+	": DefenseClaw closes its proxy and attempts to withdraw its direct network rules while keeping the VM and disk; OpenShell cannot stop it without losing unsynced work"
+
+// oldSupervisorLingering reports a VM with compute still held after the
+// main process ended, whose session may use a broker from before 0.1.5.
+// Docker's completed and error phases hold no compute, and ProcessExited
+// means OpenShell has already reported the VM gone.
+func oldSupervisorLingering(phase audit.SandboxPhase, rec record) bool {
+	return !openshell.RunsSandboxes(rec.SessionRelease) &&
+		(phase == audit.SandboxPhaseCompleted || phase == audit.SandboxPhaseError) &&
+		holdsCompute(phase, rec.Driver, rec.PhaseReason)
+}
+
+func oldSupervisorLingeringMessage(name, release string) string {
+	which := "OpenShell " + release
+	if release == "" {
+		which = "an OpenShell release older than " + openshell.SupportedMin + " (the session's release was not recorded)"
+	}
+	return "⚠ " + name + " may still run background work on the supervisor of " + which +
+		", whose network broker can bypass sandbox policy (NVIDIA/OpenShell#4494): DefenseClaw closes its egress proxy and attempts to withdraw its direct network rules, " +
+		"while keeping the MicroVM and disk; OpenShell cannot stop this ended VM without losing unsynced work"
+}
+
 // oldSupervisorMessage is the feed's warning about the sandbox name whose
 // session started on OpenShell release (a record from before DefenseClaw
 // kept it: ""), older than openshell.SupportedMin: it runs that release's
@@ -782,17 +818,18 @@ func (m *Manager) scheduleOldSupervisorStop(b *box) {
 	}()
 }
 
-// retryOldSupervisorStop schedules the stop of b again while its session is
-// still ready on an old supervisor: a stop that failed (stopOldSupervisor)
-// returned it to ready, which lifecycle sees as no transition, so each
-// reconcile tries again, and the reconcile interval is the backoff
-// (GAP-0415).
-func (m *Manager) retryOldSupervisorStop(b *box) {
+// reconcileOldSupervisor retries the stop of a ready legacy session or
+// network containment of an ended legacy MicroVM. The reconcile interval
+// is the backoff after a failed stop or policy update.
+func (m *Manager) reconcileOldSupervisor(ctx context.Context, b *box) {
 	m.mu.Lock()
 	old := b.phase == audit.SandboxPhaseReady && !openshell.RunsSandboxes(b.rec.SessionRelease)
+	linger := oldSupervisorLingering(b.phase, b.rec)
 	m.mu.Unlock()
 	if old {
 		m.scheduleOldSupervisorStop(b)
+	} else if linger {
+		m.containOldSupervisorNetwork(ctx, b)
 	}
 }
 
@@ -1207,6 +1244,12 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 	}
 	if b.phase == audit.SandboxPhaseReady && !openshell.RunsSandboxes(r.SessionRelease) {
 		v.Warnings = append(slices.Clone(v.Warnings), oldSupervisorWarning)
+		v.OldSupervisor = true
+	} else if oldSupervisorLingering(b.phase, r) {
+		v.Warnings = append(slices.Clone(v.Warnings), oldSupervisorLingeringWarning)
+		if b.oldSupervisorNetworkErr != "" {
+			v.Warnings = append(v.Warnings, "DefenseClaw could not withdraw the legacy MicroVM's direct network rules: "+b.oldSupervisorNetworkErr)
+		}
 		v.OldSupervisor = true
 	}
 	v.Hooks = sandboxapi.HookCoverage{

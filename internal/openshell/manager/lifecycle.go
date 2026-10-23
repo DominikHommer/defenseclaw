@@ -775,6 +775,12 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if err := lingeringStartRefusal(rec.Name, gw.Driver, sb, rec.PhaseReason, req.EndVM); err != nil {
 		return err
 	}
+	// Containment may have detached providers or removed rules before an
+	// OpenShell error prevented its final confirmation. Once an explicit
+	// end-vm replaces the legacy supervisor, restore the create-time policy
+	// even when the closed-network checkpoint was not reached.
+	restoreLegacyNetwork := rec.OldSupervisorNetworkClosed || len(rec.OldSupervisorProviders) > 0 ||
+		oldSupervisorLingering(auditPhase(sb.Status.Phase), rec)
 	// A sandbox an OpenShell before 0.1.5 created keeps a Docker bootstrap
 	// that 0.1.5 cannot read (GAP-0300): it moves to 0.1.5's format first.
 	if err := m.migrateBootstrap(gw, rec.Name, sb); err != nil {
@@ -942,6 +948,22 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 		}
 		return vmExitFailure(runtime.GOOS, m.managedMode(), gw.Driver, upstream("wait for sandbox "+rec.Name, err))
 	}
+	if restoreLegacyNetwork {
+		// The old VM is gone now. Restore only its create-time network policy,
+		// after the new supervisor is ready: never reopen a route while the
+		// legacy supervisor can still run background work. Session approvals
+		// removed above are not brought into the new session.
+		if err := m.restoreOldSupervisorNetwork(ctx, gw, b, sb, eff); err != nil {
+			stopErr := m.stopUnverified(ctx, gw, b)
+			detail := "DefenseClaw stopped the new session before it could run without its network policy"
+			if stopErr != nil {
+				detail += "; stopping it also failed: " + stopErr.Error()
+			}
+			return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable,
+				Message: "sandbox " + rec.Name + " did not restore its network on the new OpenShell supervisor: " + err.Error(),
+				Detail:  detail}
+		}
+	}
 	if rulesLeft != nil {
 		if err := m.endSessionRules(ctx, gw, b, eff); err != nil {
 			// Fail closed: a sandbox must not run a new session with a rule
@@ -963,6 +985,9 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	b.rulesAdded, b.autoApproved = 0, nil
 	m.mu.Unlock()
 	m.lifecycle(ctx, b, auditPhase(sb.Status.Phase), audit.SandboxTriggerStart, false, nil, nil)
+	if restoreLegacyNetwork {
+		m.syncCredential(b, eff)
+	}
 	m.observeNow(b)
 	m.startWatch(b)
 	m.enforceApprovedRules(ctx, gw, b, eff)
