@@ -51,6 +51,68 @@ describe('Cursor observe outage mode', () => {
     assert.match(managedRegistration, /"failClosed": mode == "closed"/);
     assert.match(page('reference/connectors/cursor.mdx'), /failClosed` value follows the administrator's resolved fail mode/i);
     assert.ok(!/per-user Cursor in observe mode fails open/i.test(failModes));
+
+    const overview = page('connectors/cursor.mdx').split('## What it can block or ask')[1]?.split('## Files it changes')[0] ?? '';
+    assert.match(overview, /Observe mode.{0,120}policy findings without blocking/i);
+    assert.match(overview, /gateway outage.{0,100}blocks supported events by default/i);
+    const mapping = page('reference/connectors/cursor.mdx').split('## Verdict mapping')[1]?.split('## Native ask')[0] ?? '';
+    assert.match(mapping, /\| Observe \| `failClosed: false` \|[^|]*policy findings[^|]*gateway outage/i);
+    assert.ok(!/observe cannot become blocking/i.test(mapping));
+  });
+});
+
+describe('Observe mode policy findings and gateway outages', () => {
+  it('qualifies hook connector claims for Claude Code and Antigravity', () => {
+    const outage = source('internal/gateway/connector/subprocess.go').split('func OutageHookFailMode(')[1]?.split('\n}')[0] ?? '';
+    assert.match(outage, /return mode/);
+    for (const connector of ['claudecode', 'antigravity']) {
+      const section = page(`connectors/${connector}.mdx`).split('## What it can block or ask')[1]?.split('## Files it changes')[0] ?? '';
+      assert.match(section, /Observe mode.{0,120}policy findings without blocking/i, connector);
+      assert.match(section, /default fail mode `closed`.{0,140}gateway is unreachable/i, connector);
+    }
+  });
+
+  it('qualifies proxy connector claims for OpenClaw and ZeptoClaw', () => {
+    assert.match(source('internal/gateway/proxy.go'), /verdict.Action == "block" && mode == "action"/);
+    for (const connector of ['openclaw', 'zeptoclaw']) {
+      const setup = page(`connectors/${connector}.mdx`).split('## Set up')[1]?.split('## Check it')[0] ?? '';
+      assert.match(setup, /Observe records policy findings without blocking on those findings/i, connector);
+      assert.match(setup, /gateway outage still stops proxied requests/i, connector);
+      assert.match(page(`reference/connectors/${connector}.mdx`), /While the gateway is down, requests are blocked/i, connector);
+    }
+  });
+
+  it('scopes general guardrail observe guidance to policy findings', () => {
+    assert.match(page('features/guardrail.mdx'), /Observe mode does not enforce policy findings/i);
+    assert.match(page('features/guardrail.mdx'), /Hook fail mode and proxy availability still apply/i);
+    assert.ok(!/\*\*Observe\*\*[^.]*blocks nothing/i.test(page('features/guardrail.mdx')));
+    assert.match(page('reference/policy/thresholds.mdx'), /Observe mode does not enforce policy findings/i);
+    const commands = source('docs-site/content/docs/reference/commands/cli.mdx');
+    const modeRow = commands.split('\n').find((line) => line.startsWith('| `defenseclaw guardrail mode observe')) ?? '';
+    assert.match(modeRow, /observe \(logs policy findings without enforcing them\)/i);
+    assert.match(modeRow, /Hook fail mode and proxy availability still apply/i);
+  });
+
+  it('names the ACP observe failure exception', () => {
+    const proxy = source('internal/acp/proxy.go').split('func observeRefuses(')[1]?.split('\n}')[0] ?? '';
+    assert.match(proxy, /state\.profileFailsClosed\(\)/);
+    assert.match(proxy, /!opts\.Managed/);
+    assert.match(proxy, /!state\.sessionFailsOpen\(promptSessionID\(msg\)\)/);
+    const guide = page('features/acp-guard.mdx');
+    assert.match(guide, /observe mode.{0,100}policy findings without blocking/i);
+    assert.match(guide, /standalone managed guard.{0,100}refuses an unevaluated frame by default/i);
+  });
+});
+
+describe('ZeptoClaw removal', () => {
+  it('documents the last-connector gate and the forced removal command', () => {
+    const removal = source('cli/defenseclaw/commands/cmd_setup.py').split('# WU8 D2=A — last-connector gate.')[1]?.split('elif not yes')[0] ?? '';
+    assert.match(removal, /if not remaining:[\s\S]*?if not force and not unshipped:/);
+    assert.match(removal, /Pass --force to fully unconfigure enforcement/);
+    const turnOff = page('connectors/zeptoclaw.mdx').split('## Turn it off')[1]?.split('## Details')[0] ?? '';
+    assert.match(turnOff, /setup remove zeptoclaw --yes`/);
+    assert.match(turnOff, /last connector.{0,100}removal refuses/i);
+    assert.match(turnOff, /defenseclaw setup remove zeptoclaw --yes --force/);
   });
 });
 

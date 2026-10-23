@@ -102,11 +102,11 @@ Cursor runs every matching hook and merges conflicts in **Enterprise > Team > Pr
 | Mode | Registration | Behavior |
 | --- | --- | --- |
 | Action | `failClosed: true` | Returns the documented native deny on supported pre-action events. `beforeSubmitPrompt` blocks with `continue: false`. The permission-gated events use `permission: "deny"`. Confirm verdicts stay attributed alerts. Native ask is not enabled. |
-| Observe | `failClosed: false` | Allows, and records `would_block` audit state for the same findings. |
+| Observe | `failClosed: false` | Allows on policy findings and records `would_block` audit state; on a per-user install, the running hook still blocks supported events during a gateway outage by default. |
 
 Blocking events are `preToolUse`, `subagentStart`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeTabFileRead` and `beforeSubmitPrompt`. `sessionStart` and `sessionEnd` are not gates. `stop` and `subagentStop` accept only a follow-up message. Result inspection reads `tool_output`, `error_message`, shell `output`, MCP `result_json`, file `edits`, agent `text` and subagent `summary`. `beforeMCPExecution` keeps its exact `tool_input` and URL or command, and derives a stable digest identity without inventing a vendor name.
 
-A conflicting `--fail-mode` is ignored with a warning, so observe cannot become blocking and action cannot silently become fail-open. Setup reports readiness only after the current 21-event `type: command`, 30-second, mode-matched registration, the managed runtime adapter, the contract lock and the complete active-connector roster agree. Adding or repairing another connector waits for that full roster.
+A conflicting `--fail-mode` is ignored with a warning, so observe registration stays `failClosed: false` and action registration stays `failClosed: true`. The running hook's outage mode is described below. Setup reports readiness only after the current 21-event `type: command`, 30-second, mode-matched registration, the managed runtime adapter, the contract lock and the complete active-connector roster agree. Adding or repairing another connector waits for that full roster.
 
 ## Native ask
 
