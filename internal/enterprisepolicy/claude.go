@@ -464,7 +464,7 @@ func (t claudeTarget) Verify(opts Options) (State, error) {
 		return State{}, err
 	}
 	state := newClaudeState(policy, paths)
-	if policy.Ownership == config.MachinePolicyOwnershipOff {
+	if policy.Ownership == config.MachinePolicyOwnershipOff && opts.goos() != "windows" {
 		state.Route = RouteUnsupported
 		return state, nil
 	}

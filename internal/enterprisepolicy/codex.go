@@ -622,7 +622,7 @@ func (codexTarget) Verify(opts Options) (State, error) {
 		return State{}, err
 	}
 	state := newCodexState(opts, policy, path)
-	if policy.Ownership == config.MachinePolicyOwnershipOff {
+	if policy.Ownership == config.MachinePolicyOwnershipOff && opts.goos() != "windows" {
 		state.Route = RouteUnsupported
 		return state, nil
 	}

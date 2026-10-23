@@ -107,10 +107,6 @@ func windowsCursorVerify(opts Options) (State, error) {
 		return State{}, err
 	}
 	state := newCursorState(policy, []string{hooksPath, adapterPath})
-	if policy.Ownership == config.MachinePolicyOwnershipOff {
-		state.Route = RouteUnsupported
-		return state, nil
-	}
 	current, exists, err := readPolicyFile(opts, hooksPath)
 	if err != nil {
 		return state, err

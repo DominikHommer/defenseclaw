@@ -203,6 +203,13 @@ describe('managed-host enrollment protection', () => {
 
     const policy = page('enterprise/configure/machine-policy.mdx');
     assert.match(policy, /configured Claude Code, Codex and Cursor.{0,260}before the first (?:user )?enrollment.{0,260}after the last enrolled (?:user|SID) is removed/i);
+    const ownershipOffRow = readFileSync(join(site, 'content/docs/enterprise/configure/machine-policy.mdx'), 'utf8')
+      .split('\n').find((line) => line.startsWith('| `off` |'));
+    assert.ok(ownershipOffRow);
+    assert.match(ownershipOffRow, /Windows.{0,150}Claude Code, Codex and Cursor.{0,180}verified even with zero enrolled users/i);
+
+    const configuration = page('enterprise/configure/configuration.mdx');
+    assert.match(configuration, /On Windows.{0,150}ownership.{0,50}off.{0,180}Claude Code, Codex and Cursor.{0,100}machine hooks/i);
     const reference = page('enterprise/configure/reference.mdx');
     assert.match(reference, /configured Claude Code, Codex and Cursor.{0,260}before the first (?:user )?enrollment.{0,260}after the last enrolled (?:user|SID) is removed/i);
   });
