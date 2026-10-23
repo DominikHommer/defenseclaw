@@ -130,7 +130,17 @@ Run bare, `guardrail fail-mode` prints the global value and each active connecto
   Switch to closed: defenseclaw guardrail fail-mode closed
 ```
 
-Claude Code shows `open` because it has no value of its own; Codex shows `closed` because of its override. With `guardrail.hook_fail_mode: closed` the last lines read `Invalid, unauthorized, incomplete, and unreachable gateway responses BLOCK connectors that are closed above.` and `Switch to open:   defenseclaw guardrail fail-mode open`, with a warning `Still fail-open: <names>. Close it with: defenseclaw guardrail fail-mode closed --connector <name>` between them when a connector override keeps one open. Omitting `--connector` writes the broad posture and reconciles active connector overrides, so an old per-connector value cannot keep one peer on the prior mode.
+Claude Code shows `open` because it has no value of its own; Codex shows `closed` because of its override.
+
+With the global value `closed` and a connector set to `open`, the footer names the open connectors:
+
+```text
+  Invalid, unauthorized, incomplete, and unreachable gateway responses BLOCK connectors that are closed above.
+  ⚠ Still fail-open: claudecode. Close it with: defenseclaw guardrail fail-mode closed --connector <name>
+  Switch to open:   defenseclaw guardrail fail-mode open
+```
+
+With `guardrail.hook_fail_mode: closed` the last lines read `Invalid, unauthorized, incomplete, and unreachable gateway responses BLOCK connectors that are closed above.` and `Switch to open:   defenseclaw guardrail fail-mode open`, with a warning `Still fail-open: <names>. Close it with: defenseclaw guardrail fail-mode closed --connector <name>` between them when a connector override keeps one open. Omitting `--connector` writes the broad posture and reconciles active connector overrides, so an old per-connector value cannot keep one peer on the prior mode.
 
 The mode is written to `guardrail.hook_fail_mode` (or the connector's `hook_fail_mode`) in `config.yaml` and installed in the connector's runtime registrations: generated scripts or plugins, or `hooks/.hookcfg` for the native hook. With `--restart` (the default) and the guardrail enabled, the command refreshes and verifies those registrations directly where supported, including Claude Code and Codex. It restarts a running gateway only when full connector setup is needed; a stopped gateway stays stopped.
 
