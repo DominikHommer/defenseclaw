@@ -1428,7 +1428,13 @@ Finish-InstallLock $code
 Write-Output "LOCK=$(Test-Path -LiteralPath $LockDir) RECORD=$(Test-Path -LiteralPath $LifecycleManifest) RUNNING=$script:running STOPS=$script:stops CLOSES=$script:closes"
 Write-Output "LAST_WARNING=$(if ($script:warnings.Count) {{ $script:warnings[-1] }})"
 """
-    completed = _run_powershell(script)
+    # A file, not -Command: the script is longer than a Windows command line.
+    path = tmp_path / "refusal.ps1"
+    path.write_text(script, encoding="utf-8-sig")
+    completed = subprocess.run(
+        [str(POWERSHELL), "-NoProfile", "-NonInteractive", "-File", str(path)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False,
+    )
     out = completed.stdout + completed.stderr
     assert completed.returncode == 0, out
     assert "REFUSED:" in out and "CONTINUED" not in out, out
