@@ -858,7 +858,7 @@ class TestStatusJson(unittest.TestCase):
             "native_otlp_delivery",
         ):
             self.assertIn(key, doc)
-        self.assertFalse(doc["sidecar"]["running"])
+        self.assertIsNone(doc["sidecar"]["running"])
         self.assertEqual(doc["application_protection"]["guardrail_mode"], "observe")
         self.assertFalse(doc["application_protection"]["require_trusted_binary_paths"])
         self.assertEqual(doc["deployment_mode"], "managed_enterprise")
@@ -927,6 +927,20 @@ class TestStatusJson(unittest.TestCase):
         self.assertIsNone(doc["sidecar"]["running"])
         self.assertNotIn("policy", doc)
 
+    def test_json_does_not_report_a_live_gateway_stopped_when_status_is_unreadable(self):
+        with (
+            patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=None),
+            patch.object(cmd_status, "_live_gateway_pid", return_value=4242),
+            patch.object(cmd_status, "_status_refused_detail", return_value="the gateway token was rejected"),
+            patch("defenseclaw.commands.cmd_doctor._foreign_gateway_port_holder", return_value=""),
+        ):
+            result = CliRunner().invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        sidecar = json.loads(result.output)["sidecar"]
+        self.assertIsNone(sidecar["running"])
+        self.assertIn("token was rejected", sidecar["reason"])
+
     def test_json_db_error_is_explicit_null_not_dropped(self):
         self.app.store.get_counts = MagicMock(side_effect=RuntimeError("locked"))
         result = self._invoke_json()
@@ -989,7 +1003,7 @@ class TestStatusProfileIdentity(unittest.TestCase):
                 self.assertNotIn(str(ambient_home), human.output)
                 doc = json.loads(result.output)
                 rendered = json.dumps(doc)
-                self.assertFalse(doc["sidecar"]["running"])
+                self.assertIsNone(doc["sidecar"]["running"])
                 self.assertNotIn(foreign_marker, rendered)
                 self.assertNotIn(str(ambient_home), rendered)
                 self.assertEqual(

@@ -7,7 +7,10 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -80,6 +83,11 @@ func TestManagedLocalAccountRecoversWhenGuardianRecordsUnsharedUID(t *testing.T)
 	peerUnsharedUIDNeedsRoot = func(err error) bool { return errors.Is(err, errW27SSSDNeedsRoot) }
 	set := identityTestSet(t, identityTestPlatforms[0], "watch",
 		config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Users: []string{`.\t7ar-u1`}, Groups: []string{gid}}})
+	hookCfg := r2BridgeConfig(config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{
+		Users: []string{`.\t7ar-u1`}, Groups: []string{gid},
+	}})
+	hookCfg.Guardrail.Connector = "codex"
+	hookAPI := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, hookCfg)
 
 	for _, tc := range []struct {
 		name, recordIncarnation string
@@ -141,6 +149,26 @@ func TestManagedLocalAccountRecoversWhenGuardianRecordsUnsharedUID(t *testing.T)
 				if wantSuccess {
 					if decision.Name != "strict" || decision.Refused != "" {
 						t.Fatalf("group assignment selected %+v; want strict without refusal", decision)
+					}
+					// Drive the managed Codex handler from the same kernel-verified
+					// peer facts, so a matching group must reach a real hook answer.
+					ctx := withVerifiedSubject(t.Context(), VerifiedSubject{UserID: key,
+						IDKind: useridentity.KindPOSIXUID, UserName: "t7ar-u1", Directory: facts,
+						Source: subjectSourcePeerCredentials})
+					ctx = withManagedHookPeer(ctx, managedHookPeer{UID: uid, Name: "t7ar-u1"})
+					req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/hook",
+						strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"shell","tool_input":{"command":"echo ok"}}`)).WithContext(ctx)
+					req.Header.Set("X-DefenseClaw-Hook-Event", "PreToolUse")
+					req.Header.Set("X-DefenseClaw-Hook-Contract", defaultTestCodexHookContract)
+					recorder := httptest.NewRecorder()
+					hookAPI.handleAgentHook("codex").ServeHTTP(recorder, req)
+					var answer struct {
+						Action string `json:"action"`
+						Mode   string `json:"mode"`
+					}
+					if recorder.Code != http.StatusOK || json.Unmarshal(recorder.Body.Bytes(), &answer) != nil ||
+						answer.Action != "allow" || answer.Mode != "action" {
+						t.Fatalf("managed Codex hook: status=%d answer=%s; want strict action allow", recorder.Code, recorder.Body.String())
 					}
 					return
 				}

@@ -69,6 +69,17 @@ func TestRecordedSSSDMissReachesLocalOwnerAndGroups(t *testing.T) {
 		facts.Directory == useridentity.DirectoryLocal {
 		t.Fatalf("offline SSSD facts = %+v, %v; the recorded proof covers only the root check", facts, err)
 	}
+
+	// The same root record also works when files leads passwd. That order
+	// confirms the local holder first but must still check the later SSSD
+	// source for a second holder before accepting the account and groups.
+	writeTestFile(t, nsswitchPath, "passwd: files sss\ninitgroups: files\ngroup: files\n")
+	sssdDomainsOnline = sssctlDomainsOnline
+	facts, err = r.DirectoryFactsForRecordedUnsharedUID(uid, time.Now())
+	if err != nil || facts.Directory != useridentity.DirectoryLocal || facts.Source != useridentity.SourceNSSFiles ||
+		!slices.Contains(facts.Groups, "local-team") || !slices.Contains(facts.Groups, "49202") {
+		t.Fatalf("files-first recorded lookup = %+v, %v; want the confirmed local account and groups", facts, err)
+	}
 }
 
 func isSharedUID(err error) bool {
