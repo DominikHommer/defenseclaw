@@ -128,14 +128,37 @@ def test_effective_config_fallback_reads_old_external_connector_roster(tmp_path:
         encoding="utf-8",
     )
     helper = _ps1_function("Get-EffectiveConfigConnectors")
-    match = re.search(r"\$code = '([^']+)'", helper)
+    match = re.search(r"\$code = '((?:''|[^'])*)'", helper)
     assert match is not None
     result = subprocess.run(
-        [sys.executable, "-I", "-c", match.group(1), str(config)],
+        [sys.executable, "-I", "-c", match.group(1).replace("''", "'"), str(config)],
         capture_output=True, text=True, timeout=30, check=False,
     )
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == ["claudecode", "codex"]
+
+
+@pytest.mark.skipif(sys.platform != "win32" or POWERSHELL is None, reason="native Windows PowerShell required")
+def test_effective_config_reader_works_through_native_windows_powershell(tmp_path: Path) -> None:
+    # The installed Python -c reader must survive Windows PowerShell 5.1's
+    # native argument quoting during a live local upgrade.
+    config = tmp_path / "config.yaml"
+    config.write_text("guardrail:\n  connectors:\n    codex: {}\n    claude-code: {}\n", encoding="utf-8")
+    quoted_data_dir = str(tmp_path).replace("'", "''")
+    quoted_venv = str(Path(sys.executable).parents[1]).replace("'", "''")
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$DataDir = '{quoted_data_dir}'
+$Venv = '{quoted_venv}'
+$Staging = Join-Path $DataDir 'missing-stage'
+{_ps1_function('Get-NativeProbe')}
+{_ps1_function('Get-EffectiveConfigConnectors')}
+$roster = @(Get-EffectiveConfigConnectors)
+if (($roster -join ',') -ne 'claudecode,codex') {{ throw "effective roster = $($roster -join ',')" }}
+'OK'
+"""
+    result = _run_powershell(script)
+    assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
@@ -3551,7 +3574,7 @@ def test_native_a_running_hook_does_not_block_snapshot_restore(tmp_path: Path) -
     try:
         out = _restore_case(
             tmp_path,
-            _ps1_function("Invoke-AtomicReplace")
+            _NATIVE_RESTORE_HASH + _ps1_function("Invoke-AtomicReplace")
             + _close_mocks()
             + f"\ntry {{ Restore-Slot '{slot}' | Out-Null; Write-Output 'RESTORED' }} catch {{ Write-Output \"REFUSED: $($_.Exception.Message)\" }}\n"
             "Close-UnfinishedInstallHooks\n",
@@ -3580,6 +3603,17 @@ def _interrupted_fixture(data: Path, bin_dir: Path, slot: Path, hook: Path | Non
         shutil.copyfile(hook, data / ".staging" / "bin" / "defenseclaw-hook.exe")
     _write(data / "hooks" / ".hookcfg", '{"fail_modes":{"codex":"open"}}')
     _write(data / "config.yaml", "old data")
+
+
+# The restore harness isolates the native rename and lifecycle ordering from
+# Get-FileHash's Windows provider behavior on synthetic text .exe fixtures.
+_NATIVE_RESTORE_HASH = """
+function Get-Sha256([string]$Path) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($Path)))).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+}
+"""
 
 
 def _first_run(slot: Path, complete: bool) -> str:
@@ -3712,11 +3746,11 @@ def test_native_running_hook_during_interrupted_resume_restores_immediately(tmp_
     data, bin_dir, slot = tmp_path / "data", tmp_path / "bin", tmp_path / "data" / "previous.new"
     _interrupted_fixture(data, bin_dir, slot, hook=Path(os.environ["SystemRoot"]) / "System32" / "cmd.exe")
     real = _ps1_function("Invoke-AtomicReplace")
-    _restore_case(tmp_path, real + _close_mocks() + _RESUME_MOCKS + _first_run(slot, complete=True))
+    _restore_case(tmp_path, _NATIVE_RESTORE_HASH + real + _close_mocks() + _RESUME_MOCKS + _first_run(slot, complete=True))
     hook = bin_dir / "defenseclaw-hook.exe"
     running = subprocess.Popen([str(hook), "/c", "ping -n 120 127.0.0.1 >nul"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        out = _restore_case(tmp_path, real + _close_mocks() + _RESUME_MOCKS + "\n" + _resume_and_finish())
+        out = _restore_case(tmp_path, _NATIVE_RESTORE_HASH + real + _close_mocks() + _RESUME_MOCKS + "\n" + _resume_and_finish())
         still_running = running.poll() is None
     finally:
         running.kill()

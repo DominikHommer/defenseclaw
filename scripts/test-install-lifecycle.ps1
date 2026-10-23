@@ -669,6 +669,7 @@ function Test-FilesInUse {
     # beside it: without the lane's there, it would find no install and exit.
     $state = Get-Content -Raw -LiteralPath (Join-Path $Bin "defenseclaw-hook-state.json") -ErrorAction SilentlyContinue | ConvertFrom-Json
     Check ($state -and [IO.Path]::GetFullPath($state.data_root) -eq [IO.Path]::GetFullPath($DcHome)) "defenseclaw-hook-state.json does not bind the hook to $DcHome"
+    $oldHookSha = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Bin "defenseclaw-hook.exe")).Hash
     $hook = Start-Held (Join-Path $Bin "defenseclaw-hook.exe") @("hook", "--connector", "codex")
     Start-Sleep -Seconds 2
     if ($hook.HasExited) {
@@ -679,7 +680,7 @@ function Test-FilesInUse {
     Assert-Versions $Target
     Assert-Healthy
     Check (-not $hook.HasExited) "the running hook was stopped"
-    Check (@(Get-ChildItem -LiteralPath $Bin -Filter "defenseclaw-hook.exe.old-*").Count -eq 1) "the running defenseclaw-hook.exe was not swapped in place (no .old-* backup)"
+    Check ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Bin "defenseclaw-hook.exe")).Hash -ne $oldHookSha) "the running defenseclaw-hook.exe was not replaced at its canonical path"
     Stop-Held
 
     Write-Log "re-run while the CLI runs from the venv (must stop, nothing changed)"

@@ -1190,7 +1190,9 @@ function Get-EffectiveConfigConnectors {
     $python = Join-Path $Staging "venv\Scripts\python.exe"
     if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { $python = Join-Path $Venv "Scripts\python.exe" }
     if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw "Cannot read the effective config's connectors without a checked Python environment: $path" }
-    $code = 'import json,sys,yaml; from defenseclaw.connector_paths import normalize; c=yaml.safe_load(open(sys.argv[1],encoding="utf-8")); c=c if isinstance(c,dict) else {}; g=c.get("guardrail") or {}; g=g if isinstance(g,dict) else {}; m=g.get("connectors") or {}; names=list(m) if isinstance(m,dict) and m else [g.get("connector") or (c.get("claw") or {}).get("mode")]; print(json.dumps(sorted({normalize(n) for n in names if isinstance(n,str) and n.strip()})))'
+    # Windows PowerShell 5.1 strips embedded double quotes from native argv.
+    # Keep Python's string literals single-quoted so -c receives valid code.
+    $code = 'import json,sys,yaml; from defenseclaw.connector_paths import normalize; c=yaml.safe_load(open(sys.argv[1],encoding=''utf-8'')); c=c if isinstance(c,dict) else {}; g=c.get(''guardrail'') or {}; g=g if isinstance(g,dict) else {}; m=g.get(''connectors'') or {}; names=list(m) if isinstance(m,dict) and m else [g.get(''connector'') or (c.get(''claw'') or {}).get(''mode'')]; print(json.dumps(sorted({normalize(n) for n in names if isinstance(n,str) and n.strip()})))'
     $probe = Get-NativeProbe $python @("-I", "-c", $code, $path)
     if ($probe.Exit -ne 0) { throw "Cannot read the effective config's connectors: $path" }
     try { return @($probe.Output | ConvertFrom-Json -ErrorAction Stop) } catch { throw "Cannot parse the effective config's connector roster: $path" }
