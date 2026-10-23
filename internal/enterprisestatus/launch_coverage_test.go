@@ -60,6 +60,9 @@ func TestPluginLaunchCoverage(t *testing.T) {
 		{"Hermes safe zero is normal", "hermes", []string{"hermes"}, map[string]string{"HERMES_SAFE_MODE": "0", "HOME": home}, true, ""},
 		{"Hermes safe false is normal", "hermes", []string{"hermes"}, map[string]string{"HERMES_SAFE_MODE": "false", "HOME": home}, true, ""},
 		{"Hermes safe off is normal", "hermes", []string{"hermes"}, map[string]string{"HERMES_SAFE_MODE": "off", "HOME": home}, true, ""},
+		{"Hermes default managed dir", "hermes", []string{"hermes"}, map[string]string{"HERMES_MANAGED_DIR": "/etc/hermes", "HOME": home}, true, ""},
+		{"Hermes equivalent managed dir", "hermes", []string{"hermes"}, map[string]string{"HERMES_MANAGED_DIR": "/etc/hermes/", "HOME": home}, true, ""},
+		{"Hermes default managed dir with moved home", "hermes", []string{"hermes"}, map[string]string{"HERMES_MANAGED_DIR": "/etc/hermes", "HERMES_HOME": "/tmp/other"}, true, "hermes_config_relocated"},
 		{"Hermes moved managed dir", "hermes", []string{"hermes"}, map[string]string{"HERMES_MANAGED_DIR": "/tmp/other"}, true, "hermes_config_relocated"},
 		{"Hermes ignore user config keeps hooks", "hermes", []string{"hermes", "--ignore-user-config"}, map[string]string{"HOME": home}, true, ""},
 		{"Antigravity moved home", "antigravity", []string{"agy"}, map[string]string{"HOME": "/tmp/other"}, true, "user_config_relocated"},
@@ -67,6 +70,10 @@ func TestPluginLaunchCoverage(t *testing.T) {
 		{"Kiro alternate agent equals", "kiro", []string{"kiro-cli", "--agent=mine"}, nil, false, "kiro_alternate_agent"},
 		{"Kiro managed agent", "kiro", []string{"kiro-cli", "--agent=defenseclaw"}, map[string]string{}, true, ""},
 		{"Kiro cloud", "kiro", []string{"kiro-cli", "--cloud"}, nil, false, "kiro_cloud_session"},
+		{"Kiro default home", "kiro", []string{"kiro-cli"}, map[string]string{"KIRO_HOME": home + "/.kiro"}, true, ""},
+		{"Kiro equivalent home", "kiro", []string{"kiro-cli"}, map[string]string{"KIRO_HOME": home + "/.kiro/../.kiro/"}, true, ""},
+		{"Kiro default home with moved agents", "kiro", []string{"kiro-cli"}, map[string]string{"KIRO_HOME": home + "/.kiro", "KIRO_AGENT_CONFIG_DIR": "/tmp/agents"}, true, "kiro_hook_config_relocated"},
+		{"Kiro moved home", "kiro", []string{"kiro-cli"}, map[string]string{"KIRO_HOME": "/tmp/other"}, true, "kiro_hook_config_relocated"},
 		{"Kiro moved agents", "kiro", []string{"kiro-cli"}, map[string]string{"KIRO_AGENT_CONFIG_DIR": "/tmp/agents"}, true, "kiro_hook_config_relocated"},
 		{"Kiro moved test agents", "kiro", []string{"kiro-cli"}, map[string]string{"KIRO_TEST_AGENTS_DIR": "/tmp/agents"}, true, "kiro_hook_config_relocated"},
 		{"Other connector", "codex", []string{"codex", "--pure"}, nil, false, ""},
@@ -125,6 +132,27 @@ func TestPluginLaunchCoverageOpenCodeWindowsProgramData(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			env := map[string]string{"PROGRAMDATA": tc.programData, "OPENCODE_TEST_MANAGED_CONFIG_DIR": tc.selected}
 			if got := PluginLaunchCoverage("opencode", []string{"opencode"}, env, true, `C:\Users\alice`); got != tc.want {
+				t.Fatalf("coverage = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPluginLaunchCoverageKiroWindowsDefaultHome(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows home paths")
+	}
+	const home = `C:\Users\alice`
+	for _, tc := range []struct {
+		name, selected, accountHome, want string
+	}{
+		{"default with different case", `c:\users\ALICE\.kiro\`, home, ""},
+		{"relocated home", `C:\Users\bob\.kiro`, home, "kiro_hook_config_relocated"},
+		{"unresolved account home", `C:\Users\alice\.kiro`, "", "kiro_hook_config_relocated"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"KIRO_HOME": tc.selected}
+			if got := PluginLaunchCoverage("kiro", []string{"kiro-cli"}, env, true, tc.accountHome); got != tc.want {
 				t.Fatalf("coverage = %q, want %q", got, tc.want)
 			}
 		})
