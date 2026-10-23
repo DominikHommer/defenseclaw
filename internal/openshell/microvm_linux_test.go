@@ -122,6 +122,26 @@ func f13(gw string) string {
 	return "is OpenShell 0.1.3's, older than the gateway's " + gw + ", and the gateway starts every MicroVM with it"
 }
 
+// The configured driver wins even when the default directory has a newer
+// copy. A repair must replace the copy the gateway actually selects.
+func TestOldMicroVMDriverRepairUsesConfiguredDirectory(t *testing.T) {
+	f := newDoctorFixture(t)
+	f.onLinuxMicroVMs()
+	f.atRelease(openshell.InstallerVersion)
+	dir := filepath.Join(f.home, "custom driver")
+	driver := filepath.Join(dir, "openshell-driver-vm")
+	touchExecutable(t, driver)
+	f.writeTOML(strings.Replace(linuxVMTOML, "[openshell.drivers.vm]\n", "[openshell.drivers.vm]\ndriver_dir = \""+dir+"\"\n", 1), f.started.Add(-time.Minute))
+	f.runner.On(driver+" --version", "openshell-driver-vm 0.1.3\n", nil)
+	f.runner.On(f.linuxDriverPath()+" --version", "openshell-driver-vm "+openshell.InstallerVersion+"\n", nil)
+	r := f.run()
+	c := expectCheck(t, r, openshell.CheckIDVMDriver, openshell.StatusFail, f13(openshell.InstallerVersion))
+	if c.Fix == nil || !strings.Contains(c.Fix.Summary, dir) ||
+		!strings.Contains(c.Fix.Command, "'"+dir+"'") || strings.Contains(c.Fix.Command, "~/.local/libexec/openshell") {
+		t.Fatalf("driver %s, repair = %+v", r.MicroVM.DriverBinary, c.Fix)
+	}
+}
+
 // TestDoctorChecksWhatLinuxMicroVMsNeed: each need of the MicroVM driver on
 // Linux fails with the way on.
 func TestDoctorChecksWhatLinuxMicroVMsNeed(t *testing.T) {
@@ -196,7 +216,7 @@ func TestDoctorChecksWhatLinuxMicroVMsNeed(t *testing.T) {
 			f.atRelease(openshell.InstallerVersion)
 			f.runner.On(f.linuxDriverPath()+" --version", "openshell-driver-vm 0.1.3\n", nil)
 		}, want: checkWant{"vm-driver", fail, f13(openshell.InstallerVersion)},
-			fix: &fixWant{text: "into ~/.local/libexec/openshell", manual: true}},
+			fix: &fixWant{text: "restart the OpenShell gateway and run `defenseclaw sandbox doctor`", manual: true}},
 		{name: "driver of the gateway's release", setup: func(f *doctorFixture) {
 			f.atRelease(openshell.InstallerVersion)
 			f.runner.On(f.linuxDriverPath()+" --version", "openshell-driver-vm "+openshell.InstallerVersion+"\n", nil)

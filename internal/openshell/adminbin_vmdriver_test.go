@@ -85,6 +85,19 @@ func TestAdminVMDriverFixUsesThePinnedDigest(t *testing.T) {
 	}
 }
 
+// Repair a stale administrator driver in the directory the gateway selects,
+// even when it is not the first administrator directory.
+func TestOldAdminVMDriverRepairKeepsSelectedDirectory(t *testing.T) {
+	dir := "/usr/lib/openshell"
+	m := &MicroVMHost{DriverBinary: dir + "/openshell-driver-vm", DriverOlderThan: InstallerVersion}
+	fix := m.vmDriverFix("amd64")
+	if fix == nil || !fix.Sudo || !strings.Contains(fix.Summary, dir) ||
+		!strings.Contains(fix.Command, " "+dir+"/openshell-driver-vm") ||
+		strings.Contains(fix.Command, "/usr/libexec/openshell") {
+		t.Fatalf("repair = %+v", fix)
+	}
+}
+
 // The gateway uses an explicit rendered driver_dir, so an alternate driver
 // found by the administrator's search does not make a stale render usable.
 func TestRenderedAdminVMDriverUsesTheGatewayPath(t *testing.T) {

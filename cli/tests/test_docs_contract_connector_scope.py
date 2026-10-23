@@ -31,6 +31,14 @@ def test_turn_off_explains_single_and_multi_connector_scope(page):
     assert f"--connector {page.stem}" in section
 
 
+@pytest.mark.parametrize("connector", ("openclaw", "zeptoclaw"))
+def test_proxy_recovery_keeps_the_saved_mode(connector):
+    section = (DOCS / "connectors" / f"{connector}.mdx").read_text().split("## Turn it off", 1)[1]
+    recovery = section.split("Turn it back on by running the Set up command again", 1)[1].split("\n", 1)[0]
+    commands = re.findall(rf"`(defenseclaw setup {connector}[^`]+)`", recovery)
+    assert commands == [f"defenseclaw setup {connector} --restart"]
+
+
 def test_hitl_selector_requires_multiple_connectors():
     text = (DOCS / "how-to/guardrail/ask-before-risky-calls.mdx").read_text()
     assert "multi-connector install" in text

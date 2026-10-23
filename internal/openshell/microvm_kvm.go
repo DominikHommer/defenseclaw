@@ -221,6 +221,12 @@ func InstallE2fsprogsFix() *Fix {
 // against a checksum file fetched from the same release as the archive,
 // which proved only that the two downloads agreed (#1224).
 func InstallVMDriverFix(goarch string) *Fix {
+	return installVMDriverFixIn(goarch, "~/.local/libexec/openshell")
+}
+
+// installVMDriverFixIn installs into the selected user's driver directory.
+// The default uses $HOME in the command so it expands even when quoted.
+func installVMDriverFixIn(goarch, dir string) *Fix {
 	archive := vmDriverArchive(goarch)
 	if archive == "" {
 		return &Fix{Summary: "OpenShell publishes its MicroVM driver for amd64 and arm64 Linux only"}
@@ -229,13 +235,17 @@ func InstallVMDriverFix(goarch string) *Fix {
 	if digest == "" {
 		return &Fix{Summary: "this DefenseClaw build pins no digest for OpenShell " + InstallerTag + "'s " + archive + "; install " + vmDriverBinary + " from that release by hand"}
 	}
+	commandDir := shellQuote(dir)
+	if dir == "~/.local/libexec/openshell" {
+		commandDir = `"$HOME/.local/libexec/openshell"`
+	}
 	base := TarballBaseURL + InstallerTag + "/"
 	return &Fix{
-		Summary: "install " + vmDriverBinary + " from OpenShell " + InstallerTag + " into ~/.local/libexec/openshell, after checking the archive against the SHA-256 " +
+		Summary: "install " + vmDriverBinary + " from OpenShell " + InstallerTag + " into " + dir + ", after checking the archive against the SHA-256 " +
 			"this DefenseClaw build pins for it (the openshell package ships no MicroVM driver)",
-		Command: "d=$(mktemp -d) && cd \"$d\" && curl -fsSLO " + base + archive +
-			" && echo '" + digest + "  " + archive + "' | sha256sum -c - && mkdir -p ~/.local/libexec/openshell && tar -xzf " + archive +
-			" -C ~/.local/libexec/openshell " + vmDriverBinary + " && chmod 0755 ~/.local/libexec/openshell/" + vmDriverBinary + "; cd - >/dev/null; rm -rf \"$d\"",
+		Command: "d=$(mktemp -d) && (trap 'rm -rf \"$d\"' EXIT; cd \"$d\" && curl -fsSLO " + base + archive +
+			" && echo '" + digest + "  " + archive + "' | sha256sum -c - && tar -xzf " + archive + " " + vmDriverBinary +
+			" && mkdir -p " + commandDir + " && install -m 0755 " + vmDriverBinary + " " + commandDir + "/" + vmDriverBinary + ")",
 	}
 }
 
@@ -281,15 +291,21 @@ func (r *doctorRun) vmDriverVersion(ctx context.Context, path string) (Version, 
 	return ParseVersion(fields[len(fields)-1])
 }
 
-// vmDriverFix is the way on from a Linux host's MicroVM driver problem:
-// the driver of InstallerTag, into the administrator's folder when the
-// stale driver is there (the user's own driver folder is searched first,
-// so a copy there would do only for this account).
+// vmDriverFix installs the pinned driver where the gateway selected an old
+// one. A new copy in another directory would leave the old one effective.
 func (m *MicroVMHost) vmDriverFix(goarch string) *Fix {
-	if m.DriverOlderThan != "" && slices.Contains(AdminVMDriverDirs("linux"), filepath.Dir(m.DriverBinary)) {
-		return AdminVMDriverFix("linux", goarch)
+	if m.DriverOlderThan == "" || m.DriverBinary == "" {
+		return InstallVMDriverFix(goarch)
 	}
-	return InstallVMDriverFix(goarch)
+	dir := filepath.Dir(m.DriverBinary)
+	var fix *Fix
+	if slices.Contains(AdminVMDriverDirs("linux"), dir) || dir == "/usr/local/libexec" {
+		fix = adminVMDriverFixIn("linux", goarch, dir)
+	} else {
+		fix = installVMDriverFixIn(goarch, dir)
+	}
+	fix.Summary += "; restart the OpenShell gateway and run `defenseclaw sandbox doctor` to verify its effective driver"
+	return fix
 }
 
 // linuxMicroVMChecks makes, once, the machine checks of a Linux host
