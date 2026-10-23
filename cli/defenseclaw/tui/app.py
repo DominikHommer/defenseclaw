@@ -15826,7 +15826,7 @@ def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
         return GatewayHealthResult("error", "sidecar API port is not configured")
 
     try:
-        from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
+        from defenseclaw.gateway import OrchestratorClient, applied_config_generation, gateway_api_client_host
 
         host = gateway_api_client_host(config)
         resolve_token = getattr(gateway_cfg, "resolved_token", None)
@@ -15909,7 +15909,7 @@ def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
     if isinstance(policy, dict) and policy.get("effective_digest"):
         snapshot = replace(
             snapshot,
-            policy_generation=_coerce_int(policy.get("generation")),
+            policy_generation=applied_config_generation(policy),
             policy_digest=_coerce_str(policy.get("effective_digest")),
         )
     state = _gateway_state_from_snapshot(snapshot)

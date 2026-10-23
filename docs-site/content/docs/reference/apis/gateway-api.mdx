@@ -247,7 +247,10 @@ gateway is enforcing. It is omitted on a Secure Client device.
 ```
 
 `effective_digest` and `generation` identify the policy generation in force;
-`config_generation` is the writer's counter from `config.generation.json`;
+`generation` counts the rebuilds of the running gateway and starts again at 1
+when it restarts. `config_generation` is the writer's counter from
+`config.generation.json`, which survives a restart; `defenseclaw status`,
+`defenseclaw doctor` and the TUI name the applied policy by it and the digest.
 `component_count` is the number of inputs the digest covers (config, the Rego
 modules, the providers, every rule pack in use and each guardrail profile).
 Their digests are not on `/health`, so the object stays small with thousands

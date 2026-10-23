@@ -161,6 +161,39 @@ sha256_of() {
     fi
 }
 
+# stage_binary NAME: on macOS, sign the verified archive binary in staging ad
+# hoc with its stable identifier and check the new signature. Signing changes
+# the file, so checksums.txt describes the archive, not the file that runs:
+# record the digest of the binary as it will run (GAP-0641).
+stage_binary() {
+    local file="${STAGING}/bin/$1" archive_sha="" sha=""
+    if [[ "${OS}" == darwin ]]; then
+        archive_sha="$(sha256_of "${file}")"
+        /usr/bin/codesign -f -s - -i "com.cisco.defenseclaw.${1#defenseclaw-}" "${file}" >/dev/null 2>&1 \
+            && /usr/bin/codesign --verify --strict "${file}" >/dev/null 2>&1 \
+            || die "Could not sign $1 for this Mac"
+    fi
+    sha="$(sha256_of "${file}")"
+    printf '%s  %s\n' "${sha}" "$1" >> "${STAGING}/binaries.sha256" || die "Could not record the digest of $1"
+    [[ -z "${archive_sha}" ]] || info "Signed $1 for this Mac: sha256 ${sha} (archive ${archive_sha})"
+}
+
+# record_binaries: keep the digests of the binaries that now run in the
+# installer folder, which upgrades snapshot and rollbacks restore, and check
+# that every installed binary is the one recorded.
+record_binaries() {
+    local sha name
+    cp "${STAGING}/binaries.sha256" "${INSTALLER_DIR}/.binaries.sha256.new" \
+        && chmod 600 "${INSTALLER_DIR}/.binaries.sha256.new" \
+        && mv -f "${INSTALLER_DIR}/.binaries.sha256.new" "${INSTALLER_DIR}/binaries.sha256" || return 1
+    while read -r sha name; do
+        [[ "$(sha256_of "${BIN_DIR}/${name}")" == "${sha}" ]] || {
+            warn "The installed ${name} is not the binary this install staged"
+            return 1
+        }
+    done < "${INSTALLER_DIR}/binaries.sha256"
+}
+
 # Read one answer from the terminal. A terminal left in -icrnl by an earlier
 # program sends Enter as a bare carriage return, so map CR to NL for this
 # read only, and drop a stray trailing CR from the answer.
@@ -899,10 +932,7 @@ tar -xzf "${STAGING}/${ARCHIVE}" -C "${STAGING}/bin" || die "Could not unpack ${
 for binary in ${MANAGED_BINARIES}; do
     [[ -f "${STAGING}/bin/${binary}" ]] || continue
     chmod 755 "${STAGING}/bin/${binary}"
-    if [[ "${OS}" == darwin ]]; then
-        /usr/bin/codesign -f -s - -i "com.cisco.defenseclaw.${binary#defenseclaw-}" "${STAGING}/bin/${binary}" >/dev/null 2>&1 \
-            || die "Could not sign ${binary} for this Mac"
-    fi
+    stage_binary "${binary}"
 done
 "${STAGING}/bin/defenseclaw-gateway" --version 2>/dev/null | grep -qF "${VERSION}" \
     || die "The gateway in ${ARCHIVE} does not report version ${VERSION}"
@@ -1565,6 +1595,7 @@ swap_in() {
         cp -p "${STAGING}/bin/${binary}" "${BIN_DIR}/.${binary}.new" \
             && mv -f "${BIN_DIR}/.${binary}.new" "${BIN_DIR}/${binary}" || return 1
     done
+    mkdir -p "${INSTALLER_DIR}" && record_binaries || return 1
     for link in ${MANAGED_LINKS}; do
         target="${VENV}/bin/${link}"
         [[ -x "${target}" ]] || continue

@@ -47,8 +47,11 @@ import (
 // RunTracked runs cmd below a child subreaper custodian and a separate
 // runner. A command that kills its immediate parent kills the runner; its
 // descendants are then reparented to the custodian, which kills and reaps
-// them. The custodian is a separate process so gateway children are never
-// included in its sweep. Scanners keep it: without privilege the PID
+// them. The command cannot end the custodian instead: the runner's seccomp
+// filter refuses positive signal targets and remote prlimit, and the runner
+// starts a separate session so a command cannot join the custodian's group
+// and signal it with kill(0) (guardCustodian). The custodian is a
+// separate process so gateway children are never included in its sweep. Scanners keep it: without privilege the PID
 // namespace needs a user namespace mapping only this process's IDs, where
 // root-owned files read as owned by the overflow user, and DefenseClaw's own
 // plugin-scanner then refuses its root-owned runtime.
@@ -280,6 +283,10 @@ func superviseContained(argv []string, budget time.Duration) int {
 	if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
 		return containExitNotContained
 	}
+	// Not dumpable: the command cannot trace it or write its memory.
+	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
+		return containExitNotContained
+	}
 	if os.Getppid() == 1 {
 		// The parent died before the parent-death signal was armed.
 		return containExitTerminated
@@ -288,7 +295,9 @@ func superviseContained(argv []string, budget time.Duration) int {
 	child.Args = append([]string{containSupervisorArg0, containRunnerMode, budget.String(), "--"}, argv...)
 	child.Env = os.Environ()
 	child.Stdin, child.Stdout, child.Stderr = os.Stdin, os.Stdout, os.Stderr
-	child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+	// A separate session keeps the command from joining the custodian's
+	// process group, which would let kill(0) bypass the signal filter.
+	child.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Pdeathsig: syscall.SIGKILL}
 	if err := child.Start(); err != nil {
 		return containExitNotStarted
 	}
@@ -339,6 +348,11 @@ func superviseContained(argv []string, budget time.Duration) int {
 func runContainedCommand(argv []string, asInit bool) int {
 	runtime.LockOSThread()
 	if asInit != (os.Getpid() == 1) || os.Getppid() == 1 {
+		return containExitNotContained
+	}
+	// Below the custodian, the command must not end it (GAP-0631). This
+	// thread starts the command, so the filter is the command's.
+	if !asInit && guardCustodian(os.Getppid()) != nil {
 		return containExitNotContained
 	}
 	child := exec.Command(argv[0], argv[1:]...)

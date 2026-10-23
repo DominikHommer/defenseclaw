@@ -406,9 +406,15 @@ def test_reload_notice_says_when_the_running_gateway_has_not_applied_the_file(mo
     monkeypatch.setattr(gateway, "foreign_loopback_listener", lambda host, port: "")
     monkeypatch.setattr(gateway.OrchestratorClient, "health", lambda self: health)
 
-    health["policy"] = {"generation": 4, "last_reload_error": "guardrail profile strict rule pack: directory_not_found"}
+    # GAP-0642: the notice names the config generation, which survives a
+    # restart, not the gateway's rebuild counter.
+    health["policy"] = {"generation": 1, "config_generation": 4,
+                        "last_reload_error": "guardrail profile strict rule pack: directory_not_found"}
     notice = gateway.gateway_reload_notice(cfg)
-    assert "has NOT applied" in notice and "directory_not_found" in notice and "generation 4" in notice
+    assert "has NOT applied" in notice and "directory_not_found" in notice
+    assert "still enforces config generation 4" in notice
+    health["policy"] = {"generation": 4, "last_reload_error": "guardrail profile strict rule pack: directory_not_found"}
+    assert "still enforces the previous policy" in gateway.gateway_reload_notice(cfg)
     health["policy"] = {"generation": 5, "pending_restart": ["gateway"]}
     assert "except gateway" in gateway.gateway_reload_notice(cfg)
     health["policy"] = {"generation": 6}

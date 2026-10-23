@@ -2301,3 +2301,58 @@ def test_a_failed_audit_quarantine_never_replaces_a_file(tmp_path: Path) -> None
     assert "rc=1" in out
     assert [Path(f"{home / 'audit.db'}{s}").read_text(encoding="utf-8") for s in ("", "-wal", "-shm")] == ["db", "wal", "shm"]
     assert sorted(p.name for p in home.iterdir()) == ["aside-shm", "audit.db", "audit.db-shm", "audit.db-wal"]
+
+
+def _stage_binaries(tmp_path: Path, verify_rc: int) -> tuple[subprocess.CompletedProcess[str], Path]:
+    staging = tmp_path / "staging"
+    (staging / "bin").mkdir(parents=True)
+    (staging / "bin" / "defenseclaw-gateway").write_bytes(b"archive gateway")
+    (staging / "bin" / "defenseclaw-acp").write_bytes(b"archive acp")
+    codesign = tmp_path / "codesign"
+    codesign.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1" = --verify ]; then exit {verify_rc}; fi\n'
+        'for last in "$@"; do :; done\n'
+        'printf " signed as %s" "$5" >> "$last"\n',
+        encoding="utf-8",
+    )
+    codesign.chmod(0o755)
+    script = tmp_path / "stage.sh"
+    script.write_text(
+        'set -euo pipefail\ninfo() { echo "info: $*"; }\nwarn() { echo "warn: $*"; }\n'
+        'die() { echo "die: $*"; exit 1; }\nhas() { command -v "$1" >/dev/null 2>&1; }\n'
+        + _install_sh_functions("sha256_of", "stage_binary", "record_binaries").replace(
+            "/usr/bin/codesign", str(codesign)
+        )
+        + f'OS=darwin STAGING="{staging}" BIN_DIR="{tmp_path}/bin" INSTALLER_DIR="{tmp_path}/installer"\n'
+        + "stage_binary defenseclaw-gateway\nstage_binary defenseclaw-acp\n"
+        + 'mkdir -p "${BIN_DIR}" "${INSTALLER_DIR}"\ncp "${STAGING}"/bin/* "${BIN_DIR}/"\n'
+        + "record_binaries\n"
+        + 'printf tampered >> "${BIN_DIR}/defenseclaw-acp"\nrecord_binaries || echo "recheck failed"\n',
+        encoding="utf-8",
+    )
+    return _run([str(script)], tmp_path), staging
+
+
+def test_the_installer_records_the_digest_of_the_signed_binary_that_runs(tmp_path: Path) -> None:
+    # GAP-0641: the macOS installer signs the verified archive binary ad hoc,
+    # which changes its SHA-256, and kept no digest of the file that runs.
+    result, staging = _stage_binaries(tmp_path, verify_rc=0)
+
+    gateway = staging / "bin" / "defenseclaw-gateway"
+    assert gateway.read_bytes() == b"archive gateway signed as com.cisco.defenseclaw.gateway", result.stdout
+    signed = hashlib.sha256(gateway.read_bytes()).hexdigest()
+    archive = hashlib.sha256(b"archive gateway").hexdigest()
+    assert f"info: Signed defenseclaw-gateway for this Mac: sha256 {signed} (archive {archive})" in result.stdout
+    record = (tmp_path / "installer" / "binaries.sha256").read_text(encoding="utf-8").splitlines()
+    acp = hashlib.sha256(b"archive acp signed as com.cisco.defenseclaw.acp").hexdigest()
+    assert record == [f"{signed}  defenseclaw-gateway", f"{acp}  defenseclaw-acp"]
+    assert "warn: The installed defenseclaw-acp is not the binary this install staged" in result.stdout
+    assert "recheck failed" in result.stdout and result.returncode == 0, result.stdout + result.stderr
+
+
+def test_a_signature_that_does_not_verify_stops_the_install(tmp_path: Path) -> None:
+    result, staging = _stage_binaries(tmp_path, verify_rc=1)
+
+    assert result.returncode == 1 and "die: Could not sign defenseclaw-gateway for this Mac" in result.stdout
+    assert not (staging / "binaries.sha256").exists()

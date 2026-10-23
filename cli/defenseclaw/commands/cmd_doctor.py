@@ -10822,11 +10822,13 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
     if not isinstance(policy, dict) or not policy.get("effective_digest"):
         _emit_policy_without_gateway(cfg, r, label, "the gateway does not report an effective policy")
         return
+    from defenseclaw.gateway import applied_config_generation, policy_reload_rejection
+
     digest = str(policy.get("effective_digest") or "")
-    generation = policy.get("generation")
-    config_generation = int(policy.get("config_generation") or 0)
-    applied = f"generation {generation}, digest {_short_policy_digest(digest)}"
-    from defenseclaw.gateway import policy_reload_rejection
+    config_generation = applied_config_generation(policy)
+    applied = f"digest {_short_policy_digest(digest)}"
+    if config_generation:
+        applied = f"config generation {config_generation}, {applied}"
 
     reload_error = policy_reload_rejection(policy)
     if reload_error:
@@ -10909,8 +10911,8 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
         saved = _saved_config_generation(cfg)
         if saved > config_generation > 0:
             cause = (
-                f": it has not applied the change saved as config generation {saved} (it enforces generation "
-                f"{config_generation})"
+                f": it has not applied the change saved as config generation {saved} (it enforces config "
+                f"generation {config_generation})"
             )
         elif saved > config_generation:
             cause = f": it has not applied the change saved as config generation {saved}"

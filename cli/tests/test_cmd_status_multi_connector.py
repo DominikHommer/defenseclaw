@@ -1161,3 +1161,18 @@ def test_status_names_the_agent_settings_fix_for_a_connector_the_gateway_refused
     assert "codex features enable hooks" in codex_block
     assert "defenseclaw setup codex" not in codex_block
     assert "1 active, 1 not running" in out
+
+
+def test_policy_row_names_the_config_generation_that_survives_a_restart(capsys) -> None:
+    # GAP-0642: the row named policy.generation, which counts the rebuilds of
+    # the running gateway and starts again at 1 after a restart, while
+    # config.generation.json kept counting.
+    from defenseclaw.commands import cmd_status
+
+    digest = "sha256:" + "c" * 64
+    cmd_status._print_policy({"policy": {"effective_digest": digest, "generation": 1, "config_generation": 18}})
+    cmd_status._print_policy({"policy": {"effective_digest": digest, "generation": 3}})
+    rows = [line for line in capsys.readouterr().out.splitlines() if "Policy" in line]
+    assert len(rows) == 2, rows
+    assert rows[0].rstrip().endswith("config generation 18, sha256:cccccccccccc"), rows
+    assert rows[1].rstrip().endswith("sha256:cccccccccccc") and "generation" not in rows[1], rows

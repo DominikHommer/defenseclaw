@@ -1049,9 +1049,12 @@ def _print_policy(health: dict | None) -> None:
     policy = _policy_status(health)
     if policy is None:
         return
+    from defenseclaw.gateway import applied_config_generation
+
     digest = str(policy["effective_digest"])
     short = digest[: len("sha256:") + 12] if digest.startswith("sha256:") else digest
-    value = f"generation {policy['generation']}, {short}"
+    generation = applied_config_generation(policy)
+    value = f"config generation {generation}, {short}" if generation else short
     if policy["last_reload_error"]:
         _status_row("Policy", ux._style(f"{value}; the last change was rejected (see defenseclaw doctor)", fg="yellow"))
         return

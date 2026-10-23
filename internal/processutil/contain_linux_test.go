@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -220,7 +221,7 @@ func TestRunTrackedFailsWhenTheSupervisorIsKilled(t *testing.T) {
 	err := RunTracked(CommandContext(context.Background(), "/bin/sh", "-c",
 		"setsid "+containChild+" &\n"+containWaitPID+"\n"+
 			// Only ever the supervisor: never the test binary.
-			`case "$(tr '\0' ' ' < /proc/$PPID/cmdline)" in `+containSupervisorArg0+`*) kill -9 $PPID ;; esac`+
+			`case "$(tr '\0' ' ' < /proc/$PPID/cmdline)" in `+containSupervisorArg0+`*) kill -9 -$PPID ;; esac`+
 			"\nexit 0", "sh", pidFile))
 	pid := readContainPID(t, pidFile)
 	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
@@ -280,32 +281,85 @@ func TestRunContainedEndsTheTreeWhenTheRunnerIsKilled(t *testing.T) {
 
 // r104 W5b review: a hook that SIGKILLed the subreaper custodian, its
 // grandparent, took the runner and itself down with it, and the kernel handed
-// its setsid child to init, which kept running. The command must not be able
-// to end anything that contains it, whichever ancestor it targets, and
-// nothing it started may outlive the run.
+// its setsid child to init, which kept running; the same held for a scanner
+// below RunTracked (GAP-0631). The command must not be able to end anything
+// that contains it, whichever ancestor it targets and however it signals,
+// and nothing it started may outlive the run.
 func TestRunContainedSurvivesTheCommandKillingEverySupervisor(t *testing.T) {
 	requireContainTools(t)
-	pidFile := filepath.Join(t.TempDir(), "escaped.pid")
 	// Collect every supervisor ancestor by the pids this test sees, outermost
-	// first, and SIGKILL them together.
-	killSupervisors := `read -r _ _ _ a _ < /proc/self/stat; list=""
+	// first, and SIGKILL them together, one by one and by process group.
+	ancestors := `read -r _ _ _ a _ < /proc/self/stat; list=""
 while [ "${a:-0}" -gt 1 ]; do
   case "$(tr '\0' ' ' < /proc/$a/cmdline)" in ` + containSupervisorArg0 + `*) list="$a $list" ;; esac
   read -r _ _ _ a _ < /proc/$a/stat || break
 done
 [ -n "$list" ] || exit 7
-kill -9 $list
-sleep 1`
-	err := RunContained(CommandContext(context.Background(), "/bin/sh", "-c",
-		"setsid "+containChild+" &\n"+containWaitPID+"\n"+killSupervisors+"\nexit 0", "sh", pidFile))
-	pid := readContainPID(t, pidFile)
-	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() == 7 {
-		t.Fatal("the command found no supervisor ancestor")
+`
+	for _, kill := range []struct {
+		name, script string
+		amd64        bool // raw amd64 system call numbers
+		trackedOnly  bool
+	}{
+		{"kill", `kill -9 $list`, false, false},
+		{"process groups", `for p in $list; do kill -9 -$p; done`, false, false},
+		{"perl", `perl -e 'kill 9, @ARGV' $list`, false, false},
+		{"tgkill", `perl -e 'syscall(234, $_+0, $_+0, 9) for @ARGV' $list`, true, false},
+		{"tkill", `for p in $list; do for t in /proc/$p/task/*; do perl -e 'syscall(200, $ARGV[0]+0, 9)' "${t##*/}"; done; done`, true, false},
+		{"pidfd", `perl -e 'for (@ARGV) { my $fd = syscall(434, $_+0, 0); syscall(424, $fd, 9, 0, 0) if $fd >= 0 }' $list`, false, false},
+		{"I/O owner", `perl -e 'for (@ARGV) { pipe(my $r, my $w) or die; fcntl($r, 8, $_+0); fcntl($r, 10, 9); fcntl($r, 4, 020000); syswrite($w, "x") }' $list`, false, false},
+		{"socket owner", `perl -MSocket -e 'for (@ARGV) { socketpair(my $r, my $w, AF_UNIX, SOCK_STREAM, 0) or die; ioctl($r, 0x8901, pack("i", $_)); fcntl($r, 10, 9); fcntl($r, 4, 020000); syswrite($w, "x") }' $list`, false, false},
+		{"sigqueue", `perl -e 'for (@ARGV) { my $i = pack("iii", 9, 0, -1) . "\0" x 116; syscall(129, $_+0, 9, $i) }' $list`, true, false},
+		{"kill by thread ID", `set -- $list; p=$1; t=$p; for path in /proc/$p/task/*; do [ "${path##*/}" != "$p" ] && { t=${path##*/}; break; }; done; [ "$t" != "$p" ] || exit 7; kill -9 "$t"`, false, true},
+		{"sigqueue by thread ID", `set -- $list; p=$1; t=$p; for path in /proc/$p/task/*; do [ "${path##*/}" != "$p" ] && { t=${path##*/}; break; }; done; [ "$t" != "$p" ] || exit 7; perl -e 'my $i = pack("iii", 9, 0, -1) . "\0" x 116; syscall(129, $ARGV[0]+0, 9, $i)' "$t"`, true, true},
+		{"I/O owner by thread ID", `set -- $list; p=$1; t=$p; for path in /proc/$p/task/*; do [ "${path##*/}" != "$p" ] && { t=${path##*/}; break; }; done; [ "$t" != "$p" ] || exit 7; perl -e 'pipe(my $r, my $w) or die; fcntl($r, 8, $ARGV[0]+0); fcntl($r, 10, 9); fcntl($r, 4, 020000); syswrite($w, "x")' "$t"`, false, true},
+		{"prlimit custodian", `set -- $list; perl -e 'my $limit = pack("QQ", 0, 0); syscall(302, $ARGV[0]+0, 7, $limit, 0)' "$1"`, true, true},
+		{"join custodian group then kill zero", `set -- $list; perl -e 'syscall(109, 0, $ARGV[0]+0) == 0 or die "setpgid: $!"; kill 9, 0' "$1"`, true, true},
+	} {
+		for name, run := range containRunners {
+			t.Run(name+"/"+kill.name, func(t *testing.T) {
+				if kill.trackedOnly && name != "RunTracked" {
+					t.Skip("the PID-namespace runner has no subreaper custodian")
+				}
+				if kill.amd64 && runtime.GOARCH != "amd64" {
+					t.Skip("raw syscall numbers are amd64's")
+				}
+				pidFile := filepath.Join(t.TempDir(), "escaped.pid")
+				err := run(CommandContext(context.Background(), "/bin/sh", "-c",
+					"setsid "+containChild+" &\n"+containWaitPID+"\n"+ancestors+kill.script+"\nsleep 1\nexit 0", "sh", pidFile))
+				pid := readContainPID(t, pidFile)
+				t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+				var exitErr *exec.ExitError
+				if errors.As(err, &exitErr) && exitErr.ExitCode() == 7 {
+					t.Fatal("the command found no supervisor ancestor")
+				}
+				if helperRunning(pid) {
+					t.Fatalf("%s returned (%v) while descendant %d still runs", name, err, pid)
+				}
+			})
+		}
 	}
-	if helperRunning(pid) {
-		t.Fatalf("RunContained returned (%v) while descendant %d still runs", err, pid)
+}
+
+// The custodian is not dumpable, so the command cannot trace it and make it
+// exit (GAP-0631): its /proc entries belong to root.
+func TestRunTrackedCustodianIsNotDumpable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root owns every /proc entry it has")
+	}
+	var out strings.Builder
+	cmd := CommandContext(context.Background(), "/bin/sh", "-c", `read -r _ _ _ a _ < /proc/self/stat
+while [ "${a:-0}" -gt 1 ]; do
+  case "$(tr '\0' ' ' < /proc/$a/cmdline)" in "`+containSupervisorArg0+` `+containCustodianMode+` "*) stat -c %u /proc/$a/status; exit 0 ;; esac
+  read -r _ _ _ a _ < /proc/$a/stat || break
+done
+exit 7`)
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := RunTracked(cmd); err != nil {
+		t.Fatalf("RunTracked = %v: %s", err, out.String())
+	}
+	if got := strings.TrimSpace(out.String()); got != "0" {
+		t.Fatalf("the custodian's /proc status belongs to %q, want root (not dumpable)", got)
 	}
 }
 
@@ -354,7 +408,7 @@ func TestRunContainedKeepsTheCommandResult(t *testing.T) {
 	}{
 		{"exit 0", 0},
 		{"exit 3", 3},
-		{"kill -TERM $$", 128 + int(syscall.SIGTERM)},
+		{"kill -TERM 0", 128 + int(syscall.SIGTERM)},
 		{`[ -z "${` + containSupervisorEnv + `+x}" ] || exit 9`, 0},
 	} {
 		for name, run := range containRunners {
