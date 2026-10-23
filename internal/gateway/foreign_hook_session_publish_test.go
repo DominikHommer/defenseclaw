@@ -146,6 +146,7 @@ type foreignHookPublishTestServer struct {
 	root                 string
 	api                  *APIServer
 	call                 func(token string, update map[string]any) enterprisepolicy.GuardDecision
+	retryExpiredFence    bool
 	t                    *testing.T
 }
 
@@ -284,16 +285,29 @@ func newForeignHookPublishTestServer(t *testing.T, publish func(string, string, 
 		if err != nil {
 			t.Fatal(err)
 		}
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/foreign-hook-session/claudecode", bytes.NewReader(data))
-		req.RemoteAddr = "127.0.0.1:12345"
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-DefenseClaw-Client", "foreign-hook-guard/1.0")
-		req.Header.Set("Authorization", "Bearer "+token)
-		req = req.WithContext(context.WithValue(req.Context(), acpConnPeerKey{}, &acpConnPeer{uid: peerUIDs[token], known: true}))
-		// Every gateway listener's connection can bound a write; an allow
-		// is refused on one that cannot.
-		response := newDeadlineRecorder()
-		handler.ServeHTTP(response, req)
+		callOnce := func() deadlineRecorder {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/foreign-hook-session/claudecode", bytes.NewReader(data))
+			req.RemoteAddr = "127.0.0.1:12345"
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-DefenseClaw-Client", "foreign-hook-guard/1.0")
+			req.Header.Set("Authorization", "Bearer "+token)
+			req = req.WithContext(context.WithValue(req.Context(), acpConnPeerKey{}, &acpConnPeer{uid: peerUIDs[token], known: true}))
+			// Every gateway listener's connection can bound a write; an allow
+			// is refused on one that cannot.
+			response := newDeadlineRecorder()
+			handler.ServeHTTP(response, req)
+			return response
+		}
+		response := callOnce()
+		// The one-second production removal fence correctly refuses an allow
+		// if a loaded race runner stalls its write. The real protected-record
+		// tests opt in to retries because they need one completed exchange to
+		// check record and key behavior. Retry only that exact fail-closed
+		// refusal, with a fresh request and a bound.
+		for retry := 0; retry < 3 && server.retryExpiredFence && response.Code == http.StatusServiceUnavailable &&
+			strings.Contains(response.Body.String(), `"reason":"foreign_hook_removal_fence_expired"`); retry++ {
+			response = callOnce()
+		}
 		if response.Code != http.StatusOK {
 			t.Fatalf("exchange: %d %s", response.Code, response.Body.String())
 		}

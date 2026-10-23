@@ -22,9 +22,12 @@ func TestUnenrolledRefusalStopWritesQueuedRowsAndOpenWindowCounts(t *testing.T) 
 	codexReport := refusalpipe.Report{Connector: "codex", Reason: refusalpipe.ReasonSIDUnregistered}
 	ctx, cancel := context.WithCancel(context.Background())
 	release := make(chan struct{})
+	writerStarted := make(chan struct{})
+	var writerStart sync.Once
 	var mu sync.Mutex
 	var rows []unenrolledRefusalRow
 	write := func(ctx context.Context, row unenrolledRefusalRow) {
+		writerStart.Do(func() { close(writerStarted) })
 		<-release // a slow account lookup holds the writer past the stop
 		if ctx.Err() != nil {
 			t.Errorf("row written with a canceled context: %+v", row)
@@ -37,7 +40,17 @@ func TestUnenrolledRefusalStopWritesQueuedRowsAndOpenWindowCounts(t *testing.T) 
 	go func() {
 		defer close(done)
 		runUnenrolledRefusalAudit(ctx, func(ctx context.Context, auditor *unenrolledRefusalAuditor) {
-			for range 50 {
+			auditor.record(sid, report)
+			// The first row must be in the stalled writer before the
+			// remaining rows can test the queued and open-window paths.
+			select {
+			case <-writerStarted:
+			case <-time.After(10 * time.Second):
+				t.Error("refusal writer did not start")
+				cancel()
+				return
+			}
+			for range 49 {
 				auditor.record(sid, report)
 			}
 			auditor.record(sid, codexReport)
