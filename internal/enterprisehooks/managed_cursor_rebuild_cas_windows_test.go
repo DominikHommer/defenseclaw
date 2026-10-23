@@ -116,12 +116,14 @@ func TestWindowsCursorMachineGuardRebuildConcurrentWriterKeepsEverySave(t *testi
 	document := func(name string) []byte {
 		return []byte(fmt.Sprintf(`{"version":1,"hooks":{"adminEvent":[{"type":"command","command":%q}]}}`, name))
 	}
+	busy := func(err error) bool {
+		return errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_ACCESS_DENIED) ||
+			errors.Is(err, windows.ERROR_LOCK_VIOLATION)
+	}
 	retry := func(write func() error) error {
 		var err error
 		for attempt := 0; attempt < 2000; attempt++ {
-			if err = write(); err == nil ||
-				!(errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_ACCESS_DENIED) ||
-					errors.Is(err, windows.ERROR_LOCK_VIOLATION)) {
+			if err = write(); err == nil || !busy(err) {
 				return err
 			}
 			time.Sleep(time.Millisecond)
