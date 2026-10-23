@@ -22746,9 +22746,10 @@ function Sync-DefenseClawStandaloneManagedHooksActivationBinding {
     <#
         Standalone only. Runs under the lifecycle lock, after any pending
         transaction was recovered and before Upgrade, Repair, Reconcile or
-        Uninstall opens its own transaction. When the enumerator republished
-        targets.yaml since the last transaction and the guardian has already
-        activated it (Get-DefenseClawStandaloneManifestAdoption), rebind the
+        Uninstall opens its own transaction; a fresh Install also runs it
+        after commit and before journal retirement. When the enumerator has
+        republished targets.yaml since the last transaction and the guardian
+        has already activated it (Get-DefenseClawStandaloneManifestAdoption), rebind the
         committed activation evidence to that manifest, so every later exact
         binding check of the transaction sees one manifest generation. Only
         manifest_sha256 and target_count change; the state and the deployment

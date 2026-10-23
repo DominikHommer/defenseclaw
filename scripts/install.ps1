@@ -1346,7 +1346,7 @@ namespace DefenseClawInstall {
         public static void Replace(string source, string destination) {
             // DELETE is the access needed to rename the staged source. Share
             // read, write and delete so readers cannot strand this handle.
-            using (SafeFileHandle file = CreateFileW(source, 0x10000, 7, IntPtr.Zero, 3, 0, IntPtr.Zero)) {
+            using (SafeFileHandle file = CreateFileW(source, 0x10000, 7, IntPtr.Zero, 3, 0x80, IntPtr.Zero)) {
                 if (file.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
                 byte[] name = Encoding.Unicode.GetBytes(Path.GetFullPath(destination));
                 int rootOffset = IntPtr.Size == 8 ? 8 : 4;
@@ -1681,11 +1681,12 @@ function Get-LifecycleState {
     $connectors = @()
     if ($running) {
         $report = Get-GatewayHealthReport $gateway
-        if ($report) { $connectors = @(Get-GuardedConnectors $report) }
-        else {
-            $connectors = @(@(Get-ConfiguredConnectors) + @(Get-EffectiveConfigConnectors) |
-                Where-Object { $_ -and $_ -ne "none" } | Sort-Object -Unique)
-        }
+        # The old gateway's JSON can be absent or omit a configured hook.
+        # Keep the effective config roster in the baseline in either case,
+        # including when DEFENSECLAW_CONFIG points outside DataDir.
+        $reported = if ($report) { @(Get-GuardedConnectors $report) } else { @() }
+        $connectors = @($reported + @(Get-ConfiguredConnectors) + @(Get-EffectiveConfigConnectors) |
+            Where-Object { $_ -and $_ -ne "none" } | Sort-Object -Unique)
     }
     $external = Get-ExternalConfig
     return [ordered]@{
@@ -1872,7 +1873,7 @@ function Test-LifecycleProof($Bins, [bool]$GatewayRunning, [string[]]$Connectors
             if ($guarded -notcontains $name) { $problems += "connector $name is not guarded again: the gateway does not report its hooks running" }
         }
     } else {
-        if (-not $AllowLegacyStatus -and ($RequireDigest -or @($Connectors | Where-Object { $_ }).Count)) {
+        if (-not $AllowLegacyStatus) {
             $problems += "a usable JSON health report is unavailable, so the gateway's connectors cannot be proven"
         }
         if ((Invoke-Native $gateway @("status") -Quiet) -ne 0) {
@@ -3036,7 +3037,8 @@ function Resume-InterruptedRun {
         # The rollback's record proves its target, not the install it left.
         if ($manifest -and (Get-Field $manifest "Operation") -eq "rollback") {
             if ($restart -and -not (Get-GatewayProcess)) { Start-RecoveredGateway "rolled-back" }
-            $problems = @(Wait-LifecycleProof (Get-Field $manifest "TargetBins") $restart)
+            $legacyTarget = [string](Get-Field $manifest "To") -match '^(?:0\.8\.10|1\.0\.[0-3])$'
+            $problems = @(Wait-LifecycleProof (Get-Field $manifest "TargetBins") $restart -AllowLegacyStatus:$legacyTarget)
             if ($problems.Count) {
                 Set-RecoveryPending
                 Die "The finished rollback is not proven: $($problems -join '; '). Fix the cause, then run: $(Get-LifecycleNextStep)"
@@ -3074,7 +3076,8 @@ function Resume-InterruptedRun {
         if (Test-SameBinaries (Get-BinariesState $BinDir) $target) {
             $wanted = [bool](Get-Field $manifest "StartAfter")
             if ($wanted -and -not (Get-GatewayProcess)) { Start-RecoveredGateway "rolled-back" }
-            $problems = @(Wait-LifecycleProof $target $wanted)
+            $legacyTarget = [string](Get-Field $manifest "To") -match '^(?:0\.8\.10|1\.0\.[0-3])$'
+            $problems = @(Wait-LifecycleProof $target $wanted -AllowLegacyStatus:$legacyTarget)
             if ($problems.Count) {
                 Set-RecoveryPending
                 Die "The finished rollback is not proven: $($problems -join '; '). Fix the cause, then run: $(Get-LifecycleNextStep)"
@@ -3588,7 +3591,10 @@ function Invoke-Rollback {
     # for a 0.x one (GAP-0486): never "Now running" with the gateway down.
     $problems = @()
     if ($startAfter -and (Start-Gateway) -notin @(0, 3)) { $problems += "the gateway of DefenseClaw $backTo did not start" }
-    else { $problems = @(Wait-LifecycleProof (Get-Field $Manifest "TargetBins") $startAfter) }
+    else {
+        $legacyTarget = $backTo -match '^(?:0\.8\.10|1\.0\.[0-3])$'
+        $problems = @(Wait-LifecycleProof (Get-Field $Manifest "TargetBins") $startAfter -AllowLegacyStatus:$legacyTarget)
+    }
     if ($problems.Count) {
         return Undo-Rollback "DefenseClaw $backTo is not proven running ($($problems -join '; '))" $current $backTo $savedWasRunning $quarantined $conversionAttempted
     }

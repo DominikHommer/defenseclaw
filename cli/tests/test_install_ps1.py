@@ -60,6 +60,10 @@ $problems = @(Test-LifecycleProof @{{}} $true @('codex'))
 if (-not @($problems | Where-Object {{ $_ -match 'JSON health report' }}).Count) {{
     throw "missing JSON connector proof was accepted: $($problems -join '; ')"
 }}
+$emptyRoster = @(Test-LifecycleProof @{{}} $true @())
+if (-not @($emptyRoster | Where-Object {{ $_ -match 'JSON health report' }}).Count) {{
+    throw 'a current release with no registered connectors accepted missing JSON proof'
+}}
 $legacy = @(Test-LifecycleProof @{{}} $true @('codex') -AllowLegacyStatus)
 if ($legacy.Count) {{ throw "a byte-verified old gateway cannot be restored: $($legacy -join '; ')" }}
 'OK'
@@ -69,6 +73,12 @@ if ($legacy.Count) {{ throw "a byte-verified old gateway cannot be restored: $($
     restore = _ps1_function("Assert-LifecycleRestored")
     assert "0\\.8\\.10|1\\.0\\.[0-3]" in restore
     assert "-AllowLegacyStatus:$allowLegacyStatus" in restore
+    # A rollback to one of those releases also needs its own legacy proof,
+    # including both interrupted resume branches and the direct rollback.
+    resume = _ps1_function("Resume-InterruptedRun")
+    rollback = _ps1_function("Invoke-Rollback")
+    assert resume.count("-AllowLegacyStatus:$legacyTarget") == 2
+    assert "-AllowLegacyStatus:$legacyTarget" in rollback
 
 
 def test_upgrade_requires_recorded_connectors_even_when_start_needs_attention() -> None:
@@ -79,15 +89,19 @@ def test_upgrade_requires_recorded_connectors_even_when_start_needs_attention() 
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
-def test_lifecycle_record_preserves_configured_connectors_without_old_json(tmp_path: Path) -> None:
-    # rel-1-0-4:GAP-0745: old releases may lack JSON status, yet their
-    # configured connectors must remain in the new release's proof.
+@pytest.mark.parametrize("json_report", [False, True])
+def test_lifecycle_record_preserves_configured_connectors_when_health_omits_them(
+    tmp_path: Path, json_report: bool,
+) -> None:
+    # GAP-0745/0679: old releases may lack JSON status, while a gateway that
+    # does report JSON can still omit a configured external connector.
     script = f"""
 $ErrorActionPreference = 'Stop'
 $DataDir = '{tmp_path}'
 $BinDir = '{tmp_path}'
 function Get-GatewayProcess {{ return [pscustomobject]@{{ Id = 1 }} }}
-function Get-GatewayHealthReport {{ return $null }}
+function Get-GatewayHealthReport {{ return $(if (${str(json_report).lower()}) {{ [pscustomobject]@{{ health = [pscustomobject]@{{ connectors = @() }} }} }} else {{ $null }}) }}
+function Get-GuardedConnectors {{ return @() }}
 function Get-ConfiguredConnectors {{ return @() }}
 function Get-EffectiveConfigConnectors {{ return @('codex') }}
 function Get-ExternalConfig {{ return '' }}
@@ -97,7 +111,7 @@ function Test-BinDirProtected {{ return $true }}
 {_ps1_function('Get-LifecycleState')}
 $state = Get-LifecycleState
 if (@($state.Connectors).Count -ne 1 -or $state.Connectors[0] -ne 'codex') {{
-    throw 'the old gateway JSON gap erased the configured connector'
+    throw 'gateway health erased the configured connector'
 }}
 'OK'
 """
@@ -1670,7 +1684,8 @@ if ($script:stops -ne 1 -or $script:closes -ne 1 -or (Get-Sha256 $closer) -eq (G
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
 def test_unproven_replacement_refuses_a_closer_without_closed_hold_support(tmp_path: Path) -> None:
     (tmp_path / "hooks").mkdir()
-    script = _ps1_function("Start-HookFailModeHold") + f"\n$DataDir = '{str(tmp_path).replace("'", "''")}'\n" + """
+    quoted_data_dir = str(tmp_path).replace("'", "''")
+    script = _ps1_function("Start-HookFailModeHold") + f"\n$DataDir = '{quoted_data_dir}'\n" + """
 function Test-HookFailModeRefresh { param($Gateway) return 1 }
 if (Start-HookFailModeHold 'checked-gateway.exe' 123 -Closed) {
     throw 'the unsupported gateway was accepted as a closed hold'
@@ -3051,6 +3066,9 @@ def test_an_upgrade_replaces_an_installed_binary_in_place() -> None:
     assert "function Invoke-FileReplace" not in _text()
     install = _ps_functions("Install-File")
     assert install.index('(Get-Sha256 "$Destination.new") -ne (Get-Sha256 $Source)') < install.index("Publish-File")
+    hook_state = _text().split("function Write-HookState {", 1)[1].split("\n}\n", 1)[0]
+    for body in (_ps_functions("Write-PosixShim"), _ps_functions("Write-Shim"), hook_state):
+        assert 'Publish-File "$path.new" $path' in body and "Remove-Aside" not in body
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
@@ -3066,9 +3084,6 @@ def test_atomic_replacement_native_helper_compiles() -> None:
     )
     result = _run_powershell(script)
     assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
-    hook_state = _text().split("function Write-HookState {", 1)[1].split("\n}\n", 1)[0]
-    for body in (_ps_functions("Write-PosixShim"), _ps_functions("Write-Shim"), hook_state):
-        assert 'Publish-File "$path.new" $path' in body and "Remove-Aside" not in body
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
@@ -3697,8 +3712,7 @@ def test_native_running_hook_during_interrupted_resume_restores_immediately(tmp_
     data, bin_dir, slot = tmp_path / "data", tmp_path / "bin", tmp_path / "data" / "previous.new"
     _interrupted_fixture(data, bin_dir, slot, hook=Path(os.environ["SystemRoot"]) / "System32" / "cmd.exe")
     real = _ps1_function("Invoke-AtomicReplace")
-    pause = "function Start-Sleep { [Threading.Thread]::Sleep(250) }\n"
-    _restore_case(tmp_path, real + pause + _close_mocks() + _RESUME_MOCKS + _first_run(slot, complete=True))
+    _restore_case(tmp_path, real + _close_mocks() + _RESUME_MOCKS + _first_run(slot, complete=True))
     hook = bin_dir / "defenseclaw-hook.exe"
     running = subprocess.Popen([str(hook), "/c", "ping -n 120 127.0.0.1 >nul"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
@@ -3796,6 +3810,8 @@ def _txn_harness(tmp_path: Path, body: str) -> subprocess.CompletedProcess:
         "$script:gateway = $null; $script:health = ''; $script:digest = ''; $script:digestHelp = $true; $script:protected = $true\n"
         "function Get-GatewayProcess { return $script:gateway }\n"
         "function Get-ExternalConfig { return '' }\n"
+        "function Get-ConfiguredConnectors { return @() }\n"
+        "function Get-EffectiveConfigConnectors { return @() }\n"
         "function Test-BinDirProtected { return $script:protected }\n"
         "$script:closes = 0\n"
         "function Invoke-Native { param($FilePath, $Arguments, [switch]$Quiet) if (($Arguments -join ' ') -like 'connector refresh-fail-modes --closed*') { $script:closes++; return 0 }; if ($script:health) { return 0 } return 1 }\n"
@@ -3914,7 +3930,7 @@ def test_a_restore_proof_does_not_require_what_the_older_install_could_not_repor
     result = _txn_harness(tmp_path, r"""
 [IO.File]::WriteAllText((Join-Path $BinDir 'defenseclaw-gateway.exe'), 'old gateway')
 [IO.File]::WriteAllText((Join-Path $DataDir 'config.yaml'), 'old config')
-$manifest = [pscustomobject]@{ Bins = (Get-BinariesState $BinDir); GatewayWasRunning = $true; Connectors = @(); BinDirProtected = $false
+$manifest = [pscustomobject]@{ From = '0.8.10'; Bins = (Get-BinariesState $BinDir); GatewayWasRunning = $true; Connectors = @(); BinDirProtected = $false
     Config = (Get-Sha256 (Join-Path $DataDir 'config.yaml')); ExternalConfig = ''; ExternalConfigSha256 = ''; HookFailModes = ''; SetupRoot = '' }
 [IO.File]::WriteAllText($LifecycleManifest, '{}')
 $script:gateway = [pscustomobject]@{ Path = (Join-Path $BinDir 'defenseclaw-gateway.exe') }
@@ -4076,7 +4092,9 @@ Remove-LifecycleManifest
 Put-Bins 'target'
 $target = Get-BinariesState $BinDir
 Put-Bins 'old'
+$script:health = '__HEALTHY__'
 [void](Write-LifecycleManifest 'rollback' '1.0.4' '1.0.3' '' @{ TargetBins = $target; StartAfter = $true })
+$script:health = $(if ('__MARKER__' -eq 'STASHED') { '__HEALTHY__' } else { '' })
 $hold = Join-Path $DataDir '.rollback-hold'
 [void][IO.Directory]::CreateDirectory($hold)
 Set-Content -LiteralPath (Join-Path $hold 'GATEWAY_WAS_RUNNING') -Value 'true'
@@ -4089,7 +4107,7 @@ try { Resume-InterruptedRun } catch { $failure = $_.Exception.Message }
 "FAILURE=$failure"
 "RECORD=$(Test-Path -LiteralPath $LifecycleManifest)"
 "HOOK=$([IO.File]::ReadAllText((Join-Path $BinDir 'defenseclaw-hook.exe')))"
-""".replace("__MARKER__", marker).replace("__LIVE__", live))
+""".replace("__MARKER__", marker).replace("__LIVE__", live).replace("__HEALTHY__", _HEALTHY))
     out = result.stdout + result.stderr
     assert result.returncode == 0, out
     rows = dict(row.split("=", 1) for row in result.stdout.splitlines() if "=" in row and row.split("=", 1)[0].isupper())
@@ -4122,7 +4140,7 @@ def test_every_lifecycle_step_proves_its_result_before_it_reports_success() -> N
     # GAP-0486: a rollback whose gateway does not start (or is not proven) is
     # undone for a 1.x release as for a 0.x one, and never says "Now running".
     rollback = _ps1_function("Invoke-Rollback")
-    proven = rollback.index("$problems = @(Wait-LifecycleProof (Get-Field $Manifest \"TargetBins\") $startAfter)")
+    proven = rollback.index("$problems = @(Wait-LifecycleProof (Get-Field $Manifest \"TargetBins\") $startAfter -AllowLegacyStatus:$legacyTarget)")
     assert rollback.index("Write-LifecycleManifest \"rollback\"") < rollback.index("if (-not (Stop-Gateway))")
     assert proven < rollback.index("return Undo-Rollback \"DefenseClaw $backTo is not proven running") < rollback.index("Now running DefenseClaw")
     assert "The gateway did not start; run 'defenseclaw-gateway start' and check its log" not in rollback

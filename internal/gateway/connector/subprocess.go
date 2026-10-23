@@ -2248,7 +2248,8 @@ func TeardownSubprocessEnforcement(opts SetupOpts) error {
 //
 //   - Shebang is /bin/sh (not /bin/bash) so the tombstone runs on
 //     minimal hosts where /bin/bash is absent (Alpine, distroless,
-//     some BSDs). The body is literal `exit 0`; POSIX sh is enough.
+//     some BSDs). POSIX sh is enough. Devin's per-user cached path exits 2
+//     after token revocation; the usual disabled body exits 0.
 //   - Line 2 carries the v0 schema marker so scriptHasMarker /
 //     isOwnedHook recognise the tombstone as DefenseClaw-owned.
 //     v0 is the "older than any tagged version" sentinel; any

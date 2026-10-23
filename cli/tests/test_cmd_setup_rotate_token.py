@@ -29,7 +29,6 @@ from click.testing import CliRunner
 from defenseclaw.audit_actions import ACTION_SETUP_GATEWAY
 from defenseclaw.commands import cmd_setup
 from defenseclaw.commands.cmd_setup import _rotate_token_atomic_write
-from defenseclaw.config import CONFIG_PATH_ENV
 from defenseclaw.context import AppContext
 from defenseclaw.logger import CanonicalObservabilityUnavailableError
 

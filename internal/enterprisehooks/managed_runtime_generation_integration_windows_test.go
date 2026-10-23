@@ -46,6 +46,9 @@ func TestWindowsManagedHookRuntimeFormattingRedactsScopedToken(t *testing.T) {
 
 func TestVerifyWindowsManagedRuntimeGenerationForInstallDoesNotImpersonate(t *testing.T) {
 	t.Setenv(connector.WindowsGatewayServiceNameEnv, "DefenseClawGateway-Test")
+	previousStandalone := windowsEnterpriseStandaloneProcess
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
+	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previousStandalone })
 	targetSID, err := windows.StringToSid("S-1-5-21-1000-1000-1000-1001")
 	if err != nil {
 		t.Fatal(err)
@@ -76,7 +79,7 @@ func TestVerifyWindowsManagedRuntimeGenerationForInstallDoesNotImpersonate(t *te
 		HookExecutable:             `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`,
 		GatewayAddr:                "127.0.0.1:18970",
 		GatewayServiceName:         "DefenseClawGateway-Test",
-		FailMode:                   "open",
+		FailMode:                   "closed",
 		ScopedToken:                "scoped-test-token",
 		HookContractID:             "codex-hooks-v1",
 		HookContractLockUpdatedAt:  "2026-08-23T10:00:00Z",
