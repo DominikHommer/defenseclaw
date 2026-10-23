@@ -429,6 +429,75 @@ def test_schema_version_mismatch_rescans(monkeypatch, tmp_path):
     assert disc.agents["openclaw"].installed is True
 
 
+def test_restricted_setup_scan_probes_its_active_peer(monkeypatch, tmp_path):
+    if os.name == "nt":
+        set_known_windows_directory_acl(tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        "guardrail:\n  enabled: true\n  connector: claude-code\n"
+        "  connectors:\n    claude-code:\n      enabled: true\n"
+        "    cursor:\n      enabled: false\n",
+        encoding="utf-8",
+    )
+    probed = {}
+
+    def scan(name, **kwargs):
+        probed[name] = kwargs["probe"]
+        signal = _signal(name, installed=name in {"claudecode", "codex"})
+        if kwargs["probe"] and name == "claudecode":
+            signal.version = "2.1.286 (Claude Code)"
+        return signal
+
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(ad, "_scan_agent", scan)
+    result = ad.discover_with_probes(["codex"], use_cache=False, refresh=True, data_dir=tmp_path)
+
+    assert probed["codex"] is True
+    assert probed["claudecode"] is True
+    assert probed["cursor"] is False
+    assert result.agents["claudecode"].version == "2.1.286 (Claude Code)"
+    assert ad._read_cache(data_dir=tmp_path).agents["claudecode"].version == "2.1.286 (Claude Code)"
+
+
+@pytest.mark.parametrize("old_schema", (3, 6))
+@pytest.mark.parametrize("windows_semantics", (False, True))
+def test_release_cache_keeps_unchanged_peer_version_during_schema_upgrade(
+    monkeypatch, tmp_path, old_schema, windows_semantics
+):
+    if os.name == "nt":
+        set_known_windows_directory_acl(tmp_path)
+    binary = tmp_path / "claude"
+    binary.write_text("agent binary", encoding="utf-8")
+    old = os.stat(binary).st_mtime - 600
+    os.utime(binary, (old, old))
+    cached = _discovery("claudecode")
+    cached.scanned_at = ad._format_rfc3339(ad._now_utc())
+    cached.agents["claudecode"].binary_path = str(binary)
+    cached.agents["claudecode"].version = "2.1.286 (Claude Code)"
+    assert ad._write_cache(cached, data_dir=tmp_path)
+    path = tmp_path / ad.CACHE_FILENAME
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["version"] = old_schema
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def scan(name, **kwargs):
+        signal = _signal(name, installed=name == "claudecode")
+        if name == "claudecode":
+            signal.binary_path = str(binary)
+            signal.error = ad.VERSION_NOT_PROBED
+        return signal
+
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: windows_semantics)
+    monkeypatch.setattr(ad, "_windows_configured_package_manager_bin_prefixes", lambda: ())
+    monkeypatch.setattr(ad, "_scan_agent", scan)
+    result = ad.discover_with_probes(["codex"], use_cache=False, refresh=True, data_dir=tmp_path)
+
+    assert result.agents["claudecode"].version == "2.1.286 (Claude Code)"
+    assert ad._read_cache(data_dir=tmp_path).agents["claudecode"].version == "2.1.286 (Claude Code)"
+
+    os.utime(binary, None)
+    assert ad.discover_with_probes(["codex"], use_cache=False, refresh=True, data_dir=tmp_path).agents["claudecode"].version == ""
+
+
 def test_empty_connector_home_does_not_detect_opencode(monkeypatch, tmp_path):
     _pin_home(monkeypatch, tmp_path)
     monkeypatch.chdir(tmp_path)

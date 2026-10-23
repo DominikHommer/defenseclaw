@@ -266,11 +266,9 @@ type FileStore struct {
 	// in tests.
 	limit, runLimit int
 
-	// writeMu orders the mutations; mu guards uids. A mutation holds both,
-	// but saveLocked lets go of mu while it writes the file, so the reads of
-	// every relayed hook call (Get, Run) never wait for a write's fsync,
-	// which on macOS flushes the whole disk cache and took seconds under a
-	// hook burst (rel-1-0-4 GAP-0367).
+	// writeMu orders the mutations; mu guards uids. Most writes release mu
+	// during disk I/O, so relayed hooks do not wait for their fsync. Writes that
+	// withdraw live authority keep mu until durable publication.
 	writeMu sync.Mutex
 	mu      sync.Mutex
 	uids    map[int]*uidRecords
@@ -363,13 +361,14 @@ func (s *FileStore) loadLocked(uid int) (*uidRecords, error) {
 }
 
 // saveLocked writes u as uid's file and then publishes it. The caller holds
-// lockForWrite; mu is released during the write and held again after it, so
-// readers see the records from before the mutation until it is stored.
+// lockForWrite. Non-withdrawing writes release mu during disk I/O; a stop or
+// revoke keeps it so admission cannot read the old live record after the
+// withdrawal has begun but before it is stored.
 // Expired pending
 // entries past their keep window are dropped, and so are the run records
 // of tombstones (but for the stop a re-match revoked one with) and of
 // dropped entries.
-func (s *FileStore) saveLocked(uid int, u *uidRecords) error {
+func (s *FileStore) saveLocked(uid int, u *uidRecords, withdrawLiveAuthority bool) error {
 	now := s.now()
 	kept := u.regs[:0:0]
 	runs := map[string]Run{}
@@ -394,9 +393,13 @@ func (s *FileStore) saveLocked(uid int, u *uidRecords) error {
 	if len(retired) > MaxRetiredPerUID {
 		retired = retired[len(retired)-MaxRetiredPerUID:]
 	}
-	s.mu.Unlock()
+	if !withdrawLiveAuthority {
+		s.mu.Unlock()
+	}
 	err := storeFileWrite(s.dir, s.path(uid), registrationFile{V: storeFileVersion, Registrations: kept, Runs: runs, Retired: retired})
-	s.mu.Lock()
+	if !withdrawLiveAuthority {
+		s.mu.Lock()
+	}
 	if err != nil {
 		return err
 	}
@@ -495,7 +498,7 @@ func (s *FileStore) CreateRun(uid int, r Registration, run *Run) error {
 		next.runs[r.ID] = *run
 	}
 	next.regs = append(next.regs, r)
-	if err := s.saveLocked(uid, next); err != nil {
+	if err := s.saveLocked(uid, next, false); err != nil {
 		return err
 	}
 	gone = evicted
@@ -738,7 +741,7 @@ func (s *FileStore) Bind(uid int, id string, b sandboxrelay.BindRequest) (Regist
 	r.SandboxID, r.SandboxName, r.BindingID = b.SandboxID, b.SandboxName, b.BindingID
 	next := u.clone()
 	next.regs[at] = r
-	if err := s.saveLocked(uid, next); err != nil {
+	if err := s.saveLocked(uid, next, false); err != nil {
 		return Registration{}, err
 	}
 	return r, nil
@@ -772,7 +775,7 @@ func (s *FileStore) MarkGuestSeen(uid int, id string, at time.Time) error {
 		r.GuestSeenAt = at.UTC()
 		next := u.clone()
 		next.regs[i] = r
-		return s.saveLocked(uid, next)
+		return s.saveLocked(uid, next, false)
 	}
 	return ErrNotFound
 }
@@ -801,7 +804,7 @@ func (s *FileStore) Revoke(uid int, id, reason string) error {
 		r.State, r.RevokedReason, r.RevokedAt = StateRevoked, boundedReason(reason), s.now()
 		next := u.clone()
 		next.regs[i] = r
-		if err := s.saveLocked(uid, next); err != nil {
+		if err := s.saveLocked(uid, next, u.regs[i].State == StateLive); err != nil {
 			return err
 		}
 		gone = append(gone, r)
@@ -846,7 +849,7 @@ func (s *FileStore) Deleted(uid int, id string) error {
 			next.regs = slices.Delete(next.regs, i, i+1)
 		}
 		delete(next.runs, id)
-		if err := s.saveLocked(uid, next); err != nil {
+		if err := s.saveLocked(uid, next, u.regs[i].State == StateLive); err != nil {
 			return err
 		}
 		gone = append(gone, r)
@@ -910,7 +913,7 @@ func (s *FileStore) Report(uid int, id string, running bool) (Registration, erro
 		}
 		nu := u.clone()
 		nu.regs[i] = next
-		if err := s.saveLocked(uid, nu); err != nil {
+		if err := s.saveLocked(uid, nu, !running && r.State == StateLive); err != nil {
 			return r, err
 		}
 		return next, nil
@@ -935,6 +938,7 @@ func (s *FileStore) RevokeSandbox(uid int, sandboxID, sandboxName, reason string
 	}
 	var next *uidRecords
 	var revoked []Registration
+	withdrawLiveAuthority := false
 	now := s.now()
 	for i, r := range u.regs {
 		if r.State != StateLive && r.State != StateStopped {
@@ -950,6 +954,7 @@ func (s *FileStore) RevokeSandbox(uid int, sandboxID, sandboxName, reason string
 		if next == nil {
 			next = u.clone()
 		}
+		withdrawLiveAuthority = withdrawLiveAuthority || r.State == StateLive
 		r.State, r.RevokedReason, r.RevokedAt = StateRevoked, boundedReason(reason), now
 		next.regs[i] = r
 		revoked = append(revoked, r)
@@ -957,7 +962,7 @@ func (s *FileStore) RevokeSandbox(uid int, sandboxID, sandboxName, reason string
 	if next == nil {
 		return nil, nil
 	}
-	if err := s.saveLocked(uid, next); err != nil {
+	if err := s.saveLocked(uid, next, withdrawLiveAuthority); err != nil {
 		return nil, err
 	}
 	gone = revoked
@@ -1048,7 +1053,7 @@ func (s *FileStore) UpdateRun(uid int, r Registration, run *Run) error {
 			}
 			next.runs[r.ID] = *run
 		}
-		return s.saveLocked(uid, next)
+		return s.saveLocked(uid, next, false)
 	}
 	return ErrNotFound
 }

@@ -963,27 +963,28 @@ def _configured_probe_names(data_dir: str | os.PathLike[str] | None) -> frozense
         guardrail = document.get("guardrail", {})
         connectors = guardrail.get("connectors", {})
         names = {
-            str(name).lower() for name, entry in connectors.items()
+            _normalize_connector(str(name)) for name, entry in connectors.items()
             if isinstance(entry, dict) and entry.get("enabled") is not False
         } if isinstance(connectors, dict) else set()
         primary = guardrail.get("connector")
         if guardrail.get("enabled") and isinstance(primary, str) and primary:
-            names.add(primary.lower())
+            names.add(_normalize_connector(primary))
         return frozenset(names)
     except (OSError, ValueError, TypeError, AttributeError, yaml.YAMLError):
         return frozenset()
 
 
 def restrict_probes(connectors: list[str]) -> Any:
-    """Run only the CLIs of ``connectors`` in this command's discovery scans.
+    """Probe ``connectors`` and configured peers in this command's scans.
 
     ``init --connector copilot`` ran every installed agent CLI as a version
     probe, and those CLIs wrote their own config and cache folders
     (~/.codex, ~/.cursor, ~/.config/opencode, ...) into the home of a user
-    who never started them (GAP-0901). The other agents are still found by
-    binary and config path; their version is the last one observed for the
-    same unchanged binary, else unknown. Returns the token for
-    :func:`end_probe_restriction`.
+    who never started them (GAP-0901). Configured active peers must also be
+    probed before a setup scan replaces the gateway's version cache. Other
+    agents are still found by binary and config path; their version is the
+    last one observed for the same unchanged binary, else unknown. Returns
+    the token for :func:`end_probe_restriction`.
     """
     return _PROBE_ONLY.set(frozenset(connectors))
 
@@ -993,7 +994,7 @@ def end_probe_restriction(token: Any) -> None:
 
 
 def discover_with_probes(connectors: list[str], **kwargs: Any) -> AgentDiscovery:
-    """Probe only connectors explicitly selected by the current setup flow."""
+    """Probe selected connectors and configured peers without probing strangers."""
     token = restrict_probes(connectors)
     try:
         return discover_agents(**kwargs)
@@ -1178,8 +1179,13 @@ def discover_agents(
     scanned_at = _format_rfc3339(_now_utc())
     require_trusted, _prefixes = _ai_discovery_trust_config(data_dir)
     probe_only = _PROBE_ONLY.get()
+    configured = _configured_probe_names(data_dir)
     if probe_only is None:
-        probe_only = _configured_probe_names(data_dir)
+        probe_only = configured
+    else:
+        # A targeted setup still republishes the cache used by every active
+        # peer at gateway restart. Probe those peers before replacing it.
+        probe_only = probe_only | configured
     shared = _FRESH_SCANS.get()
     shared_key = (
         str(config_path_for_data_dir(data_dir)),
@@ -1274,7 +1280,10 @@ def _keep_versions_of_slow_unchanged_agents(
             payload = json.load(fh)
     except Exception:
         return
-    if not isinstance(payload, dict) or payload.get("version") != CACHE_SCHEMA_VERSION:
+    # Versions 3 (0.8.10) and 6 (1.0.0-1.0.3) carry the same binary/version
+    # evidence. A fresh scan still owns the result; these schemas supply only
+    # unchanged-binary evidence when that scan could not obtain a version.
+    if not isinstance(payload, dict) or payload.get("version") not in {3, 6, CACHE_SCHEMA_VERSION}:
         return
     previous_scan = _parse_rfc3339(str(payload.get("scanned_at") or ""))
     previous_agents = payload.get("agents")
@@ -1288,10 +1297,9 @@ def _keep_versions_of_slow_unchanged_agents(
         previous_binary = str(previous.get("binary_path") or "")
         if not version or not previous_binary or (signal.binary_path and previous_binary != signal.binary_path):
             continue
-        if not signal.binary_path and (
-            not os.path.isfile(previous_binary)
-            or (require_trusted_binary_paths and not _is_trusted_binary_path(previous_binary, data_dir=data_dir))
-        ):
+        if require_trusted_binary_paths and not _is_trusted_binary_path(previous_binary, data_dir=data_dir):
+            continue
+        if not signal.binary_path and not os.path.isfile(previous_binary):
             continue
         try:
             changed_at = os.stat(os.path.realpath(previous_binary)).st_mtime
@@ -1302,8 +1310,14 @@ def _keep_versions_of_slow_unchanged_agents(
         signal.binary_path = previous_binary
         signal.version = version
         if signal.name == "kiro":
-            signal.kiro_cli_version = str(previous.get("kiro_cli_version") or "")
-            signal.kiro_ide_version = str(previous.get("kiro_ide_version") or "")
+            if payload["version"] in {3, 6}:
+                if _kiro_binary_surface(previous_binary, version) == "cli":
+                    signal.kiro_cli_version = version
+                else:
+                    signal.kiro_ide_version = version
+            else:
+                signal.kiro_cli_version = str(previous.get("kiro_cli_version") or "")
+                signal.kiro_ide_version = str(previous.get("kiro_ide_version") or "")
         signal.error = ""
         signal.installed = True
 

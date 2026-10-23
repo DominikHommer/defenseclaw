@@ -13190,10 +13190,15 @@ def _plan_connector_compatibility_gate(cfg) -> RepairDecision:
             f"{type(exc).__name__}: connector compatibility evidence is unavailable; "
             "no unsupported version decision was inferred",
         )
+    auxiliary_kiro_cli = tuple(
+        finding for finding in problems
+        if finding.reason_code == "kiro-cli-below-hook-floor-auxiliary"
+    )
     unsupported = tuple(
         finding
         for finding in problems
         if finding.status is HealthStatus.UNSUPPORTED
+        and finding.reason_code != "kiro-cli-below-hook-floor-auxiliary"
     )
     if unsupported:
         summary = ", ".join(
@@ -13205,6 +13210,12 @@ def _plan_connector_compatibility_gate(cfg) -> RepairDecision:
             "gateway lifecycle repair is blocked by positively unsupported "
             f"connector compatibility evidence ({summary})",
             blockers=("unsupported connector compatibility",),
+        )
+    if auxiliary_kiro_cli and len(auxiliary_kiro_cli) == len(problems):
+        return RepairDecision(
+            "noop",
+            "the selected Kiro IDE surface can be repaired; an older auxiliary Kiro CLI "
+            "is reported separately for update",
         )
     if problems:
         return RepairDecision(

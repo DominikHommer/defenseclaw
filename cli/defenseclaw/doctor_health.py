@@ -404,11 +404,13 @@ def assess_component_health(
     return tuple(findings)
 
 
-def _kiro_floor_finding(normalized: str, ranges: tuple[str, ...]) -> ConnectorHealthFinding:
+def _kiro_floor_finding(
+    normalized: str, ranges: tuple[str, ...], *, auxiliary: bool = False
+) -> ConnectorHealthFinding:
     return ConnectorHealthFinding(
         connector="kiro",
         status=HealthStatus.UNSUPPORTED,
-        reason_code="connector-version-outside-contract",
+        reason_code="kiro-cli-below-hook-floor-auxiliary" if auxiliary else "connector-version-outside-contract",
         summary=kiro_cli_below_hook_floor_reason(normalized),
         installed_version=normalized,
         supported_agent_ranges=ranges,
@@ -492,7 +494,7 @@ def assess_connector_health(
         if connector == "kiro":
             cli = getattr(signal, "kiro_cli_version", "")
             if isinstance(cli, str) and cli != raw_version and (below := kiro_cli_below_hook_floor(cli)):
-                findings.append(_kiro_floor_finding(below, ranges))
+                findings.append(_kiro_floor_finding(below, ranges, auxiliary=True))
 
         if compatibility.status == STATUS_NOT_GATED:
             proxy = connector in PROXY_CONNECTORS

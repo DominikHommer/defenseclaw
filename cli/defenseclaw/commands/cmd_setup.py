@@ -8305,6 +8305,35 @@ def _setup_applied_runtime_difference(
     return "unknown"
 
 
+def _capture_setup_agent_discovery_file(data_dir) -> tuple[bool, bytes, tuple[int, int, int, int] | None]:
+    # A prior release could leave an owner-owned cache with loose read bits.
+    # Tighten only that case before treating its bytes as rollback evidence.
+    return _capture_protected_setup_file(
+        os.path.join(os.path.abspath(os.fspath(data_dir)), _AGENT_DISCOVERY_FILENAME),
+        _AGENT_DISCOVERY_MAX_BYTES,
+        "agent_discovery.json",
+        repair_owned_read_bits=True,
+    )
+
+
+def _capture_setup_prior_agent_discovery(data_dir) -> tuple[bool, bytes, tuple[int, int, int, int] | None] | None:
+    """Capture trusted cache bytes before version preflight rewrites them."""
+    path = os.path.join(os.path.abspath(os.fspath(data_dir)), _AGENT_DISCOVERY_FILENAME)
+    try:
+        return _capture_setup_agent_discovery_file(data_dir)
+    except OSError as exc:
+        try:
+            root_owned = hasattr(os, "geteuid") and os.geteuid() != 0 and os.lstat(path).st_uid == 0
+        except OSError:
+            root_owned = False
+        if root_owned:
+            next_step = f'To keep it on a failed setup, run: sudo chown "$(id -un)" {shlex.quote(path)}'
+        else:
+            next_step = "It is replaced by the version check; a failed setup restores that copy."
+        ux.warn(f"agent_discovery.json from before setup cannot be kept: {exc}. {next_step}")
+        return None
+
+
 def _capture_setup_desired_snapshot_once(cfg) -> _SetupConfigSnapshot:
     data_dir = getattr(cfg, "data_dir", None)
     config_existed = False
@@ -8342,11 +8371,7 @@ def _capture_setup_desired_snapshot_once(cfg) -> _SetupConfigSnapshot:
             _AGENT_SELECTION_MAX_BYTES,
             "agent_selection.json",
         )
-        discovery_existed, discovery_body, discovery_generation = _capture_protected_setup_file(
-            os.path.join(os.path.abspath(os.fspath(data_dir)), _AGENT_DISCOVERY_FILENAME),
-            _AGENT_DISCOVERY_MAX_BYTES,
-            "agent_discovery.json",
-        )
+        discovery_existed, discovery_body, discovery_generation = _capture_setup_agent_discovery_file(data_dir)
         lock_existed, lock_body, lock_generation = _capture_protected_setup_file(
             os.path.join(os.path.abspath(os.fspath(data_dir)), _HOOK_CONTRACT_LOCK_FILENAME),
             _HOOK_CONTRACT_LOCK_MAX_BYTES,
@@ -8506,11 +8531,18 @@ def _restore_setup_agent_selection_snapshot(cfg, snapshot: _SetupConfigSnapshot)
 
 def _restore_setup_agent_discovery_snapshot(cfg, snapshot: _SetupConfigSnapshot) -> None:
     """Restore peer versions that the prior guarded runtime used at startup."""
+    _restore_setup_agent_discovery_state(
+        cfg, snapshot.agent_discovery_existed, snapshot.agent_discovery_bytes
+    )
+
+
+def _restore_setup_agent_discovery_state(cfg, existed: bool, body: bytes) -> None:
+    """Restore the protected cache captured before setup's version preflight."""
     if not cfg.data_dir:
         return
     path = os.path.join(os.path.abspath(os.fspath(cfg.data_dir)), _AGENT_DISCOVERY_FILENAME)
-    if snapshot.agent_discovery_existed:
-        atomic_write_private_bytes(path, snapshot.agent_discovery_bytes)
+    if existed:
+        atomic_write_private_bytes(path, body)
     elif os.path.lexists(path):
         delete_file_durable(path)
 
@@ -9969,6 +10001,19 @@ def _apply_hook_connector_setup(
         desired_mode = "observe"
 
     exact_windows_opencode = _windows_opencode_requires_exact_selection(connector)
+    data_dir = getattr(app.cfg, "data_dir", None)
+    prior_discovery: tuple[bool, bytes, tuple[int, int, int, int] | None] | None = None
+    if data_dir and not _version_preflighted and not exact_windows_opencode:
+        prior_discovery = _capture_setup_prior_agent_discovery(data_dir)
+
+    def restore_preflight_discovery() -> None:
+        if prior_discovery is None:
+            return
+        try:
+            _restore_setup_agent_discovery_state(app.cfg, prior_discovery[0], prior_discovery[1])
+        except OSError as exc:
+            raise click.ClickException("connector setup preflight could not restore agent_discovery.json") from exc
+
     # Preserve the predecessor's ordering for every non-OpenCode connector:
     # generic version admission still precedes rule-pack validation and the
     # setup snapshot. Only native-Windows OpenCode takes the exact-selection
@@ -9993,13 +10038,22 @@ def _apply_hook_connector_setup(
                 ux.warn(f"{label}: requested action mode was refused; configuring observe mode instead.")
                 desired_mode = "observe"
             else:
+                restore_preflight_discovery()
                 return False
 
     cfg = app.cfg
     gc = cfg.guardrail
     try:
         setup_snapshot = _capture_setup_config_snapshot(app.cfg, capture_runtime=_windows_runtime_rollback(restart))
+        if prior_discovery is not None:
+            setup_snapshot = replace(
+                setup_snapshot,
+                agent_discovery_existed=prior_discovery[0],
+                agent_discovery_bytes=prior_discovery[1],
+                agent_discovery_generation=prior_discovery[2],
+            )
     except _SetupGatewayNoAnswerError as exc:
+        restore_preflight_discovery()
         # Same next step as the busy-gateway restart check (GAP-1668).
         ux.echo(
             f"  ✗ Setup did not start: {exc}; the host may be busy.\n"
@@ -10008,6 +10062,7 @@ def _apply_hook_connector_setup(
         )
         return False
     except OSError as exc:
+        restore_preflight_discovery()
         ux.echo(
             f"  ✗ Cannot establish connector setup rollback point: {exc}\n"
             f"    {_SETUP_ROLLBACK_POINT_NEXT_STEP}",
