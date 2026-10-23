@@ -42,6 +42,9 @@ type hotConfigHost struct {
 	adoptAfter    int
 	refreshes     int
 	stops         int
+	closes        int
+	closureHeld   bool
+	releases      int
 	bundleID      string
 	bundleVersion uint64
 }
@@ -106,10 +109,12 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 	timeoutSeam, restartTimeoutSeam, pollSeam := windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigRestartTimeout, windowsEnterpriseHotConfigPoll
 	sourceSeam, refreshSeam := windowsEnterpriseHotConfigSourceCheck, windowsEnterpriseHotConfigRefreshTargets
 	reloadSeam, failClosedSeam := windowsEnterpriseHotBundleReload, windowsEnterpriseHotConfigFailClosed
+	closeHooksSeam, hooksHeldSeam, releaseHooksSeam := windowsEnterpriseHotConfigCloseHooks, windowsEnterpriseHotConfigHooksHeld, windowsEnterpriseHotConfigReleaseHooks
 	restartSeam, recoverSeam := windowsEnterpriseHotConfigRestart, windowsEnterpriseHotConfigRecover
 	t.Cleanup(func() {
 		windowsEnterpriseHotConfigRestart, windowsEnterpriseHotConfigRecover = restartSeam, recoverSeam
 		windowsEnterpriseHotConfigFailClosed = failClosedSeam
+		windowsEnterpriseHotConfigCloseHooks, windowsEnterpriseHotConfigHooksHeld, windowsEnterpriseHotConfigReleaseHooks = closeHooksSeam, hooksHeldSeam, releaseHooksSeam
 		windowsEnterpriseHotConfigRefreshTargets = refreshSeam
 		windowsEnterpriseIsElevated = elevatedSeam
 		windowsEnterpriseHotConfigLayout, windowsEnterpriseHotConfigLock = layoutSeam, lockSeam
@@ -132,7 +137,24 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 	windowsEnterpriseHotBundleReload = func(context.Context, managed.StandaloneLayout) error { return nil }
 	// No test stops or starts a real gateway service: an unproven undo and
 	// a start of a stopped gateway are counted.
-	windowsEnterpriseHotConfigFailClosed = func() error { host.stops++; return nil }
+	windowsEnterpriseHotConfigCloseHooks = func(managed.StandaloneLayout) error {
+		host.closes++
+		host.closureHeld = true
+		return nil
+	}
+	windowsEnterpriseHotConfigHooksHeld = func() (bool, error) { return host.closureHeld, nil }
+	windowsEnterpriseHotConfigReleaseHooks = func(managed.StandaloneLayout) error {
+		host.releases++
+		host.closureHeld = false
+		return nil
+	}
+	windowsEnterpriseHotConfigFailClosed = func() error {
+		if !host.closureHeld {
+			t.Fatal("unproven undo stopped the gateway before managed hooks were durably closed")
+		}
+		host.stops++
+		return nil
+	}
 	windowsEnterpriseHotConfigRecover = func() (bool, error) { host.recovers++; return false, nil }
 	custodySeam := windowsEnterpriseInstalledCLICustody
 	t.Cleanup(func() { windowsEnterpriseInstalledCLICustody = custodySeam })
@@ -175,6 +197,51 @@ func runHotConfigEnsure(t *testing.T, host *hotConfigHost, opts *windowsEnterpri
 		t.Fatal(err)
 	}
 	return &result
+}
+
+func TestWindowsEnterpriseHotConfigClosureSurvivesUntilPolicyProof(t *testing.T) {
+	const config = "config_version: 9\nguardrail:\n  hook_fail_mode: open\n"
+	for _, tc := range []struct {
+		name         string
+		verified     bool
+		digestFails  bool
+		releaseFails bool
+		wantRelease  bool
+	}{
+		{name: "failed ensure leaves closure", verified: false},
+		{name: "policy readback unavailable leaves closure", verified: true, digestFails: true},
+		{name: "release failure leaves closure", verified: true, releaseFails: true},
+		{name: "proven recovery releases closure", verified: true, wantRelease: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host, _ := newHotConfigHost(t, config, config)
+			host.closureHeld = true
+			host.adopted = true
+			digest := windowsEnterprisePolicyDigest
+			t.Cleanup(func() { windowsEnterprisePolicyDigest = digest })
+			windowsEnterprisePolicyDigest = host.digest
+			if tc.digestFails {
+				windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) { return nil, errors.New("readback unavailable") }
+			}
+			if tc.releaseFails {
+				windowsEnterpriseHotConfigReleaseHooks = func(managed.StandaloneLayout) error { return errors.New("release refused") }
+			}
+			result := newWindowsEnterpriseStandaloneResult("ensure", ensureTestOptions())
+			result.OK, result.Installed = tc.verified, true
+			code := 1
+			if tc.verified {
+				code = 0
+			}
+			err := windowsEnterpriseReleaseHotConfigClosureIfProven(context.Background(), result, code)
+			if tc.wantRelease {
+				if err != nil || host.closureHeld || host.releases != 1 {
+					t.Fatalf("proven recovery: err=%v held=%t releases=%d", err, host.closureHeld, host.releases)
+				}
+			} else if !host.closureHeld || host.releases != 0 || (tc.verified && err == nil) {
+				t.Fatalf("unproven recovery: err=%v held=%t releases=%d", err, host.closureHeld, host.releases)
+			}
+		})
+	}
 }
 
 // GAP-0135: a change the running gateway applies as a generation swap no

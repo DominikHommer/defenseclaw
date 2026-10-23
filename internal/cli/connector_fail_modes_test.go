@@ -259,16 +259,17 @@ func TestRefreshFailModesKeepsA08xAutomaticProtectionOpen(t *testing.T) {
 	}
 }
 
-// The installers run the refresh with --hold-until-exit for a running
-// gateway: it says when the first refresh is written and the lock held,
-// and it ends only once that gateway has exited.
+// An accepted empty-record retry holds --closed over the running older
+// gateway even when the config explicitly selects outage-open. The hold
+// refreshes again after that gateway exits, so its last render cannot reopen
+// hooks before the checked replacement is installed.
 func TestRefreshFailModesHoldsUntilTheGatewayExits(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses sleep(1) as the gateway")
 	}
 	home := t.TempDir()
 	isolateHookEnvForTest(t, home)
-	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("config_version: 7\nguardrail:\n  mode: observe\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("config_version: 7\nguardrail:\n  mode: observe\n  hook_fail_mode: open\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	writeHookSidecarForTest(t, home, `{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":{"codex":"open"}}`)
@@ -280,13 +281,16 @@ func TestRefreshFailModesHoldsUntilTheGatewayExits(t *testing.T) {
 
 	previousCfg, previousDir, previousJSON := cfg, connectorFlagDataDir, connectorFlagJSON
 	previousPID, previousTimeout := refreshFailModesHoldPID, refreshFailModesHoldTimeout
+	previousClosed := refreshFailModesClosed
 	t.Cleanup(func() {
 		cfg, connectorFlagDataDir, connectorFlagJSON = previousCfg, previousDir, previousJSON
 		refreshFailModesHoldPID, refreshFailModesHoldTimeout = previousPID, previousTimeout
+		refreshFailModesClosed = previousClosed
 		connectorRefreshFailModesCmd.SetOut(nil)
 	})
 	connectorFlagDataDir, connectorFlagJSON = home, false
 	refreshFailModesHoldPID, refreshFailModesHoldTimeout = gateway.Process.Pid, time.Minute
+	refreshFailModesClosed = true
 	reader, writer := io.Pipe()
 	connectorRefreshFailModesCmd.SetOut(writer)
 	done := make(chan error, 1)
@@ -329,6 +333,9 @@ func TestRefreshFailModesHoldsUntilTheGatewayExits(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("the hold did not end after the gateway exited")
 	}
+	if got := oldHookFailMode(t, home, "codex"); got != "closed" {
+		t.Fatalf("after the gateway exited the old hook reads %q, want closed", got)
+	}
 }
 
 // W4b loop round 2: install.ps1 stops with its install unfinished (a restore
@@ -336,7 +343,7 @@ func TestRefreshFailModesHoldsUntilTheGatewayExits(t *testing.T) {
 // they do not match, with the gateway down). It closes every hook with
 // --closed, an open the config chooses included, so no hook follows an
 // outage open until the gateway renders them again. A managed install is
-// left alone, and --closed never takes a hold.
+// left alone.
 func TestRefreshFailModesClosedClosesEveryHookWhateverTheConfigChooses(t *testing.T) {
 	previous := refreshFailModesClosed
 	t.Cleanup(func() { refreshFailModesClosed = previous })
@@ -384,18 +391,6 @@ func TestRefreshFailModesClosedClosesEveryHookWhateverTheConfigChooses(t *testin
 		}
 		if got, _ := os.ReadFile(filepath.Join(home, "hooks", ".hookcfg")); string(got) != body {
 			t.Fatalf("managed sidecar rewritten: %s", got)
-		}
-	})
-	t.Run("no hold", func(t *testing.T) {
-		previousPID, previousDir, previousJSON := refreshFailModesHoldPID, connectorFlagDataDir, connectorFlagJSON
-		t.Cleanup(func() {
-			refreshFailModesHoldPID, connectorFlagDataDir, connectorFlagJSON = previousPID, previousDir, previousJSON
-		})
-		home := t.TempDir()
-		isolateHookEnvForTest(t, home)
-		connectorFlagDataDir, connectorFlagJSON, refreshFailModesHoldPID, refreshFailModesClosed = home, false, os.Getpid(), true
-		if err := runConnectorRefreshFailModes(connectorRefreshFailModesCmd, nil); err == nil || !strings.Contains(err.Error(), "--closed does not take --hold-until-exit") {
-			t.Fatalf("--closed with a hold: %v", err)
 		}
 	})
 }

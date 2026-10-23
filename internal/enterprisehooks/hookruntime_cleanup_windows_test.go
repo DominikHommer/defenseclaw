@@ -66,6 +66,13 @@ func TestRemoveWindowsStandaloneHookRuntimeDirectoriesRemovesOnlyEmptiedDirector
 	writeHookRuntimeFile(t, filepath.Join(root, "devin", windowsPerUserManagedEnrollmentLockFile))
 	enrollment := filepath.Join(root, "devin", windowsPerUserManagedEnrollmentFile)
 	writeHookRuntimeFile(t, enrollment)
+	closure := filepath.Join(root, windowsStandaloneHookClosureFile)
+	if err := os.WriteFile(closure, windowsStandaloneHookClosureBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trust := windowsManagedPolicyFileTrustCheck
+	windowsManagedPolicyFileTrustCheck = func(string) error { return nil }
+	t.Cleanup(func() { windowsManagedPolicyFileTrustCheck = trust })
 
 	kept, err := RemoveWindowsStandaloneHookRuntimeDirectories()
 	if err != nil {
@@ -79,6 +86,9 @@ func TestRemoveWindowsStandaloneHookRuntimeDirectoriesRemovesOnlyEmptiedDirector
 	}
 	if len(kept) != 2 {
 		t.Fatalf("kept = %v, want the devin directory and the root", kept)
+	}
+	if held, err := readWindowsStandaloneHookClosure(closure); err != nil || !held {
+		t.Fatalf("incomplete teardown removed the hook closure: held=%t err=%v", held, err)
 	}
 
 	if err := os.Remove(enrollment); err != nil {
