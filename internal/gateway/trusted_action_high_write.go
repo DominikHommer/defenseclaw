@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"os"
 	"path"
 	"path/filepath"
 	"runtime"
@@ -172,7 +173,21 @@ func highWriteRuleMatchesTarget(rule PatternRule, resolved string, flavor action
 		instruction = "gateway.json"
 	}
 	if instruction != "" {
-		return activeAgentInstructionBaseMatches(name, flavor, instruction)
+		if activeAgentInstructionBaseMatches(name, flavor, instruction) {
+			return true
+		}
+		// A case-folded spelling can name the same inode on macOS or a
+		// case-folded Linux volume. A distinct lowercase file remains separate
+		// on case-sensitive POSIX filesystems. An exact file-identity check also
+		// covers a hard link to the active instruction file.
+		if flavor == actionfacts.PathFlavorPOSIX && activeAgentASCIIEqualFold(name, instruction) {
+			aliasInfo, aliasErr := os.Stat(resolved)
+			canonicalInfo, canonicalErr := os.Stat(filepath.Join(filepath.Dir(resolved), instruction))
+			return aliasErr == nil && canonicalErr == nil &&
+				aliasInfo.Mode().IsRegular() && canonicalInfo.Mode().IsRegular() &&
+				os.SameFile(aliasInfo, canonicalInfo)
+		}
+		return false
 	}
 	return rule.Pattern.MatchString(resolved)
 }

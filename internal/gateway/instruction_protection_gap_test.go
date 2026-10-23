@@ -200,6 +200,61 @@ func TestInstructionProtectionPOSIXCaseRequiresExactInstructionName(t *testing.T
 	}
 }
 
+func TestInstructionProtectionCaseInsensitivePOSIXAlias(t *testing.T) {
+	for _, tc := range []struct{ canonical, alias, rule string }{
+		{"CLAUDE.md", "claude.md", "COG-CLAUDE-MD"},
+		{"openclaw.json", "openclaw.JSON", "COG-OPENCLAW-JSON"},
+	} {
+		t.Run(tc.canonical, func(t *testing.T) {
+			root := t.TempDir()
+			canonical := writeActiveAgentTestFile(t, root, tc.canonical)
+			alias := filepath.Join(root, tc.alias)
+			originalInfo, err := os.Stat(canonical)
+			if err != nil {
+				t.Fatal(err)
+			}
+			aliasInfo, err := os.Stat(alias)
+			if err != nil || !os.SameFile(originalInfo, aliasInfo) {
+				t.Skip("this POSIX volume is case-sensitive")
+			}
+			input := map[string]interface{}{"command": "printf changed > " + tc.alias}
+			ctx := withAuthenticatedHookConnector(
+				instructionResolvedWriteContext(t, root, "Bash", input), "claudecode",
+			)
+			response := instructionProtectionTestAPI(t, "claudecode", "action", "HIGH").evaluateClaudeCodeHook(
+				ctx, claudeCodeHookRequest{
+					HookEventName: "PreToolUse", SessionID: "case-alias", CWD: root,
+					ToolName: "Bash", ToolInput: input,
+				})
+			if response.Action != guardrailActionBlock || !findingStringHasRuleID(response.Findings, tc.rule) {
+				t.Fatalf("case alias %q reached an active %q: action=%q findings=%v", tc.alias, tc.canonical, response.Action, response.Findings)
+			}
+		})
+	}
+}
+
+func TestInstructionProtectionPOSIXCaseAliasHardLink(t *testing.T) {
+	root := t.TempDir()
+	canonical := writeActiveAgentTestFile(t, root, "CLAUDE.md")
+	alias := filepath.Join(root, "claude.md")
+	if err := os.Link(canonical, alias); err != nil {
+		if os.IsExist(err) {
+			t.Skip("this POSIX volume is already case-insensitive")
+		}
+		t.Fatal(err)
+	}
+	input := map[string]interface{}{"command": "printf changed > claude.md"}
+	ctx := withAuthenticatedHookConnector(instructionResolvedWriteContext(t, root, "Bash", input), "claudecode")
+	response := instructionProtectionTestAPI(t, "claudecode", "action", "HIGH").evaluateClaudeCodeHook(
+		ctx, claudeCodeHookRequest{
+			HookEventName: "PreToolUse", SessionID: "hardlink-alias", CWD: root,
+			ToolName: "Bash", ToolInput: input,
+		})
+	if response.Action != guardrailActionBlock || !findingStringHasRuleID(response.Findings, "COG-CLAUDE-MD") {
+		t.Fatalf("hard link to active CLAUDE.md: action=%q findings=%v", response.Action, response.Findings)
+	}
+}
+
 func TestInstructionProtectionSharedConnectorAndFileMatrix(t *testing.T) {
 	for _, connectorName := range connector.NewDefaultRegistry().Names() {
 		t.Run(connectorName, func(t *testing.T) {
