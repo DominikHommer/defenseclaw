@@ -80,6 +80,7 @@ from defenseclaw.file_permissions import (
     dotenv_key_is_process_control,
     dotenv_key_is_valid,
     read_regular_file_no_follow,
+    tracked_host_owner_uid,
 )
 
 # libyaml parses a 150 KB policy config in tens of milliseconds where the
@@ -760,7 +761,7 @@ def _managed_config_trust_problem(path: str) -> str | None:
         if acl_problem is not None:
             return acl_problem
 
-        owner_uid = getattr(info, "st_uid", None)
+        owner_uid = tracked_host_owner_uid(current, info) if hasattr(info, "st_uid") else None
         if owner_uid is None:
             return f"{current}: cannot inspect path owner"
         if owner_uid != 0:

@@ -20,57 +20,52 @@ package processutil
 
 import (
 	"fmt"
-	"os"
 	"runtime"
-	"strconv"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
 
-// seccompArch is the audit architecture of each Linux release build.
 var seccompArch = map[string]uint32{"amd64": unix.AUDIT_ARCH_X86_64, "arm64": unix.AUDIT_ARCH_AARCH64}
 
-// seccomp_data offsets: the syscall number, the architecture and the low
-// 32 bits of each argument (both release architectures are little endian).
 const (
 	seccompNROffset   = 0
 	seccompArchOffset = 4
 )
 
-// The ioctls that set an I/O owner (asm-generic/sockios.h).
-const (
-	ioctlFIOSETOWN = 0x8901
-	ioctlSIOCSPGRP = 0x8902
-)
-
 func seccompArg(i uint32) uint32 { return 16 + 8*i }
 
-// guardCustodian protects the custodian and its gateway parent while allowing
-// a scanner to signal itself and the children it starts by positive PID. A
-// non-leader thread ID can signal its entire group, so list every thread ID
-// before the command starts. The gateway is also a subreaper and sweeps any
-// orphan it adopts if the custodian nevertheless dies (GAP-0631).
-// tgkill and rt_tgsigqueueinfo expose the target's thread-group ID and are
-// refused for both protected processes; tkill and pidfd_send_signal hide the
-// group and are refused outright (pidfd_send_signal reports ENOSYS so runtimes
-// can fall back to kill). Ptrace and cross-process memory/fd access cannot
-// inject a signal from an unfiltered thread. The filter is installed with
-// prctl, which applies to this thread alone and which the gateway unit allows.
-func guardCustodian(custodian int) error {
-	gateway, err := parentPID(custodian)
-	if err != nil {
-		return err
+// guardTrackedInit is installed before the trusted PID-namespace init execs
+// the scanner. A scanner cannot clear the parent-death signal that links its
+// PID 1 to the launcher. Its own children remain signalable by positive PID.
+// The gateway and launcher are outside this PID namespace and non-dumpable;
+// the filter also refuses APIs that would inspect or inject into their memory.
+func guardTrackedInit() error {
+	arch, ok := seccompArch[runtime.GOARCH]
+	if !ok {
+		return fmt.Errorf("processutil: no seccomp architecture for %s", runtime.GOARCH)
 	}
-	gatewayGroup, err := unix.Getpgid(gateway)
-	if err != nil {
-		return err
+	var a bpfAssembler
+	a.load(seccompArchOffset)
+	a.jeq(arch, "", "eperm")
+	a.load(seccompNROffset)
+	if runtime.GOARCH == "amd64" {
+		a.jge(0x40000000, "eperm", "")
 	}
-	protected, err := protectedThreadIDs(custodian, gateway)
-	if err != nil {
-		return err
-	}
-	filter, err := custodianGuardFilter(uint32(custodian), uint32(gateway), uint32(-gatewayGroup), protected)
+	a.jeq(unix.SYS_PRCTL, "prctl", "")
+	a.jeq(unix.SYS_PTRACE, "eperm", "")
+	a.jeq(unix.SYS_PROCESS_VM_READV, "eperm", "")
+	a.jeq(unix.SYS_PROCESS_VM_WRITEV, "eperm", "")
+	a.jeq(unix.SYS_PIDFD_GETFD, "eperm", "")
+	a.ret(unix.SECCOMP_RET_ALLOW)
+	a.label("prctl")
+	a.load(seccompArg(0))
+	a.jeq(unix.PR_SET_PDEATHSIG, "eperm", "allow")
+	a.label("allow")
+	a.ret(unix.SECCOMP_RET_ALLOW)
+	a.label("eperm")
+	a.ret(unix.SECCOMP_RET_ERRNO | uint32(unix.EPERM))
+	filter, err := a.assemble()
 	if err != nil {
 		return err
 	}
@@ -83,121 +78,9 @@ func guardCustodian(custodian int) error {
 	return err
 }
 
-func protectedThreadIDs(processes ...int) ([]uint32, error) {
-	var ids []uint32
-	for _, process := range processes {
-		entries, err := os.ReadDir("/proc/" + strconv.Itoa(process) + "/task")
-		if err != nil {
-			return nil, fmt.Errorf("processutil: cannot list protected threads of %d: %w", process, err)
-		}
-		if len(entries) == 0 {
-			return nil, fmt.Errorf("processutil: no protected threads of %d", process)
-		}
-		for _, entry := range entries {
-			id, err := strconv.ParseUint(entry.Name(), 10, 32)
-			if err != nil {
-				return nil, err
-			}
-			ids = append(ids, uint32(id))
-		}
-	}
-	return ids, nil
-}
-
-// custodianGuardFilter assembles guardCustodian's filter for the running
-// architecture.
-func custodianGuardFilter(custodian, gateway, gatewayGroup uint32, protected []uint32) ([]unix.SockFilter, error) {
-	arch, ok := seccompArch[runtime.GOARCH]
-	if !ok {
-		return nil, fmt.Errorf("processutil: no seccomp architecture for %s", runtime.GOARCH)
-	}
-	group := -custodian // two's complement, as the kernel reads the pid_t
-	var a bpfAssembler
-	a.load(seccompArchOffset)
-	a.jeq(arch, "", "eperm")
-	a.load(seccompNROffset)
-	if runtime.GOARCH == "amd64" {
-		// x32 system calls share the architecture with a flag in the number.
-		a.jge(0x40000000, "eperm", "")
-	}
-	a.jeq(unix.SYS_KILL, "kill", "")
-	a.jeq(unix.SYS_TGKILL, "process", "")
-	a.jeq(unix.SYS_RT_SIGQUEUEINFO, "signal", "")
-	a.jeq(unix.SYS_RT_TGSIGQUEUEINFO, "process", "")
-	a.jeq(unix.SYS_TKILL, "eperm", "")
-	a.jeq(unix.SYS_PIDFD_SEND_SIGNAL, "enosys", "")
-	a.jeq(unix.SYS_PRLIMIT64, "prlimit", "")
-	a.jeq(unix.SYS_FCNTL, "fcntl", "")
-	a.jeq(unix.SYS_IOCTL, "ioctl", "")
-	a.jeq(unix.SYS_PTRACE, "eperm", "")
-	a.jeq(unix.SYS_PROCESS_VM_READV, "eperm", "")
-	a.jeq(unix.SYS_PROCESS_VM_WRITEV, "eperm", "")
-	a.jeq(unix.SYS_PIDFD_GETFD, "eperm", "")
-	a.ret(unix.SECCOMP_RET_ALLOW)
-
-	a.label("kill")
-	a.load(seccompArg(1))
-	a.jeq(0, "allow", "") // a liveness probe sends no signal
-	a.load(seccompArg(0))
-	a.jeq(0, "allow", "") // only the caller's group; a different session
-	a.jge(0x80000000, "killgroup", "signal")
-
-	a.label("killgroup")
-	a.jeq(group, "eperm", "")
-	a.jeq(gatewayGroup, "eperm", "")
-	a.jeq(0xffffffff, "eperm", "allow")
-
-	a.label("signal")
-	a.load(seccompArg(0))
-	for _, id := range protected {
-		a.denyIfEqual(id)
-	}
-	a.ret(unix.SECCOMP_RET_ALLOW)
-
-	a.label("process")
-	a.load(seccompArg(0))
-	a.jeq(custodian, "eperm", "")
-	a.jeq(gateway, "eperm", "allow")
-
-	a.label("prlimit")
-	a.load(seccompArg(0))
-	a.jeq(0, "allow", "eperm")
-
-	a.label("fcntl")
-	a.load(seccompArg(1))
-	a.jeq(unix.F_SETOWN_EX, "eperm", "")
-	a.jeq(unix.F_SETOWN, "", "allow")
-	a.load(seccompArg(2))
-	a.jeq(0, "allow", "")
-	a.jge(0x80000000, "fcntlgroup", "signalOwner")
-
-	a.label("fcntlgroup")
-	a.jeq(group, "eperm", "")
-	a.jeq(gatewayGroup, "eperm", "allow")
-	a.label("signalOwner")
-	for _, id := range protected {
-		a.denyIfEqual(id)
-	}
-	a.ret(unix.SECCOMP_RET_ALLOW)
-
-	a.label("ioctl")
-	a.load(seccompArg(1))
-	a.jeq(ioctlFIOSETOWN, "eperm", "")
-	a.jeq(ioctlSIOCSPGRP, "eperm", "allow")
-
-	a.label("allow")
-	a.ret(unix.SECCOMP_RET_ALLOW)
-	a.label("eperm")
-	a.ret(unix.SECCOMP_RET_ERRNO | uint32(unix.EPERM))
-	a.label("enosys")
-	a.ret(unix.SECCOMP_RET_ERRNO | uint32(unix.ENOSYS))
-	return a.assemble()
-}
-
 // bpfAssembler builds a classic BPF program whose jumps name their targets.
 // Conditional BPF branches have only eight-bit offsets. Two adjacent JA
-// trampolines give each branch the full 32-bit forward range, including when
-// a busy gateway has many protected threads.
+// trampolines give each branch the full 32-bit forward range.
 type bpfAssembler struct {
 	insns  []unix.SockFilter
 	jumps  map[int]bpfJumpTarget
@@ -220,15 +103,6 @@ func (a *bpfAssembler) ret(k uint32) { a.emit(unix.BPF_RET|unix.BPF_K, k) }
 func (a *bpfAssembler) jeq(k uint32, jt, jf string) { a.jump(unix.BPF_JEQ, k, jt, jf) }
 
 func (a *bpfAssembler) jge(k uint32, jt, jf string) { a.jump(unix.BPF_JGE, k, jt, jf) }
-
-func (a *bpfAssembler) denyIfEqual(k uint32) {
-	deny := fmt.Sprintf("deny%d", len(a.insns))
-	next := fmt.Sprintf("next%d", len(a.insns))
-	a.jeq(k, deny, next)
-	a.label(deny)
-	a.ret(unix.SECCOMP_RET_ERRNO | uint32(unix.EPERM))
-	a.label(next)
-}
 
 func (a *bpfAssembler) jump(op uint16, k uint32, jt, jf string) {
 	if a.jumps == nil {

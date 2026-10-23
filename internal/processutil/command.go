@@ -98,19 +98,21 @@ func RunContained(cmd *exec.Cmd) error {
 // killed when the command exits, when cmd is canceled and when this process
 // dies, however it dies.
 //
-// On Linux the kernel reparents every orphan of the tree to a
-// child-subreaper custodian, also one that left the group or session, and the
-// custodian kills and reaps them all; when it cannot, RunTracked returns
-// ErrNotContained. The command can signal itself and its children by PID.
-// The runner refuses signals to the custodian and gateway's known thread IDs,
-// remote prlimit, ptrace and cross-process memory/fd access; it starts a
-// separate session, and both the runner and custodian are not dumpable. The
-// gateway is also a subreaper and kills scanner orphans if the custodian dies
-// unexpectedly (GAP-0631). A user namespace like RunContained's would show
-// root-owned files as owned by the overflow user to the scanner. On macOS a
-// supervisor, a short-lived copy of
-// this binary in a process group of its own, runs the command in a session of its own. It
-// follows every descendant with kqueue NOTE_FORK and NOTE_EXIT and the
+// On Linux a trusted launcher starts the command as PID 1 of a new PID and
+// user namespace. When the command exits, the kernel ends every process in
+// that namespace, including detached children. The gateway holds the
+// launcher's pidfd, and the launcher holds the command's pidfd. Parent-death
+// signals link both processes to their owners. The command can signal its
+// children by PID; the gateway and launcher are outside its PID namespace and
+// non-dumpable, and its inherited seccomp filter refuses ptrace, cross-process
+// memory/fd access and clearing its parent-death signal. A read-only launcher
+// channel reports the real UID of an inode after matching its device and
+// inode numbers, so managed root-owned files retain their custody checks.
+// If a namespace, pidfd or filter cannot be established, nothing from the
+// command runs and RunTracked returns ErrNotContained.
+// On macOS a supervisor, a short-lived copy of this binary in a process
+// group of its own, runs the command in a session of its own. It follows
+// every descendant with kqueue NOTE_FORK and NOTE_EXIT and the
 // process table, by parent, group and session, also once it starts a
 // session of its own; it watches this process with NOTE_EXIT. To end the
 // tree it stops every process, reads the table again until nothing new
@@ -125,10 +127,10 @@ func RunContained(cmd *exec.Cmd) error {
 // Object refuses breakaway. Other platforms never run cmd and return
 // ErrNotContained.
 //
-// cmd must not have been started. On macOS it must not set ExtraFiles.
-// Linux and macOS set a bounded WaitDelay when needed so a dead supervisor
-// cannot leave RunTracked waiting on a descendant's pipe. cmd.Cancel asks
-// the supervisor to end the tree.
+// cmd must not have been started. On Linux and macOS it must not set
+// ExtraFiles. Both platforms set a bounded WaitDelay when needed so a dead
+// supervisor cannot leave RunTracked waiting on a descendant's pipe.
+// cmd.Cancel asks the supervisor to end the tree.
 func RunTracked(cmd *exec.Cmd) error {
 	return runTracked(cmd)
 }
