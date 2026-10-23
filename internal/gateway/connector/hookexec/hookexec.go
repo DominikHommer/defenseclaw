@@ -429,6 +429,11 @@ func runHook(ctx context.Context, opts Options) int {
 		fmt.Fprintf(opts.Stderr, "defenseclaw: unknown hook connector %q\n", opts.Connector)
 		return blockExit
 	}
+	if sp.connector == "copilot" && perUserInstallWindow(opts) {
+		if code, blocked := blockPerUserCopilotInstall(opts, sp); blocked {
+			return code
+		}
+	}
 	// A managed hook's FailMode comes from administrator-owned runtime state
 	// only (internal/cli: the Windows runtime generation or the Unix runtime
 	// descriptor), never from a connector or the caller's environment.
@@ -1273,6 +1278,11 @@ func validCopilotEvent(event string) bool {
 // decide shapes the connector-native stdout + exit code from a 2xx gateway
 // response body, returning a fail_response result if the body is not JSON.
 func (sp spec) decide(opts Options, body []byte) int {
+	if sp.connector == "copilot" && perUserInstallWindow(opts) {
+		if code, blocked := blockPerUserCopilotInstall(opts, sp); blocked {
+			return code
+		}
+	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(body, &fields); err != nil {
 		return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "invalid JSON response")
@@ -1802,6 +1812,13 @@ func handleOversized(opts Options, sp spec, failMode string, prefix []byte) int 
 // host the explicit allow is given only for an outage withManagedOutage
 // marked; any other path gets the empty answer, which the plugin blocks.
 func emitFailOpenAllow(opts Options, sp spec, reason string) int {
+	// The installer may acquire the lock while the gateway call is in flight.
+	// Recheck at the last shared fail-open exit as well as at hook entry.
+	if sp.connector == "copilot" && perUserInstallWindow(opts) {
+		if code, blocked := blockPerUserCopilotInstall(opts, sp); blocked {
+			return code
+		}
+	}
 	if sp.connector == "opencode" && opts.ManagedEnterprise && (!managedNativeDecision(opts) || opts.managedOutageOpen) {
 		fmt.Fprintln(opts.Stdout, openCodeFailOpenBody(openCodeFailOpenNotice(reason)))
 		return 0
@@ -1815,6 +1832,11 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 		// An install or upgrade stops this account's gateway and starts it
 		// again when it is done. That window is not an outage, so an open
 		// fail mode does not let the call through unchecked (GAP-0649).
+		if sp.connector == "copilot" {
+			if code, blocked := blockPerUserCopilotInstall(opts, sp); blocked {
+				return code
+			}
+		}
 		failMode = "closed"
 		opts.FailMode = "closed"
 	}
@@ -1870,7 +1892,43 @@ func perUserInstallWindow(opts Options) bool {
 		return false
 	}
 	_, err := os.Lstat(filepath.Join(opts.Home, installLockName))
-	return err == nil
+	return !errors.Is(err, os.ErrNotExist)
+}
+
+// Copilot ignores a failed hook process. During a per-user install it needs
+// the native deny for each actionable event before any launcher or gateway
+// failure can turn into an unchecked call. Lifecycle events have no blocking
+// response and remain neutral so an agent can stop.
+func blockPerUserCopilotInstall(opts Options, sp spec) (int, bool) {
+	if NeutralLifecycleEvent(sp.connector, opts.Event) {
+		return 0, false
+	}
+	message := perUserGatewayDownText(opts, "gateway unreachable")
+	quoted := mustJSONString(message)
+	var body string
+	if sp.dialect == copilotVSCodeLocalSurface {
+		body = copilotVSCodeLocalOutput(opts.Event, "block", message)
+	} else {
+		switch opts.Event {
+		case "preToolUse":
+			body = `{"permissionDecision":"deny","permissionDecisionReason":` + quoted + `}`
+		case "permissionRequest":
+			body = `{"behavior":"deny","message":` + quoted + `}`
+		default:
+			// An unreviewed event binding must not open a tool call while
+			// the installer holds the lock. Copilot ignores fields it cannot
+			// use on lifecycle events.
+			body = `{"permissionDecision":"deny","permissionDecisionReason":` + quoted +
+				`,"behavior":"deny","message":` + quoted + `}`
+		}
+	}
+	if body == "" {
+		return 0, false
+	}
+	logHookFailure(opts, sp, "per-user install or upgrade in progress", "transport", "closed", true)
+	fmt.Fprintln(opts.Stderr, "defenseclaw: blocking Copilot call while DefenseClaw is being installed or upgraded")
+	fmt.Fprintln(opts.Stdout, body)
+	return 0, true
 }
 
 const coldStartFailedReason = "gateway cold start failed"
@@ -2192,6 +2250,11 @@ func rawString(fields map[string]json.RawMessage, key string) (string, bool) {
 
 // failResponse mirrors the response-layer failure path: honor FAIL_MODE.
 func failResponse(opts Options, sp spec, failMode, reason string) int {
+	if sp.connector == "copilot" && perUserInstallWindow(opts) {
+		if code, blocked := blockPerUserCopilotInstall(opts, sp); blocked {
+			return code
+		}
+	}
 	// The gateway answered, or a local check failed: never an outage.
 	failMode = managedNonOutageMode(&opts, failMode)
 	if failMode == "closed" {

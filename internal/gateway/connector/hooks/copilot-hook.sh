@@ -1,9 +1,50 @@
 #!/bin/bash
-{{$fail := "0"}}{{if .Sandbox}}{{$fail = "2"}}{{end}}{{$failure := printf "exit %s" $fail}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}{{$failure = "copilot_managed_failure"}}{{end}}# defenseclaw-managed-hook v7
+{{$fail := "0"}}{{if .Sandbox}}{{$fail = "2"}}{{end}}{{$failure := printf "exit %s" $fail}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}{{$failure = "copilot_managed_failure"}}{{end}}{{if and (not .Managed) (not .Sandbox)}}{{$failure = "copilot_per_user_failure"}}{{end}}# defenseclaw-managed-hook v7
 # DefenseClaw Copilot CLI hook — forwards Copilot CLI hook payloads to the
 # DefenseClaw gateway.
 set -euo pipefail
-{{if and .Managed (not .SecureClient) (not .Sandbox)}}# Copilot consumes a native JSON denial on tool boundaries. Keep this
+{{if and (not .Managed) (not .Sandbox)}}# Copilot ignores a failed hook process. During an install or upgrade,
+# answer actionable events with its native denial even if helpers, the token,
+# or the gateway are unavailable.
+_DC_COPILOT_EVENT=""
+if [ "$#" -eq 2 ] && [ "$1" = "--event" ]; then _DC_COPILOT_EVENT="$2"; fi
+copilot_per_user_install_block() {
+  local home="${DEFENSECLAW_HOME:-${HOME:-${USERPROFILE:-}}/.defenseclaw}"
+  local installing=0
+  if [ ! -d "$home" ] || [ ! -x "$home" ] ||
+     [ -e "${home}/.install.lock" ] || [ -L "${home}/.install.lock" ]; then
+    installing=1
+  fi
+  # A caller can override DEFENSECLAW_HOME. The registered hook's own data
+  # directory is authoritative once its path has been resolved.
+  if [ -n "${HOOK_DIR:-}" ]; then
+    local hook_home="${HOOK_DIR}/.."
+    if [ ! -d "$hook_home" ] || [ ! -x "$hook_home" ] ||
+       [ -e "${hook_home}/.install.lock" ] || [ -L "${hook_home}/.install.lock" ]; then
+      installing=1
+    fi
+  fi
+  if [ "$installing" = "1" ]; then
+    if declare -F defenseclaw_log_hook_failure >/dev/null 2>&1; then
+      defenseclaw_log_hook_failure copilot copilot-hook "${1:-install or upgrade in progress}" "${2:-transport}" closed fail_closed
+    fi
+    echo "defenseclaw: blocking Copilot call while DefenseClaw is being installed or upgraded" >&2
+    local message='DefenseClaw is being installed or upgraded for this account; try again in a moment.'
+    case "$_DC_COPILOT_EVENT" in
+      preToolUse) printf '{"permissionDecision":"deny","permissionDecisionReason":"%s"}\n' "$message" ;;
+      permissionRequest) printf '{"behavior":"deny","message":"%s"}\n' "$message" ;;
+      sessionEnd|agentStop|subagentStop) ;;
+      *) printf '{"permissionDecision":"deny","permissionDecisionReason":"%s","behavior":"deny","message":"%s"}\n' "$message" "$message" ;;
+    esac
+    exit 0
+  fi
+  return 1
+}
+copilot_per_user_failure() {
+  copilot_per_user_install_block "$@" || true
+  exit 0
+}
+{{end}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}# Copilot consumes a native JSON denial on tool boundaries. Keep this
 # available before helpers, credentials and the gateway are consulted.
 _DC_COPILOT_EVENT=""
 if [ "$#" -eq 2 ] && [ "$1" = "--event" ]; then _DC_COPILOT_EVENT="$2"; fi
@@ -56,6 +97,8 @@ export DEFENSECLAW_HOME
 {{else}}
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
+{{if and (not .Managed) (not .Sandbox)}}  copilot_per_user_install_block "hook home unavailable" transport || true
+{{end}}
   # A registered closed hook cannot treat missing local state as retirement.
   if [ "{{.FailMode}}" = "closed" ] || [ "${DEFENSECLAW_STRICT_AVAILABILITY:-}" = "1" ]; then
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
@@ -150,7 +193,8 @@ case "$COPILOT_HOOK_EVENT" in
     ;;
 esac
 
-{{if .Sandbox}}defenseclaw_sandbox_require_token copilot copilot-hook "copilot tool"
+{{if and (not .Managed) (not .Sandbox)}}copilot_per_user_install_block "install or upgrade in progress" transport || true
+{{end}}{{if .Sandbox}}defenseclaw_sandbox_require_token copilot copilot-hook "copilot tool"
 
 PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   echo "defenseclaw: copilot hook refusing oversized payload, blocking copilot tool (sandbox hooks fail closed)" >&2
@@ -200,13 +244,15 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 unset DEFENSECLAW_GATEWAY_TOKEN
 
 fail_unreachable() {
-  defenseclaw_log_hook_failure copilot copilot-hook "$1" transport "$FAIL_MODE"
+{{if and (not .Managed) (not .Sandbox)}}  copilot_per_user_install_block "$1" transport || true
+{{end}}  defenseclaw_log_hook_failure copilot copilot-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "copilot tool" "$1"
   {{$failure}}
 }
 
 fail_response() {
-  defenseclaw_log_hook_failure copilot copilot-hook "$1" response "$FAIL_MODE"
+{{if and (not .Managed) (not .Sandbox)}}  copilot_per_user_install_block "$1" response || true
+{{end}}  defenseclaw_log_hook_failure copilot copilot-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: copilot hook error: $1" >&2
   {{$failure}}
 }

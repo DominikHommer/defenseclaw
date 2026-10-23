@@ -3271,7 +3271,8 @@ func TestCopilotLifecycleHomeRejectsNonExactBinding(t *testing.T) {
 }
 
 func TestCopilotShellBootstrapFailuresFollowProfile(t *testing.T) {
-	// Per-user and Secure Client retain their shipped response bytes.
+	// Secure Client retains its shipped fail-open bytes. Per-user bootstrap
+	// failures now check the install lock before falling back to that contract.
 	for _, tc := range []struct{ managed, secureClient bool }{{false, false}, {true, true}} {
 		script, err := renderHookTemplate("copilot-hook.sh", templateData{
 			APIAddr: "127.0.0.1:18970", FailMode: "closed", Managed: tc.managed, SecureClient: tc.secureClient,
@@ -3280,7 +3281,21 @@ func TestCopilotShellBootstrapFailuresFollowProfile(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		assertCopilotShellBootstrapFailsOpen(t, string(script))
+		if tc.secureClient {
+			assertCopilotShellBootstrapFailsOpen(t, string(script))
+			continue
+		}
+		for _, required := range []string{
+			`HOME="$(cd ~ 2>/dev/null && pwd)" || copilot_per_user_failure`,
+			`HOOK_BASE="$(cd -P -- "$HOOK_PARENT" 2>/dev/null && pwd)" || copilot_per_user_failure`,
+			`HOOK_DIR="$(cd -P -- "$HOOK_PARENT" 2>/dev/null && pwd)" || copilot_per_user_failure`,
+			`copilot_per_user_install_block() {`,
+			`copilot_per_user_install_block "$@" || true`,
+		} {
+			if !strings.Contains(string(script), required) {
+				t.Errorf("per-user Copilot shell bootstrap missing install guard %q", required)
+			}
+		}
 	}
 }
 

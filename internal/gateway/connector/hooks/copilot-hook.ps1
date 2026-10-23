@@ -4,7 +4,8 @@
 # trusted to inherit redirected stdin/stdout. This adapter preserves the bytes
 # in memory, waits inside Copilot's 30-second hook budget, and deliberately
 # fails open on integration errors to match the Copilot connector contract.
-[CmdletBinding()]
+{{if not .Managed}}# An install or upgrade of a per-user hook instead returns a native denial.
+{{end}}[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [ValidateSet(
@@ -24,8 +25,27 @@ $started = $false
 $stdinClosed = $false
 $deadline = [System.Diagnostics.Stopwatch]::StartNew()
 
-try {
-    if (-not (Test-Path -LiteralPath $hook -PathType Leaf)) {
+{{if not .Managed}}function Test-CopilotInstallWindow {
+    try {
+        $lock = Join-Path (Split-Path -Parent $PSScriptRoot) '.install.lock'
+        $null = Get-Item -LiteralPath $lock -Force -ErrorAction Stop
+        return $true
+    }
+    catch [System.Management.Automation.ItemNotFoundException] {
+        return $false
+    }
+    catch {
+        # An unreadable lock must not make an install call look safe.
+        return $true
+    }
+}
+$installGuard = $false
+{{end}}try {
+{{if not .Managed}}    if (Test-CopilotInstallWindow) {
+        $installGuard = $true
+        throw 'DefenseClaw install or upgrade in progress'
+    }
+{{end}}    if (-not (Test-Path -LiteralPath $hook -PathType Leaf)) {
         throw "DefenseClaw hook launcher is missing: $hook"
     }
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
@@ -89,7 +109,11 @@ try {
 
     $stdout = $stdoutTask.GetAwaiter().GetResult()
     $stderr = $stderrTask.GetAwaiter().GetResult()
-    if ($stdout.Length -gt 0) {
+{{if not .Managed}}    if (Test-CopilotInstallWindow) {
+        $installGuard = $true
+        throw 'DefenseClaw install or upgrade in progress'
+    }
+{{end}}    if ($stdout.Length -gt 0) {
         [Console]::Out.Write($stdout)
     }
     if ($stderr.Length -gt 0) {
@@ -97,8 +121,27 @@ try {
     }
 }
 catch {
-    [Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed open: ' + $_.Exception.Message)
-}
+{{if not .Managed}}    $failure = $_.Exception.Message
+    # This adapter is the first Windows hook process Copilot starts. If
+    # its launcher is missing or times out during an upgrade, the native hook
+    # cannot answer, so the adapter must supply Copilot's own denial.
+    if ($installGuard -or (Test-CopilotInstallWindow)) {
+        [Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed closed while DefenseClaw is being installed or upgraded: ' + $failure)
+        $message = 'DefenseClaw is being installed or upgraded for this account; try again in a moment.'
+        switch ($Event) {
+            'preToolUse' {
+                [Console]::Out.WriteLine('{"permissionDecision":"deny","permissionDecisionReason":"' + $message + '"}')
+            }
+            'permissionRequest' {
+                [Console]::Out.WriteLine('{"behavior":"deny","message":"' + $message + '"}')
+            }
+        }
+    }
+    else {
+        [Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed open: ' + $failure)
+    }
+{{else}}    [Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed open: ' + $_.Exception.Message)
+{{end}}}
 finally {
     if ($started -and -not $process.HasExited) {
         try {
