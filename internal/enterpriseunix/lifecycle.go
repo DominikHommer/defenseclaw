@@ -3141,7 +3141,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		}
 	}
 	// Read before the machine state, and the accounts record with it, go.
-	// A Linux purge also needs this snapshot to report enrolled OSS data that
+	// A Unix purge also needs this snapshot to report enrolled OSS data that
 	// the per-user worker leaves untouched (GAP-0727).
 	l.keptPerUser, l.keptKnown = env.perUserLeftovers()
 	ordered := append([]Unit{}, units...)
@@ -3250,7 +3250,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	} else if record == nil && l.opts.Purge {
 		l.warnUnpurgedPerUser(ctx)
 	}
-	if l.opts.Purge && env.GOOS == "linux" {
+	if l.opts.Purge {
 		l.reportRetainedEnrolledUserData()
 	}
 	// The sandbox subsystem goes before the binaries it runs: a non-purge

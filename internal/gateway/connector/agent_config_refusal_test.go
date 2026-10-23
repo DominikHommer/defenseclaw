@@ -383,6 +383,26 @@ func TestOSSSetupKeepsHooksThroughExternalDotfileLinks(t *testing.T) {
 					if info, err := os.Lstat(settingsDir); err != nil || info.Mode()&os.ModeSymlink == 0 {
 						t.Fatalf("setup replaced the dotfile directory link: %v", err)
 					}
+				} else {
+					if info, err := os.Lstat(settingsPath); err != nil || info.Mode()&os.ModeSymlink == 0 {
+						t.Fatalf("setup replaced the settings file link: %v", err)
+					}
+					if target, err := os.Readlink(settingsPath); err != nil || target != outsidePath {
+						t.Fatalf("settings file link target = %q, %v; want %s", target, err, outsidePath)
+					}
+					linked, err := os.ReadFile(settingsPath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					outsideSettings, err := os.ReadFile(outsidePath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					// OwnedHooksPresent checked the linked settings above; the
+					// same hook-bearing bytes must be in the original target.
+					if !bytes.Equal(linked, outsideSettings) {
+						t.Fatal("setup did not write the hooks to the outside settings file")
+					}
 				}
 				if tc.connector == "claudecode" {
 					if _, err := conn.(*ClaudeCodeConnector).ConvertHooksForRollback(opts); err != nil {

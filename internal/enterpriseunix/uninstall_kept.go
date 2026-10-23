@@ -63,7 +63,7 @@ func (env *Env) perUserLeftovers() ([]perUserKept, bool) {
 	return kept, true
 }
 
-// reportRetainedEnrolledUserData makes a successful Linux purge account for
+// reportRetainedEnrolledUserData makes a successful Unix purge account for
 // enrolled users whose OSS data survived remove-all. The lifecycle only
 // observes these user-owned files; it never deletes them to make the result
 // look complete.
