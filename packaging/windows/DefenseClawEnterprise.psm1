@@ -20046,17 +20046,24 @@ function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
         [string]$Action
     )
     Assert-DefenseClawAdministrator
+    $commandArguments = @(
+        'enterprise',
+        'windows',
+        'managed-hooks-lifecycle-snapshot',
+        $Action,
+        '--json'
+    )
+    if ($null -ne $GatewaySource) {
+        if ($Action -cne 'retire') {
+            throw 'a staged gateway may only retire a committed managed-hook lifecycle journal'
+        }
+        $commandArguments += '--staged-retire'
+    }
     $probe = Invoke-DefenseClawGatewayCommand `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
         -GatewaySource $GatewaySource `
-        -Arguments @(
-            'enterprise',
-            'windows',
-            'managed-hooks-lifecycle-snapshot',
-            $Action,
-            '--json'
-        ) `
+        -Arguments $commandArguments `
         -Capture `
         -AllowFailure
     $reports = [Collections.Generic.List[object]]::new()
