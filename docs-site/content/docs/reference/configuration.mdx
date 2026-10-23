@@ -1440,3 +1440,9 @@ Connector wiring (hook scripts, agent files) is not re-applied by a reload:
 run `defenseclaw-gateway restart` or `defenseclaw setup <connector>` for that.
 These commands belong to the **Go gateway** (`defenseclaw-gateway`), not the
 Python CLI; the Python CLI has no top-level `gateway` group.
+
+## Optional Wolf Defender scanner
+
+`guardrail.wolf` configures an opt-in OSS CPU ONNX tool-response lane. All its keys
+require a gateway restart. See [Wolf Defender](/docs/guardrail/wolf-defender) for
+Small/Full selection, defaults, prerequisites and refusal semantics.

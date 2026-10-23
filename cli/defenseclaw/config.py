@@ -2463,7 +2463,24 @@ class GuardrailProfile:
 
 
 @dataclass
+class WolfConfig:
+    enabled: bool = False
+    variant: str = "small"
+    model_dir: str = ""
+    python_executable: str = ""
+    threshold: float = .5
+    threads: int = 2
+    window_tokens: int = 510
+    overlap_tokens: int = 64
+    max_tokens: int = 8192
+    max_windows: int = 20
+    timeout_ms: int = 500
+    startup_timeout_ms: int = 30000
+
+
+@dataclass
 class GuardrailConfig:
+    wolf: WolfConfig = field(default_factory=WolfConfig)
     enabled: bool = False
     mode: str = "observe"  # observe | action
     scanner_mode: str = "both"  # local | remote | both
@@ -6148,6 +6165,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         else []
     )
     return GuardrailConfig(
+        wolf=WolfConfig(**(raw.get("wolf") or {})),
         enabled=raw.get("enabled", False),
         mode=raw.get("mode", "observe"),
         scanner_mode=raw.get("scanner_mode", "both"),

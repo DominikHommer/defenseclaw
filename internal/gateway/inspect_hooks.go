@@ -320,6 +320,13 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 			outputStr = semanticOutput
 		}
 	}
+	// Inspect complete semantic output before the legacy prefix truncation.
+	var semanticOutput string
+	localText := outputStr
+	if json.Unmarshal(req.Output, &semanticOutput) == nil {
+		localText = semanticOutput
+	}
+	localVerdict := a.inspectLocalToolResponse(r.Context(), localText)
 	outputStr = truncateInspectContent(outputStr, maxInspectContentLen)
 
 	fmt.Fprintf(os.Stderr, "[inspect] >>> post-tool tool=%q output_len=%d exit_code=%d\n",
@@ -336,6 +343,10 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		verdict = a.inspectManagedAIDOnly(
 			deferManagedAIDFailOpenAccounting(r.Context()), "message", aidContent,
 		)
+	} else if localVerdict != nil {
+		// A decisive local block need not spend the remaining hook budget on rules.
+		// The common merge/mode/audit path below still owns the final response.
+		verdict = &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	} else {
 		ruleFindings, err := scanWithTimeout(r.Context(), outputStr, req.Tool+"-response", inspectScanTimeout)
 		if err != nil {
@@ -364,6 +375,9 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		}
 	}
 
+	if localVerdict != nil {
+		verdict = mergeWithLaneVerdict(verdict, localVerdict, "local-model:")
+	}
 	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), profileRequestConnector(r.Context())))
 
 	elapsed := time.Since(t0)
