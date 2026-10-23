@@ -16,7 +16,9 @@ import (
 
 // Directory facts on the hot path.
 //
-// Hook calls read only memory. A cached answer is served even when it is
+// Linux and Windows hook calls read only memory. Managed macOS hook calls
+// wait for current Open Directory groups before deciding (getFresh).
+// Otherwise, a cached answer is served even when it is
 // older than identityDirectoryTTL, and one background refresh replaces it
 // (stale-while-revalidate). A key never seen before starts one shared
 // lookup (singleflight), and the request that started it waits for it at
