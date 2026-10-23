@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"slices"
 	"strings"
@@ -19,12 +20,13 @@ import (
 )
 
 // A Cursor guard rebuild snapshots its artifacts when the transaction starts,
-// but Cursor and administrators do not take the DefenseClaw lock. Before it
-// writes a file the rebuild reads it again: an administrator's hooks.json edit
-// made in between is kept (the registration is merged into it, or the rebuild
-// stops when it cannot carry the guard), a concurrent change to a file
-// DefenseClaw owns stops the rebuild, and a rollback never puts a preimage
-// back over a file that changed after the rebuild wrote it.
+// but Cursor and administrators do not take the DefenseClaw lock. Each write
+// is a compare-and-swap that returns the file it replaced. When another
+// writer changed a file in between, the rebuild puts that file back, undoes
+// its other writes and starts again from what is on disk: an administrator's
+// hooks.json edit is kept with the registration merged into it, a changed
+// file DefenseClaw owns is rebuilt, an edit that is not JSON stops the
+// rebuild, and an undo never puts a preimage back over a newer save.
 func TestWindowsCursorMachineGuardRebuildKeepsConcurrentChanges(t *testing.T) {
 	const hook = `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
 	adminHooks := []byte(`{"version":1,"hooks":{"adminEvent":[{"type":"command","command":"admin-concurrent-hook"}]}}`)
@@ -199,64 +201,164 @@ func TestWindowsCursorMachineGuardRebuildKeepsConcurrentChanges(t *testing.T) {
 		}
 	})
 
-	t.Run("rollback keeps an edit made after the hooks.json write", func(t *testing.T) {
+	// swapHook runs edit around the rebuild's swaps of path: before reports a
+	// call before the swap, after one after it. edit returns whether it ran.
+	swapHook := func(t *testing.T, path string, edit func(request windowsCursorManagedSwap, before bool) bool) {
+		t.Helper()
+		swap := windowsCursorManagedFileSwap
+		windowsCursorManagedFileSwap = func(request windowsCursorManagedSwap) (windowsCursorManagedSwapResult, error) {
+			if !strings.EqualFold(request.path, path) {
+				return swap(request)
+			}
+			edit(request, true)
+			result, err := swap(request)
+			edit(request, false)
+			return result, err
+		}
+		t.Cleanup(func() { windowsCursorManagedFileSwap = swap })
+	}
+	damaged := func(t *testing.T) (windowsCursorPaths, files) {
+		t.Helper()
 		paths := installWindowsCursorStandaloneGuardForTest(t, hook, true)
 		for _, path := range []string{paths.Hooks, paths.Adapter} {
 			if err := os.Remove(path); err != nil {
 				t.Fatal(err)
 			}
 		}
-		before := read(t, paths)
-		writer := windowsManagedPolicyWriter
-		edited := false
-		windowsManagedPolicyWriter = func(path string, data []byte, userReadable bool) error {
-			if err := writer(path, data, userReadable); err != nil {
-				return err
+		return paths, read(t, paths)
+	}
+	requireRebuiltWithAdminHook := func(t *testing.T, paths windowsCursorPaths) {
+		t.Helper()
+		hooksAfter, err := os.ReadFile(paths.Hooks)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Contains(hooksAfter, []byte("admin-concurrent-hook")) {
+			t.Fatalf("the rebuild discarded the administrator's concurrent hooks.json edit: %s", hooksAfter)
+		}
+		if err := connector.VerifyWindowsCursorEnterpriseHooks(hooksAfter, paths.Adapter, "closed"); err != nil {
+			t.Fatalf("rebuilt registration is not the closed guard: %v", err)
+		}
+		if _, active, err := ReadWindowsCursorManagedPolicyTargets(); err != nil || !active {
+			t.Fatalf("rebuilt guard: active=%t err=%v", active, err)
+		}
+	}
+
+	t.Run("an edit between the last read and the swap is kept", func(t *testing.T) {
+		paths, _ := damaged(t)
+		done := false
+		swapHook(t, paths.Hooks, func(_ windowsCursorManagedSwap, before bool) bool {
+			if before && !done {
+				done = true
+				write(t, paths.Hooks, adminHooks)
 			}
-			if !edited && strings.EqualFold(path, paths.Hooks) {
-				edited = true
+			return done
+		})
+		if restored, err := RestoreWindowsCursorManagedAdapter(hook); err != nil || !restored {
+			t.Fatalf("rebuild: restored=%t err=%v", restored, err)
+		}
+		requireRebuiltWithAdminHook(t, paths)
+	})
+
+	t.Run("an edit made after the hooks.json swap is kept and the rebuild starts again", func(t *testing.T) {
+		paths, _ := damaged(t)
+		done := false
+		swapHook(t, paths.Hooks, func(_ windowsCursorManagedSwap, before bool) bool {
+			if !before && !done {
+				done = true
 				// The administrator saves over the rebuilt file before the
 				// rebuild validates it.
 				write(t, paths.Hooks, adminHooks)
 			}
-			return nil
-		}
-		t.Cleanup(func() { windowsManagedPolicyWriter = writer })
-		if restored, err := RestoreWindowsCursorManagedAdapter(hook); err == nil || restored {
+			return done
+		})
+		if restored, err := RestoreWindowsCursorManagedAdapter(hook); err != nil || !restored {
 			t.Fatalf("rebuild overtaken by a concurrent edit: restored=%t err=%v", restored, err)
 		}
-		after := read(t, paths)
-		if !bytes.Equal(after.hooks, adminHooks) {
-			t.Fatalf("the rollback discarded the administrator's concurrent hooks.json: %q", after.hooks)
-		}
-		if after.adapter != nil || !bytes.Equal(after.state, before.state) || !bytes.Equal(after.receipt, before.receipt) {
-			t.Fatal("the rollback did not put back the rebuilt adapter")
-		}
-		windowsManagedPolicyWriter = writer
-		if restored, err := RestoreWindowsCursorManagedAdapter(hook); err != nil || !restored {
-			t.Fatalf("rebuild after the concurrent edit: restored=%t err=%v", restored, err)
-		}
-		hooksAfter, err := os.ReadFile(paths.Hooks)
-		if err != nil || !bytes.Contains(hooksAfter, []byte("admin-concurrent-hook")) {
-			t.Fatalf("the next rebuild lost the administrator's hook: %v", err)
+		requireRebuiltWithAdminHook(t, paths)
+	})
+
+	t.Run("an undo puts a preimage back only over the rebuild's bytes", func(t *testing.T) {
+		paths := installWindowsCursorStandaloneGuardForTest(t, hook, true)
+		ours := []byte(`{"version":1,"hooks":{"stop":[]}}`)
+		for _, preimageExisted := range []bool{true, false} {
+			preimage := windowsManagedFileSnapshot{path: paths.Hooks}
+			var metadata windowsCursorManagedFileMetadata
+			if preimageExisted {
+				write(t, paths.Hooks, []byte(`{"version":1,"hooks":{}}`))
+				var err error
+				if preimage, err = snapshotWindowsManagedFileWithLimit(paths.Hooks, windowsCursorManagedHooksLimit); err != nil {
+					t.Fatal(err)
+				}
+				if metadata, err = snapshotWindowsCursorManagedFileMetadata(preimage); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Remove(paths.Hooks); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatal(err)
+			}
+			item := &windowsCursorManagedRebuildWrite{
+				preimage: preimage, metadata: metadata, limit: windowsCursorManagedHooksLimit, data: ours, shared: true,
+			}
+			write(t, paths.Hooks, ours)
+			if err := item.undo(); err != nil {
+				t.Fatalf("undo over the rebuild's own bytes: %v", err)
+			}
+			if now := read(t, paths); !bytes.Equal(now.hooks, preimage.data) {
+				t.Fatalf("undo did not put the preimage back: %q", now.hooks)
+			}
+			write(t, paths.Hooks, ours)
+			// The administrator saves after the rebuild wrote.
+			write(t, paths.Hooks, adminHooks)
+			if err := item.undo(); !errors.Is(err, errWindowsCursorManagedGuardRebuildRaced) {
+				t.Fatalf("undo over a newer save: %v", err)
+			}
+			if now := read(t, paths); !bytes.Equal(now.hooks, adminHooks) {
+				t.Fatalf("undo discarded a newer save (preimage existed %t): %q", preimageExisted, now.hooks)
+			}
 		}
 	})
 
-	t.Run("concurrent change to an owned artifact stops the rebuild", func(t *testing.T) {
-		paths := installWindowsCursorStandaloneGuardForTest(t, hook, true)
-		for _, path := range []string{paths.Hooks, paths.Adapter} {
-			if err := os.Remove(path); err != nil {
-				t.Fatal(err)
-			}
-		}
+	t.Run("a concurrent change to an owned artifact is rebuilt", func(t *testing.T) {
+		paths, _ := damaged(t)
 		concurrent := []byte("exit 0\r\n")
 		beforeWrite(t, paths.Adapter, func() { write(t, paths.Adapter, concurrent) })
-		if restored, err := RestoreWindowsCursorManagedAdapter(hook); err == nil || restored {
+		if restored, err := RestoreWindowsCursorManagedAdapter(hook); err != nil || !restored {
 			t.Fatalf("rebuild over a concurrent adapter: restored=%t err=%v", restored, err)
 		}
 		after := read(t, paths)
-		if !bytes.Equal(after.adapter, concurrent) || after.hooks != nil {
-			t.Fatalf("the rebuild wrote over a concurrent change: adapter=%q hooks=%q", after.adapter, after.hooks)
+		if bytes.Equal(after.adapter, concurrent) || after.hooks == nil {
+			t.Fatalf("the rebuild kept a changed adapter: adapter=%q hooks=%q", after.adapter, after.hooks)
+		}
+		if _, active, err := ReadWindowsCursorManagedPolicyTargets(); err != nil || !active {
+			t.Fatalf("rebuilt guard: active=%t err=%v", active, err)
+		}
+	})
+
+	t.Run("a writer that never stops: the rebuild gives up and keeps the last save", func(t *testing.T) {
+		paths, before := damaged(t)
+		saves := 0
+		var last []byte
+		swapHook(t, paths.Hooks, func(request windowsCursorManagedSwap, before bool) bool {
+			if before && bytes.Contains(request.data, []byte("EncodedCommand")) {
+				saves++
+				last = []byte(fmt.Sprintf(`{"version":1,"hooks":{"adminEvent":[{"type":"command","command":"admin-save-%d"}]}}`, saves))
+				write(t, paths.Hooks, last)
+			}
+			return true
+		})
+		restored, err := RestoreWindowsCursorManagedAdapter(hook)
+		if err == nil || restored || !errors.Is(err, errWindowsCursorManagedGuardRebuildRaced) {
+			t.Fatalf("rebuild against a writer that never stops: restored=%t err=%v", restored, err)
+		}
+		if saves != windowsCursorManagedGuardRebuildAttempts {
+			t.Fatalf("the rebuild made %d attempts, want %d", saves, windowsCursorManagedGuardRebuildAttempts)
+		}
+		after := read(t, paths)
+		if !bytes.Equal(after.hooks, last) {
+			t.Fatalf("the rebuild did not keep the last save: %q", after.hooks)
+		}
+		if after.adapter != nil || !bytes.Equal(after.state, before.state) || !bytes.Equal(after.receipt, before.receipt) {
+			t.Fatal("a stopped rebuild left a partly rebuilt guard")
 		}
 	})
 }

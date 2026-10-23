@@ -1233,20 +1233,21 @@ func TestWindowsCursorMachineGuardRebuildRefusesOrRollsBack(t *testing.T) {
 		paths := installWindowsCursorStandaloneGuardForTest(t, hook, true)
 		removeBoth(t, paths)
 		before := read(t, paths)
-		writer := windowsManagedPolicyWriter
-		windowsManagedPolicyWriter = func(path string, data []byte, userReadable bool) error {
-			if strings.EqualFold(path, paths.Hooks) {
-				return errors.New("injected hooks.json write failure")
+		swap := windowsCursorManagedFileSwap
+		windowsCursorManagedFileSwap = func(request windowsCursorManagedSwap) (windowsCursorManagedSwapResult, error) {
+			if strings.EqualFold(request.path, paths.Hooks) {
+				return windowsCursorManagedSwapResult{}, errors.New("injected hooks.json write failure")
 			}
-			return writer(path, data, userReadable)
+			return swap(request)
 		}
+		t.Cleanup(func() { windowsCursorManagedFileSwap = swap })
 		if restored, err := RestoreWindowsCursorManagedAdapter(hook); err == nil || restored {
 			t.Fatalf("failed rebuild: restored=%t err=%v", restored, err)
 		}
 		if after := read(t, paths); !reflect.DeepEqual(after, before) {
 			t.Fatal("a failed rebuild left a partly rebuilt guard")
 		}
-		windowsManagedPolicyWriter = writer
+		windowsCursorManagedFileSwap = swap
 		if restored, err := RestoreWindowsCursorManagedAdapter(hook); err != nil || !restored {
 			t.Fatalf("rebuild after the failure: restored=%t err=%v", restored, err)
 		}
