@@ -162,6 +162,20 @@ def test_contract_lock_rejects_noncanonical_location(tmp_path: Path) -> None:
     assert connector_lock_contract_invariant("amp", entry) == "location"
 
 
+class _WindowsOs:
+    """The os module as one module sees it on Windows; pathlib and every other module keep the host's os."""
+
+    name = "nt"
+
+    def __getattr__(self, attr: str) -> object:
+        return getattr(os, attr)
+
+
+def _fake_windows(monkeypatch: pytest.MonkeyPatch, module: object) -> None:
+    # Setting os.name globally turns every Path into an uninstantiable WindowsPath on this host.
+    monkeypatch.setattr(module, "os", _WindowsOs())
+
+
 def test_protected_executable_reports_identity_location_and_digest(monkeypatch, tmp_path: Path) -> None:
     executable = tmp_path / "amp.exe"
     executable.write_bytes(b"MZamp")
@@ -171,7 +185,7 @@ def test_protected_executable_reports_identity_location_and_digest(monkeypatch, 
         "agent_executable": str(executable),
         "agent_executable_sha256": digest,
     }
-    monkeypatch.setattr(agent_selection.os, "name", "nt")
+    _fake_windows(monkeypatch, agent_selection)
     monkeypatch.setattr(agent_selection, "is_setup_trusted_binary", lambda *_args: True)
     assert agent_selection.setup_agent_lock_executable_invariant(str(tmp_path), "amp", entry) == ""
 
@@ -195,7 +209,7 @@ def test_opencode_protected_executable_requires_exact_sst_location(monkeypatch, 
         "agent_executable": str(executable),
         "agent_executable_sha256": digest,
     }
-    monkeypatch.setattr(agent_selection.os, "name", "nt")
+    _fake_windows(monkeypatch, agent_selection)
     monkeypatch.setattr(
         agent_selection,
         "is_setup_trusted_binary",
@@ -839,7 +853,7 @@ def test_copilot_stale_launcher_returns_executable_invariant(monkeypatch, tmp_pa
     cfg = _config(tmp_path)
     entry = _entry("copilot", tmp_path)
     _patch_registration_ready(monkeypatch, entry)
-    monkeypatch.setattr(cmd_doctor.os, "name", "nt")
+    _fake_windows(monkeypatch, cmd_doctor)
     (tmp_path / "hook_contract_lock.json").write_text(
         json.dumps({"version": 2, "connectors": {"copilot": entry}}),
         encoding="utf-8",
@@ -854,7 +868,7 @@ def test_copilot_stale_launcher_returns_executable_invariant(monkeypatch, tmp_pa
         "_windows_native_hook_check",
         lambda *_args, **_kwargs: WindowsHookCheck("stale", "registered launcher executable is stale"),
     )
-    # os.name is faked: the Windows .hookcfg path cannot be built on this host.
+    # fail_mode keeps the host's os, so supply the mode the Windows .hookcfg would render.
     monkeypatch.setattr("defenseclaw.fail_mode._platform_runtime_source", lambda *_args: ("windows-sidecar", "open"))
     monkeypatch.setattr("defenseclaw.fail_mode._shared_hook_sidecar_drift", lambda *_args: None)
     readiness = cmd_doctor.connector_setup_readiness(cfg, "copilot")
