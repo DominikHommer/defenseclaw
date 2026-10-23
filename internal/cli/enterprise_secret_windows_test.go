@@ -152,6 +152,36 @@ func TestWindowsSecretArmsGatewayRecoveryBeforeChange(t *testing.T) {
 	}
 }
 
+func TestWindowsSecretRecoveryRefusesUnreadyOrUnbreakableChild(t *testing.T) {
+	if _, err := independentWindowsSecretRecoveryFlagsForJob(windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, nil); err == nil {
+		t.Fatal("a recovery child in an unbreakable kill-on-close job cannot survive its parent")
+	}
+	flags, err := independentWindowsSecretRecoveryFlagsForJob(
+		windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE|windows.JOB_OBJECT_LIMIT_BREAKAWAY_OK, nil)
+	if err != nil || flags&windows.CREATE_BREAKAWAY_FROM_JOB == 0 {
+		t.Fatalf("breakaway-capable recovery flags=%#x error=%v", flags, err)
+	}
+	oldFlags, oldCommand := windowsSecretRecoveryFlags, windowsSecretRecoveryCommand
+	t.Cleanup(func() { windowsSecretRecoveryFlags, windowsSecretRecoveryCommand = oldFlags, oldCommand })
+	windowsSecretRecoveryFlags = func() (uint32, error) { return windows.DETACHED_PROCESS, nil }
+	windowsSecretRecoveryCommand = func(executable string) *exec.Cmd {
+		child := exec.Command(executable, "-test.run=^TestWindowsSecretRecoveryUnreadyHelper$")
+		child.Env = append(os.Environ(), "DC_WINDOWS_SECRET_UNREADY_HELPER=1")
+		return child
+	}
+	// This child starts and exits without READY. The credential operation
+	// must refuse even though CreateProcess succeeded.
+	if err := spawnWindowsSecretGatewayRecovery(); err == nil {
+		t.Fatal("credential change accepted an unready recovery child")
+	}
+}
+
+func TestWindowsSecretRecoveryUnreadyHelper(t *testing.T) {
+	if os.Getenv("DC_WINDOWS_SECRET_UNREADY_HELPER") == "1" {
+		os.Exit(0)
+	}
+}
+
 // GAP-0750: a missing or malformed config is an unproven policy, not proof
 // that no reference exists. Refuse before reserving an audit row or deleting
 // the credential, and leave the gateway running on its previous value.

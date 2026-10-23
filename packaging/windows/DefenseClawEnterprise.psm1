@@ -6236,9 +6236,9 @@ function Remove-DefenseClawStaleReplacementBackups {
 
 function Remove-DefenseClawStandaloneInstallTreeReplacementBackups {
     # Uninstall removes the replacement backups an earlier upgrade left
-    # beside the installed files before it checks the install tree. One a
-    # running program still uses keeps the folder, so the uninstall says
-    # which and what to do.
+    # beside the installed files after checking for outside file holders.
+    # One a running program still uses keeps the folder, so the uninstall
+    # says which and what to do.
     param([Parameter(Mandatory)][hashtable]$Layout)
     if (-not (Test-DefenseClawStandaloneProfile)) {
         return
@@ -34246,7 +34246,6 @@ function Invoke-DefenseClawUninstallLifecycle {
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
         -AnyStartMode
-    Remove-DefenseClawStandaloneInstallTreeReplacementBackups -Layout $Layout
     Assert-DefenseClawStandaloneInstallTreeNotInUse `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
@@ -34259,6 +34258,9 @@ function Invoke-DefenseClawUninstallLifecycle {
             -GuardianServiceName $GuardianServiceName `
             -SelfUninstallCallerPID $SelfUninstallCallerPID
     }
+    # The holder checks are refusals with no state change. Old replacement
+    # backups are installation state, so retire them only afterward.
+    Remove-DefenseClawStandaloneInstallTreeReplacementBackups -Layout $Layout
     if (Test-DefenseClawStandaloneProfile) {
         Assert-DefenseClawStandaloneUninstallInstallTree -Layout $Layout
     }

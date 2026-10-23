@@ -28,6 +28,8 @@ import (
 
 var (
 	enterpriseSetupArmUninstallRecovery = armStandaloneUninstallRecovery
+	setupRecoveryCreationFlags          = standaloneSetupRecoveryCreationFlags
+	setupRecoveryParentReachable        = standaloneSetupParentReachable
 	setupRecoveryWaitForParent          = waitForStandaloneSetupParent
 	setupRecoveryPending                = standaloneUninstallTransactionPending
 	setupRecoveryReplay                 = replayStandaloneSetupTransaction
@@ -40,31 +42,81 @@ func armStandaloneUninstallRecovery() error {
 	if err != nil {
 		return err
 	}
+	flags, err := setupRecoveryCreationFlags()
+	if err != nil {
+		return err
+	}
 	child := exec.Command(executable, "--internal-recover-after-parent", strconv.Itoa(os.Getpid()))
 	child.Dir = filepath.Dir(executable)
-	child.SysProcAttr = &syscall.SysProcAttr{CreationFlags: standaloneSetupRecoveryCreationFlags()}
+	child.SysProcAttr = &syscall.SysProcAttr{CreationFlags: flags}
+	ready, err := child.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("create uninstall recovery readiness pipe: %w", err)
+	}
 	if err := child.Start(); err != nil {
 		return err
 	}
+	// Do not start the worker merely because CreateProcess succeeded. An
+	// immediately failing watcher would leave a killed Setup without recovery.
+	result := make(chan error, 1)
+	go func() {
+		marker := make([]byte, len("READY\n"))
+		_, readErr := io.ReadFull(ready, marker)
+		if readErr == nil && string(marker) != "READY\n" {
+			readErr = errors.New("uninstall recovery sent an invalid readiness marker")
+		}
+		result <- readErr
+	}()
+	select {
+	case err = <-result:
+	case <-time.After(30 * time.Second):
+		err = errors.New("uninstall recovery did not become ready within 30 seconds")
+	}
+	if err != nil {
+		_ = child.Process.Kill()
+		_ = ready.Close()
+		_ = child.Wait()
+		return fmt.Errorf("uninstall recovery was not armed: %w", err)
+	}
+	_ = ready.Close()
 	return child.Process.Release()
 }
 
-func standaloneSetupRecoveryCreationFlags() uint32 {
-	flags := uint32(windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS)
+func standaloneSetupRecoveryCreationFlags() (uint32, error) {
 	var info windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
 	err := windows.QueryInformationJobObject(0, windows.JobObjectExtendedLimitInformation,
 		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)), nil)
-	if errors.Is(err, windows.ERROR_INVALID_HANDLE) ||
-		(err == nil && info.BasicLimitInformation.LimitFlags&windows.JOB_OBJECT_LIMIT_BREAKAWAY_OK != 0) {
-		flags |= windows.CREATE_BREAKAWAY_FROM_JOB
-	}
-	return flags
+	return standaloneSetupRecoveryFlagsForJob(info.BasicLimitInformation.LimitFlags, err)
 }
 
-func runStandaloneSetupRecoveryWatchdog(parentArgument string, _, stderr io.Writer) int {
+func standaloneSetupRecoveryFlagsForJob(limits uint32, err error) (uint32, error) {
+	flags := uint32(windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS)
+	if errors.Is(err, windows.ERROR_INVALID_HANDLE) {
+		return flags, nil // Setup is not in a job.
+	}
+	if err != nil {
+		return 0, fmt.Errorf("inspect uninstall recovery process job: %w", err)
+	}
+	if limits&windows.JOB_OBJECT_LIMIT_BREAKAWAY_OK != 0 {
+		flags |= windows.CREATE_BREAKAWAY_FROM_JOB
+	} else if limits&windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE != 0 &&
+		limits&windows.JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK == 0 {
+		return 0, errors.New("uninstall recovery cannot survive Setup's enclosing process job; nothing was changed")
+	}
+	return flags, nil
+}
+
+func runStandaloneSetupRecoveryWatchdog(parentArgument string, stdout, stderr io.Writer) int {
 	parentPID, err := strconv.Atoi(parentArgument)
 	if err != nil || parentPID <= 0 || parentPID == os.Getpid() {
 		return enterpriseInvalidArgsExitCode
+	}
+	if err := setupRecoveryParentReachable(parentPID); err != nil {
+		fmt.Fprintln(stderr, err)
+		return enterpriseFailureExitCode
+	}
+	if _, err := io.WriteString(stdout, "READY\n"); err != nil {
+		return enterpriseFailureExitCode
 	}
 	if err := setupRecoveryWaitForParent(parentPID); err != nil {
 		fmt.Fprintln(stderr, err)
@@ -83,6 +135,17 @@ func runStandaloneSetupRecoveryWatchdog(parentArgument string, _, stderr io.Writ
 		return enterpriseFailureExitCode
 	}
 	return 0
+}
+
+func standaloneSetupParentReachable(pid int) error {
+	handle, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid))
+	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
+		return nil // Parent died before the watcher became ready.
+	}
+	if err != nil {
+		return fmt.Errorf("open uninstall Setup parent before arming recovery: %w", err)
+	}
+	return windows.CloseHandle(handle)
 }
 
 func waitForStandaloneSetupParent(pid int) error {

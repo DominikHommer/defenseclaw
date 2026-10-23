@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -73,10 +74,14 @@ var (
 		}
 		return deployment.State == winpath.EnterpriseDeploymentInstalled, nil
 	}
-	windowsSecretIsElevated     = func() bool { return windows.GetCurrentProcessToken().IsElevated() }
-	windowsSecretRestartGateway = restartWindowsStandaloneGateway
-	windowsSecretSpawnRecovery  = spawnWindowsSecretGatewayRecovery
-	windowsSecretConfigTrusted  = managed.ValidateTrustedConfigPath
+	windowsSecretIsElevated      = func() bool { return windows.GetCurrentProcessToken().IsElevated() }
+	windowsSecretRestartGateway  = restartWindowsStandaloneGateway
+	windowsSecretSpawnRecovery   = spawnWindowsSecretGatewayRecovery
+	windowsSecretRecoveryFlags   = independentWindowsSecretRecoveryFlags
+	windowsSecretRecoveryCommand = func(executable string) *exec.Cmd {
+		return exec.Command(executable, "enterprise", "secret", "recover-gateway")
+	}
+	windowsSecretConfigTrusted = managed.ValidateTrustedConfigPath
 	// windowsSecretLockBundleStore, windowsSecretLifecycleLockPath and
 	// windowsSecretLifecycleLock are the two locks set and remove take.
 	windowsSecretLockBundleStore   = lockWindowsBundleStoreWithin
@@ -102,7 +107,9 @@ func init() {
 	}
 	enterpriseSecretCmd.AddCommand(&cobra.Command{
 		Use: "recover-gateway", Hidden: true, Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error { return recoverWindowsSecretGateway(cmd.Context()) },
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return recoverWindowsSecretGateway(cmd.Context(), cmd.OutOrStdout())
+		},
 	})
 }
 
@@ -926,18 +933,74 @@ func spawnWindowsSecretGatewayRecovery() error {
 	if err != nil {
 		return err
 	}
-	child := exec.Command(executable, "enterprise", "secret", "recover-gateway")
+	flags, err := windowsSecretRecoveryFlags()
+	if err != nil {
+		return err
+	}
+	child := windowsSecretRecoveryCommand(executable)
 	child.Dir = filepath.Dir(executable)
-	child.SysProcAttr = watchdogSysProcAttr()
-	child.Stdin, child.Stdout, child.Stderr = nil, io.Discard, io.Discard
+	child.SysProcAttr = &syscall.SysProcAttr{CreationFlags: flags}
+	child.Stderr = io.Discard
+	ready, err := child.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("create gateway recovery readiness pipe: %w", err)
+	}
 	if err := child.Start(); err != nil {
 		return err
 	}
+	result := make(chan error, 1)
+	go func() {
+		marker := make([]byte, len("READY\n"))
+		_, readErr := io.ReadFull(ready, marker)
+		if readErr == nil && string(marker) != "READY\n" {
+			readErr = errors.New("gateway recovery sent an invalid readiness marker")
+		}
+		result <- readErr
+	}()
+	select {
+	case err = <-result:
+	case <-time.After(30 * time.Second):
+		err = errors.New("gateway recovery did not become ready within 30 seconds")
+	}
+	if err != nil {
+		_ = child.Process.Kill()
+		_ = ready.Close()
+		_ = child.Wait()
+		return fmt.Errorf("gateway recovery was not armed: %w", err)
+	}
+	_ = ready.Close()
 	return child.Process.Release()
 }
 
-func recoverWindowsSecretGateway(ctx context.Context) error {
+func independentWindowsSecretRecoveryFlags() (uint32, error) {
+	var info windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+	err := windows.QueryInformationJobObject(0, windows.JobObjectExtendedLimitInformation,
+		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)), nil)
+	return independentWindowsSecretRecoveryFlagsForJob(info.BasicLimitInformation.LimitFlags, err)
+}
+
+func independentWindowsSecretRecoveryFlagsForJob(limits uint32, err error) (uint32, error) {
+	flags := uint32(windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS)
+	if errors.Is(err, windows.ERROR_INVALID_HANDLE) {
+		return flags, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("inspect gateway recovery process job: %w", err)
+	}
+	if limits&windows.JOB_OBJECT_LIMIT_BREAKAWAY_OK != 0 {
+		flags |= windows.CREATE_BREAKAWAY_FROM_JOB
+	} else if limits&windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE != 0 &&
+		limits&windows.JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK == 0 {
+		return 0, errors.New("gateway recovery cannot survive the credential command's enclosing process job; nothing was changed")
+	}
+	return flags, nil
+}
+
+func recoverWindowsSecretGateway(ctx context.Context, stdout io.Writer) error {
 	if err := windowsSecretElevation("recover-gateway", nil); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(stdout, "READY\n"); err != nil {
 		return err
 	}
 	layout, err := windowsSecretLayout()
