@@ -169,7 +169,7 @@ func resolveWindowsCodexRequirementsLayout(
 		if !strings.EqualFold(filepath.Base(executable), "defenseclaw-gateway.exe") ||
 			!strings.EqualFold(filepath.Base(filepath.Dir(executable)), "bin") {
 			return opts, fmt.Errorf(
-				"Codex requirements command must run from exact installed gateway <InstallRoot>\\bin\\defenseclaw-gateway.exe, got %s",
+				"codex requirements command must run from exact installed gateway <InstallRoot>\\bin\\defenseclaw-gateway.exe, got %s",
 				executable,
 			)
 		}
