@@ -226,7 +226,7 @@ func (m *Manager) syncCredential(b *box, eff *packs.Effective) {
 		}
 	}
 	m.mu.Unlock()
-	if rec.OldSupervisorNetworkClosed || oldSupervisorLingering(phase, rec) {
+	if rec.OldSupervisorNetworkClosed || oldSupervisorVMNeedsContainment(phase, rec) {
 		m.suspendOldSupervisorEgress(b)
 		return
 	}
@@ -270,8 +270,9 @@ func (m *Manager) suspendOldSupervisorEgress(b *box) {
 	m.noteEgressOff(b, oldSupervisorEgressOff)
 }
 
-// containOldSupervisorNetwork withdraws every direct OpenShell rule from an
-// ended legacy MicroVM. The proxy suspension runs first even if the gateway
+// containOldSupervisorNetwork withdraws every direct OpenShell rule from a
+// legacy MicroVM, including one whose ready session cannot be safely
+// stopped before sync. The proxy suspension runs first even if the gateway
 // cannot be reached. A rule update is conditional on the current resource
 // version, so a concurrent new session cannot have its rules stripped.
 // Reconcile retries failed or not-yet-loaded updates.
@@ -320,7 +321,7 @@ func (m *Manager) containOldSupervisorNetworkLocked(ctx context.Context, b *box)
 	m.mu.Lock()
 	rec, phase := b.rec, b.phase
 	m.mu.Unlock()
-	if !oldSupervisorLingering(phase, rec) {
+	if !oldSupervisorVMNeedsContainment(phase, rec) {
 		m.mu.Lock()
 		b.oldSupervisorNetworkErr = ""
 		m.mu.Unlock()
@@ -376,8 +377,8 @@ func (m *Manager) withdrawOldSupervisorRules(ctx context.Context, b *box) error 
 	if err != nil {
 		return err
 	}
-	if sb == nil || (sb.Status.Phase != openshell.PhaseCompleted && sb.Status.Phase != openshell.PhaseError) {
-		return fmt.Errorf("OpenShell no longer reports an ended MicroVM")
+	if sb == nil || (sb.Status.Phase != openshell.PhaseReady && sb.Status.Phase != openshell.PhaseCompleted && sb.Status.Phase != openshell.PhaseError) {
+		return fmt.Errorf("OpenShell no longer reports a live legacy MicroVM")
 	}
 	// OpenShell composes attached providers' direct endpoints into the
 	// effective policy. Removing their generated rule names from the base
@@ -420,8 +421,8 @@ func (m *Manager) withdrawOldSupervisorRules(ctx context.Context, b *box) error 
 		if err != nil {
 			return err
 		}
-		if sb == nil || (sb.Status.Phase != openshell.PhaseCompleted && sb.Status.Phase != openshell.PhaseError) {
-			return fmt.Errorf("OpenShell no longer reports an ended MicroVM")
+		if sb == nil || (sb.Status.Phase != openshell.PhaseReady && sb.Status.Phase != openshell.PhaseCompleted && sb.Status.Phase != openshell.PhaseError) {
+			return fmt.Errorf("OpenShell no longer reports a live legacy MicroVM")
 		}
 		names := make([]string, 0, len(cfg.Policy.NetworkPolicies))
 		for rule := range cfg.Policy.NetworkPolicies {

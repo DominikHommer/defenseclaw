@@ -217,7 +217,7 @@ type record struct {
 	// it was kept, whose sessions all began on an older release.
 	SessionRelease string `json:"session_release,omitempty"`
 	// OldSupervisorNetworkClosed records that DefenseClaw withdrew the
-	// network rules of an ended MicroVM on a legacy supervisor. The next
+	// network rules of a ready or ended MicroVM on a legacy supervisor. The next
 	// successful start restores only its create-time policy, after OpenShell
 	// has replaced that supervisor; it survives a daemon restart.
 	OldSupervisorNetworkClosed bool `json:"old_supervisor_network_closed,omitempty"`

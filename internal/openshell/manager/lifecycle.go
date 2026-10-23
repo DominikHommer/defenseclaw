@@ -336,6 +336,15 @@ func (m *Manager) refuseRetained(b *box) error {
 // OpenShell returns as it is: it keeps its phase, and with it the
 // OpenShell gateway (HoldsCompute), until OpenShell reports another.
 func (m *Manager) stop(ctx context.Context, b *box) error {
+	return m.stopWithFlush(ctx, b, false)
+}
+
+var errLegacyFlushUnconfirmed = errors.New("the MicroVM's disk flush could not be confirmed")
+
+// stopWithFlush requires a confirmed in-guest sync only for an automatic
+// stop of a legacy MicroVM. An explicit user stop keeps its existing
+// loss-aware behavior when the guest cannot flush.
+func (m *Manager) stopWithFlush(ctx context.Context, b *box, requireFlush bool) error {
 	gw, err := m.gateway(ctx)
 	if err != nil {
 		return err
@@ -356,7 +365,10 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	// and its terminal ends as after /exit (graceful.go); a detached run
 	// the stop ends is marked interrupted, and once the stop is published
 	// its log is kept for `sandbox logs` of the stopped sandbox (runlog.go).
-	run := m.endHarness(ctx, gw, b)
+	run, flushed := m.endHarness(ctx, gw, b)
+	if requireFlush && stopLosesWrites(driver) && !flushed {
+		return errLegacyFlushUnconfirmed
+	}
 	if !ended {
 		m.lifecycle(ctx, b, audit.SandboxPhaseStopping, audit.SandboxTriggerStop, false, nil, nil)
 	}
