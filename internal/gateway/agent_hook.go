@@ -209,6 +209,11 @@ var agentHookDisconnectGrace = 30 * time.Second
 
 type hookClientContextKey struct{}
 
+// hookDeliveryReceiptContextKey marks the finalization of a hook call that
+// used the GAP-0286 delivery receipt: the receipt, not the connection,
+// records whether the agent took the answer.
+type hookDeliveryReceiptContextKey struct{}
+
 // agentHookPersistGrace bounds the terminal audit, hook_decision and receipt
 // writes once the hook's own work has been cancelled.
 const agentHookPersistGrace = 10 * time.Second
@@ -737,6 +742,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		}
 		persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
 		defer cancelPersist()
+		if delivery != nil {
+			// The receipt decided what the agent got (delivered or
+			// unconfirmed); a hang-up after it is not a missed answer.
+			persistCtx = context.WithValue(persistCtx, hookDeliveryReceiptContextKey{}, true)
+		}
 		auditExtra := mergeHookEnvelopeExtra(hookRequestAuditExtra(ctx, profile), sandboxGate.auditExtra())
 		if len(resp.KernelBlocksTold) > 0 {
 			auditExtra = mergeHookEnvelopeExtra(auditExtra, map[string]string{kernelBlocksToldExtra: strings.Join(resp.KernelBlocksTold, ",")})
@@ -838,7 +848,9 @@ func (a *APIServer) finalizeAgentHook(
 	panicked bool,
 	extra map[string]string,
 ) hookFinalizationResult {
-	if client, ok := ctx.Value(hookClientContextKey{}).(context.Context); ok && client.Err() != nil && resp.Action != "block" {
+	receipted, _ := ctx.Value(hookDeliveryReceiptContextKey{}).(bool)
+	if client, ok := ctx.Value(hookClientContextKey{}).(context.Context); ok && client.Err() != nil && resp.Action != "block" &&
+		resp.Action != hookActionUnconfirmed && !receipted {
 		if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
 			failed := a.hookFailedCheckResponse(ctx, connectorName, req, rawBody, req.Payload, hookCheckFailure{
 				base:  agentHookResponse{Severity: "WARN", Reason: "hook client disconnected before the gateway decision was delivered"},
