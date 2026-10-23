@@ -88,16 +88,34 @@ describe('1.0.4 operator routes and limits', () => {
   it('points managed identity checks to the administrator command', () => {
     const identity = page('enterprise/identity/sources.mdx');
     const childDomain = identity.split('On a managed Linux host, check an account as root:')[1]?.split('### Windows')[0] ?? '';
+    const groupRow = readFileSync(join(site, 'content/docs/enterprise/identity/sources.mdx'), 'utf8')
+      .split('\n').find((line) => line.startsWith('| A group assignment never matches |')) ?? '';
     assert.match(identity, /administrator runs.*defenseclaw-gateway config validate/);
     assert.match(childDomain, /enterprise linux profile-explain --user/);
     assert.match(childDomain, /\/etc\/defenseclaw\/config\.yaml/);
     assert.match(childDomain, /per-user.*commands refuse/);
+    assert.match(groupRow, /per-user install.*defenseclaw guardrail profile explain --user/);
+    assert.match(groupRow, /managed Linux.*defenseclaw-gateway enterprise linux profile-explain --user/);
+    assert.match(groupRow, /managed macOS.*defenseclaw-gateway enterprise macos profile-explain --user/);
+    assert.match(groupRow, /managed Windows.*defenseclaw\.exe.*enterprise windows profile-explain --user/);
   });
 
-  it('says where a reported foreign hook can be seen', () => {
+  it('uses the managed Windows administrator route instead of a config-only shell', () => {
+    const hooks = page('reference/commands/cli.mdx').split('### Per-user hooks (`enterprise hooks`)')[1]?.split('### ACP')[0] ?? '';
+    const envVars = page('reference/configuration/env-vars.mdx');
+    assert.match(hooks, /On managed Windows.*enterprise windows status.*enterprise windows verify/i);
+    assert.match(hooks, /DEFENSECLAW_CONFIG.*alone.*does not.*guardian/i);
+    assert.match(envVars, /On managed Windows.*elevated.*enterprise policy show --json.*without setting `DEFENSECLAW_CONFIG`/i);
+    assert.doesNotMatch(envVars, /On Windows, set.*\$env:DEFENSECLAW_CONFIG/i);
+  });
+
+  it('keeps native-hook warnings and names the managed OpenCode code gap', () => {
     const guard = page('enterprise/configure/foreign-hook-guard.mdx');
     assert.match(guard, /foreign_hooks: report.*enterprise policy show/i);
-    assert.doesNotMatch(guard, /hook prints a warning that names the file and digest/i);
+    assert.match(guard, /Cursor, Copilot and Devin.*defenseclaw-hook.*warning.*file and digest.*stderr/i);
+    assert.match(guard, /Hermes.*stderr warning.*without the file and digest/i);
+    assert.match(guard, /Amp.*drops.*warnings/i);
+    assert.match(guard, /GAP-0697.*OpenCode.*drops.*warnings/i);
   });
 
   it('gives a working managed restart route without promising it in the refusal', () => {
@@ -126,9 +144,12 @@ describe('1.0.4 operator routes and limits', () => {
   });
 
   it('distinguishes config validation from OpenShell install checks', () => {
-    const sandboxes = page('enterprise/runtime/sandboxes.mdx');
-    assert.match(sandboxes, /config validate.*(?:schema|profile).*ensure.*(?:install|pin)/i);
-    assert.doesNotMatch(sandboxes, /exits 1 where the gateway would refuse/);
+    for (const name of ['enterprise/runtime/sandboxes.mdx', 'enterprise/runtime/sandbox-reference.mdx']) {
+      const sandboxes = page(name);
+      assert.match(sandboxes, /config validate.*(?:schema|profile).*ensure.*(?:install|pin)/i, name);
+      assert.match(sandboxes, /ensure.*install prerequisites.*exact OpenShell.*install: setup/i, name);
+      assert.doesNotMatch(sandboxes, /exits 1 where the gateway would refuse/, name);
+    }
   });
 
   it('gives an executable uninstall route after sandbox teardown', () => {
@@ -163,8 +184,12 @@ describe('1.0.4 operator routes and limits', () => {
   });
 
   it('runs gateway examples on the pinned Go version through the shard runner', () => {
-    const engine = page('reference/policy/cel/engine.mdx');
-    assert.match(engine, /Go 1\.26\.4/);
-    assert.match(engine, /scripts\/go_test_shards\.py --package-dir internal\/gateway --shard-count 16/);
+    for (const name of ['reference/policy/cel/engine.mdx', 'reference/policy/cel/authoring.mdx']) {
+      const example = page(name);
+      assert.match(example, /Go 1\.26\.4/, name);
+      assert.match(example, /go test -timeout 30m \.\/internal\/guardrail\/semantic \.\/internal\/guardrail/, name);
+      assert.match(example, /python3 scripts\/go_test_shards\.py --package-dir internal\/gateway --shard-count 16 -- go test -timeout 30m \.\/internal\/gateway/, name);
+      assert.doesNotMatch(example, /go test -timeout 30m \.\/internal\/guardrail\/semantic \.\/internal\/guardrail \.\/internal\/gateway/, name);
+    }
   });
 });
