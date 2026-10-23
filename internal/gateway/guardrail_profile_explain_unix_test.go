@@ -89,8 +89,8 @@ func TestUnmatchedUserEntryWarns(t *testing.T) {
 // GAP-0361: a uid the account database cannot name now (a cold gateway with
 // the domain controller away) is explained as its hook calls are decided: a
 // users entry naming the uid selects its profile, as the hook's
-// kernel-verified uid does, and the rest default_lookup_failed with the
-// reason. Explain printed default_lookup_failed for it.
+// kernel-verified uid does; a request needing other missing facts is refused
+// and names them (default_lookup_failed). Explain used to report only the match.
 func TestProfileExplainUIDTheDirectoryCannotNameMatchesItsUsersEntry(t *testing.T) {
 	prevFacts, prevCached, prevBlocking := profileExplainDirectoryFacts, profileExplainCachedSubject, identityLookupBlocking.Load()
 	t.Cleanup(func() {

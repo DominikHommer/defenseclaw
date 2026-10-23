@@ -913,9 +913,9 @@ func localProfileSubject(account *osuser.User) profileSubject {
 	groups, err := accountGroups(account)
 	subject.Groups = groups
 	if err != nil {
-		// Groups that could not be listed are unknown, not empty: the subject
-		// selects as a failed lookup does for a request (default_lookup_failed)
-		// and explain names the reason.
+		// Groups that could not be listed are unknown, not empty. A request
+		// whose assignment needs them is refused (default_lookup_failed),
+		// and explain names the missing group fact and the lookup error.
 		subject.LookupFailed, subject.LookupError = true, err.Error()
 	}
 	return subject
