@@ -251,7 +251,13 @@ func resolveWindowsCodexRequirementsLayout(
 		),
 		SecureClient: protectedConfig.SecureClientIntegration(),
 	}
-	if err := enableWindowsCodexManifestTargets(stateRoot, &opts); err != nil {
+	if protectedConfig.StandaloneEnterprise() {
+		// Machine policy follows the administrator's connector configuration,
+		// even before the enumerator enrolls anyone for that connector.
+		for _, name := range enterprisehooks.EffectiveWindowsStandaloneHookConnectors(protectedConfig) {
+			opts.EnableManifestTarget(name)
+		}
+	} else if err := enableWindowsCodexManifestTargets(stateRoot, &opts); err != nil {
 		return connector.WindowsCodexMachineRequirementsOptions{}, err
 	}
 

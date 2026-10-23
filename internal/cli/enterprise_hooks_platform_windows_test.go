@@ -12,9 +12,159 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+// A configured machine-policy connector stays active with no enrolled SIDs.
+// The same state occurs on a fresh install and after the final account is cut
+// off; the guardian must publish an empty registry, not remove its hook.
+func TestWindowsConfiguredMachinePolicySurvivesEmptyEnrollment(t *testing.T) {
+	for _, name := range []string{"claudecode", "codex", "cursor"} {
+		t.Run(name, func(t *testing.T) {
+			previousCfg := cfg
+			previousClaudeReader, previousClaudePublisher := enterpriseHookClaudePolicyTargetsReader, enterpriseHookClaudePolicyTargetsPublisher
+			previousCodexLayout, previousCodexReader := enterpriseHookCodexRequirementsLayoutResolver, enterpriseHookCodexRuntimeRegistryReader
+			previousCodexRemover, previousCodexPublisher := enterpriseHookCodexRequirementsRemover, enterpriseHookCodexTargetsPublisher
+			previousCursorReader, previousCursorPublisher := enterpriseHookCursorPolicyTargetsReader, enterpriseHookCursorPolicyTargetsPublisher
+			previousClaudeDeactivator, previousCursorDeactivator := enterpriseHookClaudePolicyDeactivator, enterpriseHookCursorPolicyDeactivator
+			previousClaudeIdentity, previousCursorIdentity := enterpriseHookClaudePolicyIdentityVerifier, enterpriseHookCursorPolicyIdentityVerifier
+			t.Cleanup(func() {
+				cfg = previousCfg
+				enterpriseHookClaudePolicyTargetsReader, enterpriseHookClaudePolicyTargetsPublisher = previousClaudeReader, previousClaudePublisher
+				enterpriseHookCodexRequirementsLayoutResolver, enterpriseHookCodexRuntimeRegistryReader = previousCodexLayout, previousCodexReader
+				enterpriseHookCodexRequirementsRemover, enterpriseHookCodexTargetsPublisher = previousCodexRemover, previousCodexPublisher
+				enterpriseHookCursorPolicyTargetsReader, enterpriseHookCursorPolicyTargetsPublisher = previousCursorReader, previousCursorPublisher
+				enterpriseHookClaudePolicyDeactivator, enterpriseHookCursorPolicyDeactivator = previousClaudeDeactivator, previousCursorDeactivator
+				enterpriseHookClaudePolicyIdentityVerifier, enterpriseHookCursorPolicyIdentityVerifier = previousClaudeIdentity, previousCursorIdentity
+			})
+			cfg = &config.Config{
+				DeploymentMode: managed.DeploymentModeManagedEnterprise,
+				Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileStandalone},
+				Guardrail:      config.GuardrailConfig{Connector: name},
+			}
+			active := true
+			enterpriseHookClaudePolicyTargetsReader = func() ([]string, bool, error) { return nil, name == "claudecode" && active, nil }
+			enterpriseHookCursorPolicyTargetsReader = func() ([]enterprisehooks.WindowsCursorManagedRuntimeTarget, bool, error) {
+				return nil, name == "cursor" && active, nil
+			}
+			enterpriseHookCodexRequirementsLayoutResolver = func(string) (connector.WindowsCodexMachineRequirementsOptions, error) {
+				return connector.WindowsCodexMachineRequirementsOptions{HookBinary: `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`, GatewayAddr: "127.0.0.1:32109", GatewayServiceName: "DefenseClawGateway"}, nil
+			}
+			enterpriseHookCodexRuntimeRegistryReader = func(string) (connector.WindowsCodexManagedRuntimeRegistry, error) {
+				return connector.WindowsCodexManagedRuntimeRegistry{Active: name == "codex" && active, GatewayAddr: "127.0.0.1:32109", GatewayServiceName: "DefenseClawGateway"}, nil
+			}
+			var removedCodex bool
+			var removedOther bool
+			enterpriseHookClaudePolicyDeactivator = func() error { removedOther, active = true, false; return nil }
+			enterpriseHookCursorPolicyDeactivator = func() error { removedOther, active = true, false; return nil }
+			enterpriseHookCodexRequirementsRemover = func(connector.WindowsCodexMachineRequirementsOptions) (connector.WindowsCodexMachineRequirementsReport, error) {
+				removedCodex = true
+				active = false
+				return connector.WindowsCodexMachineRequirementsReport{OK: true, SafeToRemoveBinary: true}, nil
+			}
+			enterpriseHookClaudePolicyTargetsPublisher = func([]string) error { return nil }
+			enterpriseHookCursorPolicyTargetsPublisher = func([]enterprisehooks.WindowsCursorManagedRuntimeTarget) error { return nil }
+			enterpriseHookCodexTargetsPublisher = func(connector.WindowsCodexMachineRequirementsOptions, []connector.WindowsCodexManagedRuntimeTarget) error {
+				return nil
+			}
+			enterpriseHookClaudePolicyIdentityVerifier = func(string, string, string) error { return nil }
+			enterpriseHookCursorPolicyIdentityVerifier = func(string, string, string) error { return nil }
+
+			manifest := enterprisehooks.Manifest{}
+			if err := syncEnterpriseHookManagedMachineEnrollments(manifest, "127.0.0.1:32109", false); err != nil {
+				t.Fatal(err)
+			}
+			if removedCodex {
+				t.Fatal("empty Codex enrollment removed configured machine requirements")
+			}
+			if err := verifyEnterpriseHookManagedEnrollments(manifest, "127.0.0.1:32109"); err != nil {
+				t.Fatalf("configured %s policy with zero targets failed verify: %v", name, err)
+			}
+			cfg.Guardrail.Connector = "copilot"
+			if err := syncEnterpriseHookManagedMachineEnrollments(manifest, "127.0.0.1:32109", true); err != nil {
+				t.Fatal(err)
+			}
+			if active || (!removedCodex && !removedOther) {
+				t.Fatal("removing the connector from admin config did not remove its machine hook")
+			}
+			if err := verifyEnterpriseHookManagedEnrollments(manifest, "127.0.0.1:32109"); err != nil {
+				t.Fatalf("removed %s policy failed verify: %v", name, err)
+			}
+		})
+	}
+}
+
+// Upgrading an older standalone install can start with no machine policy at
+// all for a configured connector. Reconcile must restore its guard before it
+// publishes the still-empty enrollment registry.
+func TestWindowsConfiguredMachinePolicyRepairsLegacyEmptyEnrollment(t *testing.T) {
+	for _, name := range []string{"claudecode", "codex", "cursor"} {
+		t.Run(name, func(t *testing.T) {
+			previousCfg := cfg
+			previousClaudeReader, previousClaudePublisher := enterpriseHookClaudePolicyTargetsReader, enterpriseHookClaudePolicyTargetsPublisher
+			previousCodexLayout, previousCodexReader := enterpriseHookCodexRequirementsLayoutResolver, enterpriseHookCodexRuntimeRegistryReader
+			previousCodexReconciler, previousCodexPublisher := enterpriseHookCodexRequirementsReconciler, enterpriseHookCodexTargetsPublisher
+			previousCursorReader, previousCursorPublisher := enterpriseHookCursorPolicyTargetsReader, enterpriseHookCursorPolicyTargetsPublisher
+			previousClaudeEnsurer, previousCursorEnsurer := enterpriseHookClaudePolicyEnsurer, enterpriseHookCursorPolicyEnsurer
+			previousClaudeIdentity, previousCursorIdentity := enterpriseHookClaudePolicyIdentityVerifier, enterpriseHookCursorPolicyIdentityVerifier
+			t.Cleanup(func() {
+				cfg = previousCfg
+				enterpriseHookClaudePolicyTargetsReader, enterpriseHookClaudePolicyTargetsPublisher = previousClaudeReader, previousClaudePublisher
+				enterpriseHookCodexRequirementsLayoutResolver, enterpriseHookCodexRuntimeRegistryReader = previousCodexLayout, previousCodexReader
+				enterpriseHookCodexRequirementsReconciler, enterpriseHookCodexTargetsPublisher = previousCodexReconciler, previousCodexPublisher
+				enterpriseHookCursorPolicyTargetsReader, enterpriseHookCursorPolicyTargetsPublisher = previousCursorReader, previousCursorPublisher
+				enterpriseHookClaudePolicyEnsurer, enterpriseHookCursorPolicyEnsurer = previousClaudeEnsurer, previousCursorEnsurer
+				enterpriseHookClaudePolicyIdentityVerifier, enterpriseHookCursorPolicyIdentityVerifier = previousClaudeIdentity, previousCursorIdentity
+			})
+			cfg = &config.Config{
+				DeploymentMode: managed.DeploymentModeManagedEnterprise,
+				Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileStandalone},
+				Guardrail:      config.GuardrailConfig{Connector: name},
+			}
+			active := false
+			ensured := false
+			enterpriseHookClaudePolicyTargetsReader = func() ([]string, bool, error) { return nil, name == "claudecode" && active, nil }
+			enterpriseHookCursorPolicyTargetsReader = func() ([]enterprisehooks.WindowsCursorManagedRuntimeTarget, bool, error) {
+				return nil, name == "cursor" && active, nil
+			}
+			enterpriseHookCodexRequirementsLayoutResolver = func(string) (connector.WindowsCodexMachineRequirementsOptions, error) {
+				return connector.WindowsCodexMachineRequirementsOptions{HookBinary: `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`, GatewayAddr: "127.0.0.1:32109", GatewayServiceName: "DefenseClawGateway"}, nil
+			}
+			enterpriseHookCodexRuntimeRegistryReader = func(string) (connector.WindowsCodexManagedRuntimeRegistry, error) {
+				return connector.WindowsCodexManagedRuntimeRegistry{Active: name == "codex" && active, GatewayAddr: "127.0.0.1:32109", GatewayServiceName: "DefenseClawGateway"}, nil
+			}
+			enterpriseHookClaudePolicyEnsurer = func(connector.SetupOpts) error { active, ensured = true, true; return nil }
+			enterpriseHookCursorPolicyEnsurer = func(connector.SetupOpts) error { active, ensured = true, true; return nil }
+			enterpriseHookCodexRequirementsReconciler = func(opts connector.WindowsCodexMachineRequirementsOptions) (connector.WindowsCodexMachineRequirementsReport, error) {
+				if !opts.CodexTargetEnabled {
+					t.Fatal("Codex repair did not enable the configured machine guard")
+				}
+				active, ensured = true, true
+				return connector.WindowsCodexMachineRequirementsReport{OK: true}, nil
+			}
+			enterpriseHookClaudePolicyTargetsPublisher = func([]string) error { return nil }
+			enterpriseHookCursorPolicyTargetsPublisher = func([]enterprisehooks.WindowsCursorManagedRuntimeTarget) error { return nil }
+			enterpriseHookCodexTargetsPublisher = func(connector.WindowsCodexMachineRequirementsOptions, []connector.WindowsCodexManagedRuntimeTarget) error {
+				return nil
+			}
+			enterpriseHookClaudePolicyIdentityVerifier = func(string, string, string) error { return nil }
+			enterpriseHookCursorPolicyIdentityVerifier = func(string, string, string) error { return nil }
+			manifest := enterprisehooks.Manifest{}
+			if err := syncEnterpriseHookManagedMachineEnrollments(manifest, "127.0.0.1:32109", true); err != nil {
+				t.Fatal(err)
+			}
+			if !ensured || !active {
+				t.Fatal("legacy empty enrollment did not restore the configured machine guard")
+			}
+			if err := verifyEnterpriseHookManagedEnrollments(manifest, "127.0.0.1:32109"); err != nil {
+				t.Fatalf("restored empty policy failed verify: %v", err)
+			}
+		})
+	}
+}
 
 func TestDeferredTargetSessionAvailabilityDowngradesOnlyTypedAbsence(t *testing.T) {
 	previous := enterpriseHookWindowsTargetSessionCheck

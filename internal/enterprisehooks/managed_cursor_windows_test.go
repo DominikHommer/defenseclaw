@@ -151,6 +151,83 @@ func TestWindowsCursorInactiveSnapshotPreservesForeignEnterpriseConfig(t *testin
 	}
 }
 
+func TestWindowsCursorActiveEmptySnapshotRestoresClosedGuard(t *testing.T) {
+	previousRoot, previousOwner := windowsCursorManagedRootResolver, windowsManagedPolicyOwnerSID
+	root := filepath.Join(t.TempDir(), "Cursor")
+	windowsCursorManagedRootResolver = func() (string, error) { return root, nil }
+	windowsManagedPolicyOwnerSID = func() (*windows.SID, error) {
+		return windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	}
+	t.Cleanup(func() {
+		windowsCursorManagedRootResolver, windowsManagedPolicyOwnerSID = previousRoot, previousOwner
+	})
+	paths, err := windowsCursorManagedPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := WindowsCursorManagedPolicyTeardownOptions{
+		HookExecutable:     `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`,
+		GatewayAddr:        "127.0.0.1:18970",
+		GatewayServiceName: "DefenseClawGateway",
+	}
+	adapter, err := connector.RenderWindowsCursorEnterpriseAdapter(opts.HookExecutable, "closed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks, err := connector.MergeWindowsCursorEnterpriseHooks([]byte("{}\n"), paths.Adapter, "closed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := windowsCursorManagedReceiptBody(windowsCursorManagedPolicyReceipt{SchemaVersion: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := windowsCursorManagedPolicyState{
+		SchemaVersion:      1,
+		HookExecutable:     opts.HookExecutable,
+		GatewayAddr:        opts.GatewayAddr,
+		GatewayServiceName: opts.GatewayServiceName,
+		HookFailMode:       "closed",
+		AdapterSHA256:      windowsManagedPolicyDigest(adapter),
+		ReceiptSHA256:      windowsManagedPolicyDigest(receipt),
+		Targets:            []WindowsCursorManagedRuntimeTarget{},
+	}
+	stateBody, err := windowsCursorManagedStateBody(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := WindowsCursorManagedPolicyTeardownSnapshot{
+		PolicyActive:              true,
+		HooksExisted:              true,
+		Hooks:                     hooks,
+		HooksSecurityDescriptor:   windowsCursorTestTrustedSDDL,
+		HooksAttributes:           windows.FILE_ATTRIBUTE_ARCHIVE,
+		AdapterExisted:            true,
+		Adapter:                   adapter,
+		AdapterSecurityDescriptor: windowsCursorTestTrustedSDDL,
+		AdapterAttributes:         windows.FILE_ATTRIBUTE_ARCHIVE,
+		StateExisted:              true,
+		State:                     stateBody,
+		StateSecurityDescriptor:   windowsCursorTestTrustedSDDL,
+		StateAttributes:           windows.FILE_ATTRIBUTE_ARCHIVE,
+		ReceiptExisted:            true,
+		Receipt:                   receipt,
+		ReceiptSecurityDescriptor: windowsCursorTestPrivateSDDL,
+		ReceiptAttributes:         windows.FILE_ATTRIBUTE_ARCHIVE,
+	}
+	if err := validateWindowsCursorManagedTeardownSnapshot(opts, snapshot); err != nil {
+		t.Fatalf("closed zero-target Cursor snapshot rejected during upgrade or rollback: %v", err)
+	}
+	state.HookFailMode = "open"
+	snapshot.State, err = windowsCursorManagedStateBody(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateWindowsCursorManagedTeardownSnapshot(opts, snapshot); err == nil {
+		t.Fatal("open zero-target Cursor snapshot was accepted")
+	}
+}
+
 func TestWindowsCursorSnapshotRejectsContradictoryOwnership(t *testing.T) {
 	metadata := windowsCursorTestTrustedSDDL
 	for name, snapshot := range map[string]WindowsCursorManagedPolicyTeardownSnapshot{

@@ -218,8 +218,8 @@ The guardian writes a user's registrations only while that user has an active
 found but could not enroll (`hook_contract_unverified`, `agent_unprotected`;
 [Enrollment](/docs/enterprise/configure/enrollment#agents-that-cannot-be-enrolled)). Each
 applies to one account: `security_complete` is `false`, but `verify` and MDM
-detection still pass. Cursor's machine hooks file is published only while a user
-is enrolled for Cursor ([Machine policy](/docs/enterprise/configure/machine-policy#routes-by-connector)).
+detection still pass. The machine hooks for each configured connector remain
+installed with no enrolled users and refuse their tool calls ([Machine policy](/docs/enterprise/configure/machine-policy#routes-by-connector)).
 
 ## Review the audit log
 
