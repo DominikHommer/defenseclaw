@@ -122,12 +122,9 @@ type identityCache[T any] struct {
 }
 
 type identityCacheEntry[T any] struct {
-	facts     T
-	ok        bool
-	fetchedAt time.Time
-	// generation advances only when a lookup succeeds. A hook that needs
-	// current facts can distinguish a new answer from old cached facts.
-	generation  uint64
+	facts       T
+	ok          bool
+	fetchedAt   time.Time
 	nextAttempt time.Time
 	inflight    chan struct{}
 	// failedSince is when the key's lookup began failing (zero while it
@@ -144,51 +141,6 @@ type identityCacheEntry[T any] struct {
 	// staleBefore makes the facts due for a refresh that a blocking request
 	// waits for, when they were fetched before it (refreshSoon).
 	staleBefore time.Time
-}
-
-// getFresh waits for a lookup started for this call (or one already in
-// flight). A failed or timed-out lookup never returns facts from before it.
-// Managed macOS hooks use this for secondary groups: Open Directory gives
-// no change notification for their removal.
-func (c *identityCache[T]) getFresh(key string, wait time.Duration) (T, bool) {
-	var zero T
-	if c == nil || key == "" || c.resolve == nil {
-		return zero, false
-	}
-	c.mu.Lock()
-	entry := c.entries[key]
-	if entry == nil {
-		if len(c.entries) >= identityDirectoryMax {
-			c.evictLocked()
-		}
-		entry = &identityCacheEntry[T]{}
-		c.entries[key] = entry
-	}
-	now := c.now()
-	c.dropAgedLocked(key, entry, now)
-	before := entry.generation
-	if entry.inflight == nil && (entry.failedSince.IsZero() || !now.Before(entry.nextAttempt)) {
-		c.refreshLocked(key, entry)
-	}
-	done := entry.inflight
-	c.mu.Unlock()
-	if done == nil {
-		return zero, false
-	}
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
-	select {
-	case <-done:
-	case <-timer.C:
-		return zero, false
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.dropAgedLocked(key, entry, c.now())
-	if entry.ok && entry.generation > before {
-		return entry.facts, true
-	}
-	return zero, false
 }
 
 func newIdentityDirectoryCache(resolve func(string) (useridentity.DirectoryFacts, error)) *identityDirectoryCache {
@@ -616,7 +568,6 @@ func (c *identityCache[T]) refreshLocked(key string, entry *identityCacheEntry[T
 		switch {
 		case err == nil:
 			entry.facts, entry.ok, entry.fetchedAt, entry.trustedUntil = facts, true, now, until
-			entry.generation++
 		case entry.ok && errors.As(err, &unconfirmed):
 			var none T
 			entry.facts, entry.ok = none, false
