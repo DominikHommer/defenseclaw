@@ -703,6 +703,60 @@ func TestEnsureRestartsAHelperThatRunsAnotherTetragonMode(t *testing.T) {
 	}
 }
 
+// GAP-0241: an RPM upgrade can observe systemd's stop/start handoff while
+// the old helper is still active. start then returns successfully without
+// replacing that process, leaving its published consume mode after the
+// package result claims it restarted into the rendered off mode.
+func TestPackageUpgradeWaitsForSensorHelperMode(t *testing.T) {
+	for _, previous := range []string{"1.0.2", "1.0.3"} {
+		t.Run(previous, func(t *testing.T) {
+			h := packageHost(t, previous)
+			requireOK(t, h.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package"}))
+			h.writeTetragonState(kernelpolicy.FileState{Version: 1, UpdatedAt: time.Now().Add(-time.Minute),
+				HelperPID: 42, KernelPolicy: kernelpolicy.Digest(), Effective: "consume", InSync: true,
+				Intent: kernelpolicy.IntentStatus{Mode: kernelpolicy.ModeConsume}})
+			stagePackage(t, h, "1.0.4")
+			h.services.keepActiveOnStop = map[string]bool{unitSensorHelper: true}
+			h.services.afterRestart = func(unit Unit) {
+				if unit.Name == unitSensorHelper {
+					h.writeTetragonState(kernelpolicy.FileState{Version: 1, UpdatedAt: time.Now(),
+						HelperPID: 43, KernelPolicy: kernelpolicy.Digest(), Effective: "off", InSync: true,
+						Intent: kernelpolicy.IntentStatus{Mode: kernelpolicy.ModeOff}})
+				}
+			}
+			before := len(h.services.calls)
+			requireOK(t, h.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package"}))
+			if !strings.Contains(strings.Join(h.services.calls[before:], "\n"), "restart "+unitSensorHelper) {
+				t.Fatal("upgrade only started the helper that remained active")
+			}
+			if status := h.run(Options{Action: ActionStatus}); hasWarning(status, codeKernelPolicyNotApplied) {
+				t.Fatalf("upgrade returned before the helper ran its rendered mode: %+v", status.Warnings)
+			}
+			if ensure := h.run(Options{Action: ActionEnsure, FromPackage: true}); !ensure.Noop {
+				t.Fatalf("a second ensure should be a no-op: %+v", ensure)
+			}
+		})
+	}
+}
+
+// A restart acknowledgement is insufficient when the helper keeps
+// publishing the previous mode. The package run must report an activation
+// failure so an operator never mistakes the upgrade for a verified install.
+func TestPackageUpgradeRefusesStaleSensorHelperMode(t *testing.T) {
+	h := packageHost(t, "1.0.3")
+	requireOK(t, h.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package"}))
+	h.writeTetragonState(kernelpolicy.FileState{Version: 1, UpdatedAt: time.Now().Add(-time.Minute),
+		HelperPID: 42, KernelPolicy: kernelpolicy.Digest(), Effective: "consume", InSync: true,
+		Intent: kernelpolicy.IntentStatus{Mode: kernelpolicy.ModeConsume}})
+	stagePackage(t, h, "1.0.4")
+	h.services.keepActiveOnStop = map[string]bool{unitSensorHelper: true}
+	r := h.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package"})
+	requireError(t, r, codeActivate)
+	if !strings.Contains(r.Errors[0].Message, "did not publish enterprise.tetragon mode off") {
+		t.Fatalf("activation did not name the unverified helper mode: %+v", r.Errors)
+	}
+}
+
 // GAP-0046: a pause or resume that wrote its file succeeds whatever else
 // the host reports (here a recorded policy with no helper running, which
 // status fails on), and prints the change, not the whole status: the fleet
