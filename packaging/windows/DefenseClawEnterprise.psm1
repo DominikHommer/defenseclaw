@@ -26073,6 +26073,14 @@ function Get-DefenseClawRetiredInstallTreeAllowlist {
             (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'lib\defenseclaw')
         )
         $files += (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'lib\defenseclaw\policy_compiler.py')
+        # Hook registrations remain live until pending.json is retired. The
+        # pre-finalization shape check therefore still sees the exact managed
+        # OpenCode plugin; its post-commit removal runs immediately afterward.
+        $plugin = Get-DefenseClawStandaloneOpenCodePluginPaths -Layout @{
+            InstallRoot = $RetiredRoot
+        }
+        $directories += @([string]$plugin.ShareDirectory, [string]$plugin.PluginDirectory)
+        $files += [string]$plugin.PluginPath
     }
     return @{
         directories = @(
