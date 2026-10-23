@@ -2964,7 +2964,7 @@ func loadConfigSourceCheckedWithLayout(
 				return nil, fmt.Errorf("config: managed_enterprise config trust check failed: %w", err)
 			}
 		}
-		if err := validateManagedEnterpriseRuntime(&cfg, checkPolicyInputs, false); err != nil {
+		if err := validateManagedEnterpriseRuntime(&cfg, checkPolicyInputs, true); err != nil {
 			return nil, err
 		}
 	}

@@ -135,6 +135,12 @@ func windowsEnterpriseStandaloneConfigCompile(configPath string) error {
 // the transaction, which migrates it (writing its pins with this release's
 // digest) and then runs the same check.
 func windowsEnterpriseStandaloneKeptConfigPreflight() error {
+	// An interrupted transaction may have left the candidate in config.yaml
+	// while its services are stopped. The lifecycle must restore its recorded
+	// preimage before this release inspects the kept config.
+	if windowsEnterpriseStandaloneTransactionPending() {
+		return nil
+	}
 	layout, err := windowsEnterpriseStandaloneLayoutForPreflight()
 	if err != nil {
 		return nil

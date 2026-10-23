@@ -8,11 +8,13 @@ package cli
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // GAP-0705: these values pass the gateway's generic compiler, but the
@@ -60,6 +62,61 @@ func TestWindowsStandaloneConfigPreflightRefusesForeignRuntimePaths(t *testing.T
 				t.Fatalf("installed config changed: %q, %v", got, readErr)
 			}
 		})
+	}
+}
+
+// Setup re-stamps the fixed runtime directory's ACL during ensure. An
+// inherited Users write ACE there is repairable drift, so it must not stop
+// a valid supplied config before Setup can do that repair.
+func TestWindowsStandaloneConfigPreflightAllowsRepairableRuntimeACLDrift(t *testing.T) {
+	previousLayout, previousSource := windowsEnterpriseStandaloneLayoutForPreflight, windowsEnterpriseStandaloneConfigSource
+	t.Cleanup(func() {
+		windowsEnterpriseStandaloneLayoutForPreflight, windowsEnterpriseStandaloneConfigSource = previousLayout, previousSource
+	})
+	windowsEnterpriseStandaloneConfigSource = func(string) error { return nil }
+	programData, err := winpath.TrustedProgramData()
+	if err != nil {
+		t.Skipf("resolve ProgramData: %v", err)
+	}
+	root, err := os.MkdirTemp(programData, "dc-ensure-acl-test-")
+	if err != nil {
+		t.Skipf("create a fixture under ProgramData: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	runtimeDir := filepath.Join(root, "runtime")
+	if err := os.Mkdir(runtimeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("icacls.exe", root, "/inheritance:r", "/grant:r",
+		"*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-32-545:(OI)(CI)RX").CombinedOutput(); err != nil {
+		t.Skipf("set trusted fixture ACL: %v: %s", err, output)
+	}
+	if output, err := exec.Command("icacls.exe", root, "/setowner", "*S-1-5-32-544", "/T", "/C").CombinedOutput(); err != nil {
+		t.Skipf("set fixture owner: %v: %s", err, output)
+	}
+	const serviceUser = `NT SERVICE\DefenseClawGateway`
+	if err := managed.ValidateTrustedServiceRuntimeDir(runtimeDir, "managed data_dir", serviceUser); err != nil {
+		t.Fatalf("the undrifted fixed runtime directory is untrusted: %v", err)
+	}
+	if output, err := exec.Command("icacls.exe", runtimeDir, "/grant", "*S-1-5-32-545:(OI)(CI)M").CombinedOutput(); err != nil {
+		t.Fatalf("drift runtime ACL: %v: %s", err, output)
+	}
+	if err := managed.ValidateTrustedServiceRuntimeDir(runtimeDir, "managed data_dir", serviceUser); err == nil {
+		t.Fatal("the Users write ACE did not make the runtime directory untrusted")
+	}
+	installed := filepath.Join(root, "etc", "config.yaml")
+	windowsEnterpriseStandaloneLayoutForPreflight = func() (managed.StandaloneLayout, error) {
+		return managed.StandaloneLayout{
+			GOOS: "windows", ConfigPath: installed, DataDir: runtimeDir,
+			SecretsDir: filepath.Join(root, "secrets"), ServiceUser: serviceUser,
+		}, nil
+	}
+	candidate := filepath.Join(root, "candidate.yaml")
+	if err := os.WriteFile(candidate, []byte(standaloneGatewayCheckConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := windowsEnterpriseStandaloneConfigPreflight(candidate); err != nil {
+		t.Fatalf("repairable fixed runtime ACL drift refused before ensure: %v", err)
 	}
 }
 

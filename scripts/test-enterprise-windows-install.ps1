@@ -552,6 +552,22 @@ try {
     $run = Invoke-Lifecycle -Name '02-setup-ensure-noop' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
     Assert-Result $run 'setup-ensure-noop' (@('--action', 'ensure', '--noop', '--installed', '--version', $Version, '--ready') + $installedChecks)
 
+    Step 'Setup /ensure repairs a drifted runtime ACL with CONFIG='
+    $runtimeDirectory = Join-Path $stateRoot 'runtime'
+    & icacls.exe $runtimeDirectory /grant '*S-1-5-32-545:(OI)(CI)M' | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail "icacls could not drift $runtimeDirectory" }
+    $run = Invoke-Lifecycle -Name '02-ensure-runtime-acl-repair' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
+    Assert-Result $run 'ensure-runtime-acl-repair' (@('--action', 'ensure', '--installed', '--version', $Version, '--ready') + $installedChecks)
+    Assert-ServicesRunning
+    $writeMask = [int][Security.AccessControl.FileSystemRights]::Write
+    foreach ($ace in (Get-Acl -LiteralPath $runtimeDirectory).Access) {
+        $sid = $ace.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        if ($sid -eq 'S-1-5-32-545' -and $ace.AccessControlType -eq 'Allow' -and
+            (([int]$ace.FileSystemRights -band $writeMask) -ne 0)) {
+            Fail "Setup left a Users write ACE on $runtimeDirectory"
+        }
+    }
+
     Step 'Setup /ensure refuses foreign-OS config before replacing the running deployment'
     $foreignConfig = Join-Path $stage 'foreign-os-config.yaml'
     [IO.File]::WriteAllText($foreignConfig, "data_dir: /opt/cisco/defenseclaw/runtime`n" + $configText + "`n", [Text.UTF8Encoding]::new($false))

@@ -853,6 +853,30 @@ func TestWindowsEnterpriseConfigRefusalRecoversAPendingTransaction(t *testing.T)
 			t.Fatalf("%s pending=%v: result %+v", tc.action, pending, result)
 		}
 	}
+	// An upgrade without CONFIG keeps config.yaml, but an interrupted older
+	// transaction may have left a foreign candidate there. Its recovery owns
+	// the first read of that file and restores the previous config.
+	installed := filepath.Join(t.TempDir(), "config.yaml")
+	foreign := "data_dir: /opt/cisco/defenseclaw/runtime\n" +
+		strings.Replace(strings.Replace(standaloneGatewayCheckConfig, "config_version: 8", "config_version: 9", 1),
+			"  rule_pack_dir: \"\"\n", "", 1)
+	if err := os.WriteFile(installed, []byte(foreign), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	windowsEnterpriseStandaloneLayoutForPreflight = func() (managed.StandaloneLayout, error) {
+		return managed.StandaloneLayout{
+			GOOS: "windows", ConfigPath: installed, DataDir: filepath.Join(t.TempDir(), "runtime"),
+			SecretsDir: filepath.Join(t.TempDir(), "secrets"), ServiceUser: `NT SERVICE\DefenseClawGateway`,
+		}, nil
+	}
+	windowsEnterpriseStandaloneTransactionPending = func() bool { return false }
+	if err := windowsEnterpriseStandaloneKeptConfigPreflight(); err == nil || !strings.Contains(err.Error(), "data_dir") {
+		t.Fatalf("healthy upgrade did not refuse the foreign kept config: %v", err)
+	}
+	windowsEnterpriseStandaloneTransactionPending = func() bool { return true }
+	if err := windowsEnterpriseStandaloneKeptConfigPreflight(); err != nil {
+		t.Fatalf("upgrade with kept config refused before pending transaction recovery: %v", err)
+	}
 }
 
 // On a host without the log folder the first run created it but still

@@ -13,26 +13,29 @@ import (
 )
 
 // ValidateManagedStandaloneRuntimeCandidate runs the managed gateway's
-// service-time content and path checks on a staged standalone config. The
-// caller checks the staged file's ownership and the fixed layout separately.
-// Before a first install the runtime directory does not yet exist; Setup
-// creates it with its protected ACL before the strict installed-file load.
+// service-time content and policy-input checks on a staged standalone config.
+// The caller checks the staged file's ownership and fixed data_dir layout
+// separately. Setup creates or re-stamps that runtime directory's ACL during
+// the transaction, before the strict installed-file load. Checking its old
+// ACL here would prevent ensure from repairing ordinary drift.
 func ValidateManagedStandaloneRuntimeCandidate(cfg *Config) error {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return errors.New("standalone runtime candidate is unavailable")
 	}
-	return validateManagedEnterpriseRuntime(cfg, true, true)
+	return validateManagedEnterpriseRuntime(cfg, true, false)
 }
 
-func validateManagedEnterpriseRuntime(cfg *Config, checkPolicyInputs, allowAbsentDataDir bool) error {
-	checkDataDir := true
-	if allowAbsentDataDir {
-		if _, err := os.Lstat(cfg.DataDir); errors.Is(err, os.ErrNotExist) {
-			checkDataDir = false
-		} else if err != nil {
-			return fmt.Errorf("config: inspect managed data_dir: %w", err)
-		}
+// ValidateManagedStandaloneRuntimeContent checks the service-time rules that
+// depend only on config values. The Unix lifecycle validates policy inputs
+// separately through its rooted filesystem and trust callback.
+func ValidateManagedStandaloneRuntimeContent(cfg *Config) error {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return errors.New("standalone runtime candidate is unavailable")
 	}
+	return validateManagedEnterpriseRuntime(cfg, false, false)
+}
+
+func validateManagedEnterpriseRuntime(cfg *Config, checkPolicyInputs, checkDataDir bool) error {
 	if checkDataDir {
 		if err := managed.ValidateTrustedServiceRuntimeDir(
 			cfg.DataDir, "managed data_dir", os.Getenv(managed.WindowsServiceAccountEnv),
