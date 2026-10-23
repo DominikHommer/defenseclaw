@@ -625,11 +625,12 @@ session (a Claude Code task, a Codex sub-agent), and one in a session of its own
 from its first hook after the gateway linked that session to the parent.
 `last_subagent_id` is the `ais-`
 instance of the newest one, the one its own records carry. `upn` is the
-account's UPN in the directory facts cached when the agent was last seen.
-Each later hook replaces that value: if the cache has no UPN, whether the
-lookup is unavailable or the account has a verified absence, `upn` is omitted.
-The directory cache can still serve its last good UPN during a lookup outage;
-while it does, a hook records that cached value. On Windows, a cold Active
+account's UPN in the current verified directory facts or Windows guardian
+record when the agent was last seen. Each later hook replaces that value. A
+current Windows guardian record takes precedence over an earlier cached
+answer. Without one, an expired or failed directory answer, or a completed
+answer without a UPN, omits `upn`; an earlier value is not carried into the
+row. On Windows, a cold Active
 Directory lookup can still be running when a hook records the row, so `upn`
 may be absent. A completed background lookup does not update the row by
 itself; another hook must run. Rows also keep their last snapshot until the

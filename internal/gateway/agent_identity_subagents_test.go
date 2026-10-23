@@ -175,13 +175,15 @@ func TestAgentIdentityAPIReconcilesBufferedSubagentsAfterFailedWrite(t *testing.
 		extra       []inventory.AgentIdentitySubagent
 		wantCount   int64
 		wantLast    string
+		clearUPN    bool
 	}{
-		{"resumed older instance", t0, inventory.AgentIdentitySubagent{AgentID: agentID, InstanceID: firstID, FirstSeen: t0.Add(2 * time.Second), LastSeen: t0.Add(2 * time.Second)}, nil, 2, lastID},
-		{"new instance before stored newest", t0, inventory.AgentIdentitySubagent{AgentID: agentID, InstanceID: middleID, FirstSeen: t0.Add(500 * time.Millisecond), LastSeen: t0.Add(2 * time.Second)}, nil, 3, lastID},
-		{"new instance after stored newest", t0, inventory.AgentIdentitySubagent{AgentID: agentID, InstanceID: newID, FirstSeen: t0.Add(2 * time.Second), LastSeen: t0.Add(2 * time.Second)}, nil, 3, newID},
-		{"earlier first sighting corrects stored newest", t0.Add(3 * time.Second), inventory.AgentIdentitySubagent{AgentID: agentID, InstanceID: firstID, FirstSeen: t0, LastSeen: t0.Add(3 * time.Second)}, nil, 2, lastID},
+		{"resumed older instance", t0, inventory.AgentIdentitySubagent{AgentID: agentID, InstanceID: firstID, FirstSeen: t0.Add(2 * time.Second), LastSeen: t0.Add(2 * time.Second)}, nil, 2, lastID, false},
+		{"new instance before stored newest", t0, inventory.AgentIdentitySubagent{AgentID: agentID, InstanceID: middleID, FirstSeen: t0.Add(500 * time.Millisecond), LastSeen: t0.Add(2 * time.Second)}, nil, 3, lastID, false},
+		{"new instance after stored newest", t0, inventory.AgentIdentitySubagent{AgentID: agentID, InstanceID: newID, FirstSeen: t0.Add(2 * time.Second), LastSeen: t0.Add(2 * time.Second)}, nil, 3, newID, false},
+		{"earlier first sighting corrects stored newest", t0.Add(3 * time.Second), inventory.AgentIdentitySubagent{AgentID: agentID, InstanceID: firstID, FirstSeen: t0, LastSeen: t0.Add(3 * time.Second)}, nil, 2, lastID, false},
 		{"mixed resumed and new older instances", t0, inventory.AgentIdentitySubagent{AgentID: agentID, InstanceID: firstID, FirstSeen: t0.Add(2 * time.Second), LastSeen: t0.Add(2 * time.Second)},
-			[]inventory.AgentIdentitySubagent{{AgentID: agentID, InstanceID: middleID, FirstSeen: t0.Add(500 * time.Millisecond), LastSeen: t0.Add(2 * time.Second)}}, 3, lastID},
+			[]inventory.AgentIdentitySubagent{{AgentID: agentID, InstanceID: middleID, FirstSeen: t0.Add(500 * time.Millisecond), LastSeen: t0.Add(2 * time.Second)}}, 3, lastID, false},
+		{"UPN removed after an older sub-agent resumed", t0, inventory.AgentIdentitySubagent{AgentID: agentID, InstanceID: firstID, FirstSeen: t0.Add(2 * time.Second), LastSeen: t0.Add(2 * time.Second)}, nil, 2, lastID, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -196,7 +198,7 @@ func TestAgentIdentityAPIReconcilesBufferedSubagentsAfterFailedWrite(t *testing.
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = db.Close() })
-			identity := inventory.AgentIdentityRecord{AgentID: agentID, UserID: "u1", Connector: "codex", MachineHash: "m", FirstSeen: t0, LastSeen: t0.Add(time.Second)}
+			identity := inventory.AgentIdentityRecord{AgentID: agentID, UserID: "u1", Connector: "codex", MachineHash: "m", FirstSeen: t0, LastSeen: t0.Add(time.Second), UPN: "old@corp.example"}
 			stored := []inventory.AgentIdentitySubagent{
 				{AgentID: agentID, InstanceID: firstID, FirstSeen: tc.storedFirst, LastSeen: tc.storedFirst},
 				{AgentID: agentID, InstanceID: lastID, FirstSeen: t0.Add(time.Second), LastSeen: t0.Add(time.Second)},
@@ -204,8 +206,15 @@ func TestAgentIdentityAPIReconcilesBufferedSubagentsAfterFailedWrite(t *testing.
 			if err := store.UpsertAgentIdentityBatch(ctx, []inventory.AgentIdentityRecord{identity}, nil, stored); err != nil {
 				t.Fatal(err)
 			}
+			if _, err := store.PruneAgentIdentitySessions(ctx, t0.Add(500*time.Millisecond)); err != nil {
+				t.Fatal(err)
+			}
+			currentUPN := "new@corp.example"
+			if tc.clearUPN {
+				currentUPN = ""
+			}
 			r := &agentIdentityRecorder{pending: map[string]*inventory.AgentIdentityRecord{
-				agentID: {AgentID: agentID, UserID: "u1", Connector: "codex", MachineHash: "m", FirstSeen: t0.Add(2 * time.Second), LastSeen: t0.Add(3 * time.Second)},
+				agentID: {AgentID: agentID, UserID: "u1", Connector: "codex", MachineHash: "m", FirstSeen: t0.Add(2 * time.Second), LastSeen: t0.Add(3 * time.Second), UPN: currentUPN},
 			}}
 			r.noteSubagentLocked(tc.buffered)
 			for _, sub := range tc.extra {
@@ -222,8 +231,9 @@ func TestAgentIdentityAPIReconcilesBufferedSubagentsAfterFailedWrite(t *testing.
 				t.Fatal("expected the inventory write to fail")
 			}
 			row := listedAgentIdentityRows(t)[agentID]
-			if row == nil || row["subagents_seen"] != float64(tc.wantCount) || row["last_subagent_id"] != tc.wantLast {
-				t.Errorf("API row after failed write = %v; want count %d, newest %s", row, tc.wantCount, tc.wantLast)
+			if row == nil || row["subagents_seen"] != float64(tc.wantCount) || row["last_subagent_id"] != tc.wantLast ||
+				(currentUPN == "" && row["upn"] != nil) || (currentUPN != "" && row["upn"] != currentUPN) {
+				t.Errorf("API row after failed write = %v; want count %d, newest %s, UPN %q", row, tc.wantCount, tc.wantLast, currentUPN)
 			}
 			if _, err := db.ExecContext(ctx, `DROP TRIGGER fail_identity_write`); err != nil {
 				t.Fatal(err)
@@ -232,8 +242,9 @@ func TestAgentIdentityAPIReconcilesBufferedSubagentsAfterFailedWrite(t *testing.
 				t.Fatal(err)
 			}
 			row = listedAgentIdentityRows(t)[agentID]
-			if row == nil || row["subagents_seen"] != float64(tc.wantCount) || row["last_subagent_id"] != tc.wantLast {
-				t.Errorf("API row after recovery = %v; want count %d, newest %s", row, tc.wantCount, tc.wantLast)
+			if row == nil || row["subagents_seen"] != float64(tc.wantCount) || row["last_subagent_id"] != tc.wantLast ||
+				(currentUPN == "" && row["upn"] != nil) || (currentUPN != "" && row["upn"] != currentUPN) {
+				t.Errorf("API row after recovery = %v; want count %d, newest %s, UPN %q", row, tc.wantCount, tc.wantLast, currentUPN)
 			}
 		})
 	}
