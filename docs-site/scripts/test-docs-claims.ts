@@ -194,6 +194,19 @@ describe('managed-host enrollment protection', () => {
     }
   });
 
+  it('explains Windows protection before first enrollment, after last removal, and repair', () => {
+    const windows = page('enterprise/install/reference/windows.mdx');
+    assert.match(windows, /configured Claude Code, Codex and Cursor machine hooks.{0,260}before the first (?:user )?enrollment.{0,260}after the last enrolled (?:user|SID) is removed/i);
+    assert.match(windows, /unenrolled (?:account|SID).{0,120}refus/i);
+    assert.match(windows, /missing (?:machine )?policy.{0,150}protection failure/i);
+    assert.match(windows, /enterprise policy verify.{0,300}enterprise windows (?:reconcile|repair) --profile standalone/i);
+
+    const policy = page('enterprise/configure/machine-policy.mdx');
+    assert.match(policy, /configured Claude Code, Codex and Cursor.{0,260}before the first (?:user )?enrollment.{0,260}after the last enrolled (?:user|SID) is removed/i);
+    const reference = page('enterprise/configure/reference.mdx');
+    assert.match(reference, /configured Claude Code, Codex and Cursor.{0,260}before the first (?:user )?enrollment.{0,260}after the last enrolled (?:user|SID) is removed/i);
+  });
+
   it('describes the installed Windows policy as a product change', () => {
     const changelog = readFileSync(join(repo, 'CHANGELOG.md'), 'utf8');
     assert.match(
@@ -202,6 +215,7 @@ describe('managed-host enrollment protection', () => {
       'the release note must describe the installed zero-enrollment machine policy',
     );
     assert.doesNotMatch(changelog, /no Claude Code user is enrolled.{0,160}without DefenseClaw hooks/i);
+    assert.match(changelog, /before Guardian activation.{0,300}authenticated.{0,150}empty (?:machine )?guards/i);
   });
 });
 
