@@ -474,4 +474,3 @@ def _redact_payload_preview(payload: bytes, webhook_type: str, secret: str) -> s
     except ValueError:
         return f"<{webhook_type} payload is not JSON; preview withheld>"
     return _json_bytes(_redact_secret_values(document, secret)).decode("utf-8")[:200]
-
