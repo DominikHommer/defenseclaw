@@ -9978,7 +9978,7 @@ def _apply_hook_connector_setup(
     if connector == "opencode":
         _preflight_opencode_plugin_folder()
 
-    if refusal := _agent_settings_refusal(app.cfg, connector):
+    if refusal := _agent_settings_refusal(app.cfg, connector, workspace_dir=workspace_dir):
         ux.echo(f"  ✗ {refusal}", err=True)
         return False
 
@@ -11544,7 +11544,7 @@ def _apply_setup_batch(
     if "opencode" in connectors:
         _preflight_opencode_plugin_folder()
     for connector_name in connectors:
-        if refusal := _agent_settings_refusal(app.cfg, connector_name):
+        if refusal := _agent_settings_refusal(app.cfg, connector_name, workspace_dir=""):
             _restore_setup_config_snapshot(app, setup_snapshot)
             raise click.ClickException(refusal)
 
@@ -12315,7 +12315,7 @@ _AGENT_SETTINGS_CHECKED_CONNECTORS = frozenset({"claudecode", "codex", "copilot"
 _GATEWAY_RESTART_STEP_RE = re.compile(r",? then run: defenseclaw-gateway restart\.?$")
 
 
-def _agent_settings_refusal(cfg, connector: str) -> str:
+def _agent_settings_refusal(cfg, connector: str, *, workspace_dir: str | None = None) -> str:
     """Why the gateway would refuse *connector*'s agent settings, or "".
 
     The agent's own settings can refuse DefenseClaw hooks: a Codex
@@ -12335,10 +12335,15 @@ def _agent_settings_refusal(cfg, connector: str) -> str:
         return ""
     data_dir = str(cfg.data_dir)
     env = {**os.environ, "DEFENSECLAW_HOME": data_dir}
+    if connector == "codex":
+        selected_root = os.path.abspath(connector_paths.codex_home())
+        env["CODEX_HOME"] = selected_root
+        env["DEFENSECLAW_EXPLICIT_CODEX_SETUP"] = selected_root
+    workspace = _resolve_connector_workspace(workspace_dir)
     try:
         result = run_pinned_executable(
             [executable, "connector", "check-agent-settings", "--connector", connector, "--data-dir", data_dir,
-             "--json"],
+             "--workspace-dir", workspace, "--json"],
             capture_output=True,
             text=True,
             shell=False,

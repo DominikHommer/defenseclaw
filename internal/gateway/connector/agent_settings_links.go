@@ -12,8 +12,9 @@ import (
 )
 
 // userOwnedSettingsReadPath resolves links chosen by the account that runs
-// an OSS gateway. It checks both a link and its destination: following a
-// different account's link could make Setup rewrite that account's file.
+// an OSS gateway. It accepts a root-owned link left by an administrator only
+// when the resolved destination belongs to the gateway account. Following a
+// different unprivileged account's link could make Setup rewrite their file.
 // Enterprise home confinement is checked by the caller before this function.
 func userOwnedSettingsReadPath(path string) (string, error) {
 	if runtime.GOOS == "windows" {
@@ -42,7 +43,7 @@ func userOwnedSettingsReadPath(path string) (string, error) {
 		if info.Mode()&os.ModeSymlink == 0 {
 			continue
 		}
-		if err := validatePluginOwnerFromInfo(current, info); err != nil {
+		if err := validateSettingsLinkOwnerFromInfo(current, info); err != nil {
 			return "", fmt.Errorf("another account owns settings link %s: %w", current, err)
 		}
 		target, err := filepath.EvalSymlinks(current)
@@ -68,4 +69,19 @@ func userOwnedSettingsReadPath(path string) (string, error) {
 		return "", fmt.Errorf("another account owns settings link target %s: %w", target, err)
 	}
 	return target, nil
+}
+
+// validateSettingsLinkOwnerFromInfo is deliberately narrower than the plugin
+// owner check: root may create a user's settings link during installation,
+// but the linked settings destination still has to be owned by that user.
+func validateSettingsLinkOwnerFromInfo(path string, info os.FileInfo) error {
+	uid, ok := pluginOwnerUID(info)
+	if !ok {
+		return fmt.Errorf("could not determine settings link owner for %s", path)
+	}
+	want := uint32(pluginGetUID())
+	if uid != want && uid != 0 {
+		return fmt.Errorf("%s owner uid=%d is neither the gateway uid=%d nor root", path, uid, want)
+	}
+	return nil
 }

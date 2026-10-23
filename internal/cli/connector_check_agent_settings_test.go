@@ -17,6 +17,8 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -25,6 +27,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
+	"github.com/spf13/cobra"
 )
 
 // GAP-0615: `defenseclaw setup codex` with a config.toml that does not parse
@@ -75,5 +78,139 @@ func TestConnectorCheckAgentSettingsRefusesCodexConfigThatDoesNotParse(t *testin
 	}
 	if _, stderr, code := runConnectorCmd(t, "check-agent-settings", "--connector", "no-such-agent"); code != 2 {
 		t.Fatalf("unknown connector: exit = %d, want 2 (stderr=%q)", code, stderr)
+	}
+}
+
+func TestConnectorCheckAgentSettingsUsesRequestedWorkspace(t *testing.T) {
+	if flag := connectorCheckAgentSettingsCmd.Flags().Lookup("workspace-dir"); flag == nil || !flag.Hidden {
+		t.Fatal("check-agent-settings must accept Setup's hidden requested workspace")
+	}
+	for _, name := range []string{"claudecode", "copilot"} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			home := filepath.Join(root, "home")
+			oldWorkspace := filepath.Join(root, "old-workspace")
+			newWorkspace := filepath.Join(root, "new-workspace")
+			for _, path := range []string{home, oldWorkspace, newWorkspace} {
+				if err := os.MkdirAll(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home)
+			dataDir := testenv.PrivateTempDir(t)
+			defer withConnectorState(t, dataDir, name)()
+			cfg.Claw.WorkspaceDir = oldWorkspace
+			settingsDir := filepath.Join(oldWorkspace, ".claude")
+			if name == "copilot" {
+				settingsDir = filepath.Join(oldWorkspace, ".github", "copilot")
+				t.Setenv("COPILOT_HOME", filepath.Join(home, ".copilot"))
+			} else {
+				userSettings := filepath.Join(home, ".claude", "settings.json")
+				if err := os.MkdirAll(filepath.Dir(userSettings), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(userSettings, []byte("{}\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				previous := connector.ClaudeCodeSettingsPathOverride
+				connector.ClaudeCodeSettingsPathOverride = userSettings
+				t.Cleanup(func() { connector.ClaudeCodeSettingsPathOverride = previous })
+			}
+			if err := os.MkdirAll(settingsDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			refusingSettings := filepath.Join(settingsDir, "settings.json")
+			if err := os.WriteFile(refusingSettings, []byte(`{"disableAllHooks":true}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			check := func(requested *string) (bool, string) {
+				t.Helper()
+				var out bytes.Buffer
+				cmd := &cobra.Command{Use: "check-agent-settings"}
+				cmd.Flags().String("workspace-dir", "", "")
+				if requested != nil {
+					if err := cmd.Flags().Set("workspace-dir", *requested); err != nil {
+						t.Fatal(err)
+					}
+				}
+				cmd.SetOut(&out)
+				connectorFlagJSON = true
+				var code int
+				connectorExit = func(exit int) { code = exit }
+				if err := runConnectorCheckAgentSettings(cmd, nil); err != nil {
+					t.Fatal(err)
+				}
+				var result struct {
+					Refused bool   `json:"refused"`
+					Reason  string `json:"reason"`
+				}
+				if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+					t.Fatalf("check response %q: %v", out.String(), err)
+				}
+				if result.Refused != (code == 1) {
+					t.Fatalf("check exit %d disagrees with response %q", code, out.String())
+				}
+				return result.Refused, result.Reason
+			}
+			if refused, reason := check(nil); !refused || !strings.Contains(reason, refusingSettings) {
+				t.Fatalf("old workspace was not refused: %q", reason)
+			}
+			for _, requested := range []string{newWorkspace, ""} {
+				if refused, reason := check(&requested); refused {
+					t.Fatalf("requested workspace %q still checked the old workspace: %s", requested, reason)
+				}
+			}
+			newSettings := filepath.Join(newWorkspace, ".claude", "settings.json")
+			if name == "copilot" {
+				newSettings = filepath.Join(newWorkspace, ".github", "copilot", "settings.json")
+			}
+			if err := os.MkdirAll(filepath.Dir(newSettings), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(newSettings, []byte(`{"disableAllHooks":true}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if refused, reason := check(&newWorkspace); !refused || !strings.Contains(reason, newSettings) {
+				t.Fatalf("requested workspace policy was not enforced: %q", reason)
+			}
+		})
+	}
+}
+
+func TestConnectorCheckAgentSettingsFollowsExplicitCodexMigrationRoot(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	oldRoot := filepath.Join(home, "old-codex")
+	newRoot := filepath.Join(home, "new-codex")
+	for _, path := range []string{oldRoot, newRoot} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("CODEX_HOME", oldRoot)
+	t.Setenv("DEFENSECLAW_EXPLICIT_CODEX_SETUP", "")
+	dataDir := testenv.PrivateTempDir(t)
+	defer withConnectorState(t, dataDir, "codex")()
+	if err := connector.NewCodexConnector().Setup(context.Background(), connector.SetupOpts{
+		DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "test-token", HookFailMode: "closed",
+	}); err != nil {
+		t.Fatalf("register old Codex root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(oldRoot, "config.toml"), []byte("[features]\nhooks = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(newRoot, "config.toml"), []byte("[features]\nhooks = true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_HOME", newRoot)
+	if stdout, stderr, code := runConnectorCmd(t, "check-agent-settings", "--connector", "codex", "--json"); code != 1 || !strings.Contains(stdout, filepath.Join(oldRoot, "config.toml")) {
+		t.Fatalf("without migration marker, expected old-root refusal: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	t.Setenv("DEFENSECLAW_EXPLICIT_CODEX_SETUP", newRoot)
+	if stdout, stderr, code := runConnectorCmd(t, "check-agent-settings", "--connector", "codex", "--json"); code != 0 || !strings.Contains(stdout, `"refused":false`) {
+		t.Fatalf("explicit new-root precheck: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 }

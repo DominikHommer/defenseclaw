@@ -233,6 +233,9 @@ Pass --json for a structured payload suitable for piping into 'jq'.`,
 }
 
 func init() {
+	connectorCheckAgentSettingsCmd.Flags().String("workspace-dir", "",
+		"Check settings in this requested workspace (empty means global user scope)")
+	_ = connectorCheckAgentSettingsCmd.Flags().MarkHidden("workspace-dir")
 	connectorPrepareRollbackCmd.Flags().BoolVar(&connectorRollbackRestore, "restore", false,
 		"Restore authenticated current-release hooks after an aborted rollback")
 	connectorCmd.PersistentFlags().StringVar(&connectorFlagName, "connector", "",
@@ -591,6 +594,15 @@ func runConnectorCheckAgentSettings(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 	opts := resolveConnectorOptsFor(dataDir, name)
+	if cmd.Flags().Changed("workspace-dir") {
+		workspace, err := cmd.Flags().GetString("workspace-dir")
+		if err != nil || (workspace != "" && (!filepath.IsAbs(workspace) || filepath.Clean(workspace) != workspace)) {
+			fmt.Fprintln(cmd.ErrOrStderr(), "connector check-agent-settings: workspace must be empty or an absolute normalized path")
+			connectorExit(2)
+			return nil
+		}
+		opts.WorkspaceDir = workspace
+	}
 	if cfg != nil {
 		opts.ManagedEnterprise = managed.IsManagedEnterprise(cfg.DeploymentMode)
 	}
