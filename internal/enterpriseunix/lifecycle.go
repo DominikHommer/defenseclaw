@@ -1273,6 +1273,9 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 	if err := env.checkCandidateAssets(validated); err != nil {
 		return nil, &codedError{code: codeConfig, err: err}
 	}
+	if err := env.checkRequiredSandboxPacks(validated.Loaded); err != nil {
+		return nil, &codedError{code: codeConfig, err: err}
+	}
 	p.configFromInstalled = fromInstalled
 	p.configWritable = writable
 	p.config = validated

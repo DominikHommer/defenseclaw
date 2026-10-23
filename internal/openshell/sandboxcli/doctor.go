@@ -34,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/wrapper"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
 // DefenseClaw doctor check IDs (the host checks are openshell.CheckID*).
@@ -1046,10 +1047,13 @@ func (a *App) printDoctor(rep *openshell.DoctorReport) {
 	// The last line is the verdict, a failing one too (it ended on the
 	// last check's line, with only the exit status to tell).
 	a.println()
-	if failed := failedChecks(rep); failed > 0 {
-		a.bad("not ready for sandboxes: " + plural(int64(failed), "check", "checks") + " failed")
-	} else if why, off := sandboxesOff(rep); off {
+	why, off := sandboxesOff(rep)
+	failed := failedChecks(rep)
+	setupChanging := rep.Get(CheckIDManagedRuntime)
+	if off && (failed == 0 || failed == 1 && setupChanging != nil && setupChanging.Status == openshell.StatusFail && setupChanging.Detail == sandboxrelay.UnavailableSetupChanging) {
 		a.warn("not ready for sandboxes yet: " + why)
+	} else if failed > 0 {
+		a.bad("not ready for sandboxes: " + plural(int64(failed), "check", "checks") + " failed")
 	} else {
 		a.ok("ready for sandboxes")
 	}
@@ -1066,10 +1070,12 @@ func failedChecks(rep *openshell.DoctorReport) int {
 	return n
 }
 
-// sandboxesOff reports a report without failures whose sandboxes are still
-// turned off (openshell.enabled is false, a warning of the daemon check):
-// the machine can run them, but no sandbox starts until they are on.
+// sandboxesOff reports a daemon whose sandboxes are turned off or a managed
+// setup change that has not finished: a run refuses in either state.
 func sandboxesOff(rep *openshell.DoctorReport) (string, bool) {
+	if c := rep.Get(CheckIDManagedRuntime); c != nil && c.Status == openshell.StatusFail && c.Detail == sandboxrelay.UnavailableSetupChanging {
+		return c.Detail, true
+	}
 	c := rep.Get(CheckIDDaemon)
 	if c == nil || c.Status != openshell.StatusWarn {
 		return "", false
