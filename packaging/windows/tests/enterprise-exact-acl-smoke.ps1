@@ -374,6 +374,13 @@ $ancestorCases = & $module {
         $snapshot = $native::GetDirectorySecuritySnapshotNoFollow($path)
         $before = [Security.AccessControl.RawSecurityDescriptor]::new(
             [byte[]]$snapshot.SecurityDescriptor, 0)
+        $inheritable = [Security.AccessControl.RawSecurityDescriptor]::new(
+            "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;$GatewaySID)")
+        $collapsed = Update-DefenseClawSharedRawDescriptor `
+            -Descriptor $inheritable -SID $GatewaySID -Action Replace -AccessMask 0x1200a9
+        $priorGrant = @($collapsed.Descriptor.DiscretionaryAcl | Microsoft.PowerShell.Core\Where-Object {
+            $_ -is [Security.AccessControl.KnownAce] -and $_.SecurityIdentifier.Value -ceq $GatewaySID
+        })
         [void](Set-DefenseClawSharedDirectoryRawAce -Path $path -SID $GatewaySID -Action Replace -AccessMask 0x1200a9)
         $snapshot = $native::GetDirectorySecuritySnapshotNoFollow($path)
         $granted = [Security.AccessControl.RawSecurityDescriptor]::new(
@@ -387,6 +394,12 @@ $ancestorCases = & $module {
         $after = [Security.AccessControl.RawSecurityDescriptor]::new(
             [byte[]]$snapshot.SecurityDescriptor, 0)
         [pscustomobject]@{
+            widened_prior_grant_collapsed = ($collapsed.Changed -and $priorGrant.Count -eq 1 -and
+                $priorGrant[0].AccessMask -eq 0x1200a9 -and
+                $priorGrant[0].AceFlags -eq [Security.AccessControl.AceFlags]::None)
+            tree_not_seized = (@($priorGrant | Microsoft.PowerShell.Core\Where-Object {
+                ([int]$_.AceFlags -band 0x03) -ne 0
+            }).Count -eq 0)
             foreign_vendor_ace_preserved = @($granted.DiscretionaryAcl | Microsoft.PowerShell.Core\Where-Object {
                 $_ -is [Security.AccessControl.KnownAce] -and $_.SecurityIdentifier.Value -ceq 'S-1-5-32-545' -and
                 $_.AccessMask -eq 0x1200a0
@@ -937,6 +950,8 @@ if ($null -eq $nativeDescriptor.DiscretionaryAcl) {
     installer_verifier_pairings_checked = $pairingsChecked
     acl_kind_sets_agree = [bool]$kindSetsAgree
     state_ancestor_grant_is_additive = $true
+    widened_prior_grant_collapsed = [bool]$ancestorCases.widened_prior_grant_collapsed
+    tree_not_seized = [bool]$ancestorCases.tree_not_seized
     managed_ipc_scope_cleanup_exact = $true
     managed_ipc_other_service_ace_preserved = $true
     managed_ipc_cleanup_idempotent = $true

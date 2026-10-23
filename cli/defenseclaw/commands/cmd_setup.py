@@ -4359,16 +4359,20 @@ def _rotate_token_transaction(
         if current_config != config_snapshot or current_mode != config_mode:
             raise click.ClickException("Gateway configuration changed while token rotation was taking its snapshot.")
         configured_scopes = set(_rotate_token_configured_connectors(authoritative_cfg))
-        # A leftover sidecar is no longer an active connector. Rotation must
-        # neither rewrite it nor present it as a protected runtime owner.
-        rotatable_scopes = configured_scopes
-        if not set(requested_scopes).issubset(rotatable_scopes):
+        if not set(requested_scopes).issubset(configured_scopes):
             raise click.ClickException(
                 "Connector hook credential scope changed before rotation; no credentials were modified."
             )
-        tracked_scopes = sorted(rotatable_scopes)
+        # A leftover sidecar still authenticates against a gateway hook route.
+        # Revoke it without presenting it as a configured runtime owner.
+        persisted_scopes = set(_rotate_token_persisted_hook_scopes(data_dir))
+        orphan_scopes = sorted(persisted_scopes - configured_scopes)
+        tracked_scopes = sorted(configured_scopes | persisted_scopes)
         for connector in tracked_scopes:
             hook_locks.enter_context(locked_file_update(_rotate_token_hook_path(data_dir, connector)))
+        _rotate_token_preflight_writable(
+            [_rotate_token_hook_path(data_dir, connector) for connector in orphan_scopes]
+        )
         if require_complete_scoped_roster and set(requested_scopes) != set(
             _rotate_token_scoped_connectors(authoritative_cfg, data_dir)
         ):
@@ -4443,6 +4447,10 @@ def _rotate_token_transaction(
                     windows_managed_custody=True,
                     windows_managed_security=hook_windows_security[connector],
                 )
+            for connector in orphan_scopes:
+                path = _rotate_token_hook_path(data_dir, connector)
+                _rotate_token_hook_metadata(path)
+                delete_file_durable(path)
             os.environ[_GATEWAY_TOKEN_ENV] = new_token
 
             _run_rotate_token_lifecycle(
@@ -4453,6 +4461,8 @@ def _rotate_token_transaction(
                 connector_state=connector_state_b,
             )
             _rotate_token_verify_hook_values_locked(data_dir, new_hook_values)
+            if any(os.path.lexists(_rotate_token_hook_path(data_dir, connector)) for connector in orphan_scopes):
+                raise click.ClickException("A removed connector hook credential was recreated during rotation.")
             current_config, current_mode = _snapshot_regular_file(config_file, what="gateway config")
             if current_config != config_snapshot or current_mode != config_mode:
                 raise click.ClickException("Gateway configuration changed during token rotation.")
@@ -4567,8 +4577,7 @@ def _refuse_rotate_token_on_managed_host() -> None:
     "--connector",
     default=None,
     help=(
-        "Optional presentation hint (rotation covers every eligible configured scope and safely discovered "
-        "persisted sidecar)."
+        "Optional presentation hint (rotation covers configured scopes and revokes unconfigured sidecars)."
     ),
 )
 @click.option(
@@ -4588,10 +4597,10 @@ def rotate_token_cmd(app: AppContext, connector: str | None, yes: bool) -> None:
     refreshes every affected hook/plugin and verifies gateway B. Any post-stop
     failure restores the exact credential snapshots and prior ready generation.
 
-    Rotation is global by design: every eligible configured scoped-hook
-    credential and every safely discovered persisted sidecar receive distinct
-    least-privilege replacements in the same transaction. ``--connector``
-    remains a presentation hint and never narrows this security boundary.
+    Rotation is global by design: configured scoped-hook credentials receive
+    distinct replacements, and safely discovered unconfigured sidecars are
+    revoked in the same transaction. ``--connector`` remains a presentation
+    hint and never narrows this security boundary.
 
     Plan B5 / S0.5.
     """
@@ -4635,7 +4644,7 @@ def rotate_token_cmd(app: AppContext, connector: str | None, yes: bool) -> None:
         scope = f"{len(scoped_actives)} scoped-hook credential(s)" if scoped_actives else "no scoped-hook credential"
         click.confirm(
             f"This will rotate DEFENSECLAW_GATEWAY_TOKEN in {dotenv_path},\n"
-            f"replace every eligible or safely persisted scoped-hook credential ({scope}) with a distinct value,\n"
+            f"replace configured scoped-hook credentials and revoke unconfigured sidecars ({scope}),\n"
             "refresh their hooks/plugins, and restart the gateway. Continue?",
             abort=True,
         )

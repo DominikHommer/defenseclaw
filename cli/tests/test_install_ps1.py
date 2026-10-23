@@ -108,6 +108,7 @@ function Get-ExternalConfig {{ return '' }}
 function Get-BinariesState {{ return @{{}} }}
 function Get-OptionalSha256 {{ return '' }}
 function Test-BinDirProtected {{ return $true }}
+{_ps1_function('Get-Field')}
 {_ps1_function('Get-LifecycleState')}
 $state = Get-LifecycleState
 if (@($state.Connectors).Count -ne 1 -or $state.Connectors[0] -ne 'codex') {{
@@ -119,19 +120,59 @@ if (@($state.Connectors).Count -ne 1 -or $state.Connectors[0] -ne 'codex') {{
     assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
 
 
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_lifecycle_record_excludes_connectors_old_gateway_reported_unhealthy(tmp_path: Path) -> None:
+    # A repair cannot promise that a connector already needing attention was
+    # guarded before the upgrade. A stale active_connector.json cannot add it.
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$DataDir = '{tmp_path}'
+$BinDir = '{tmp_path}'
+$ManagedBinaries = @()
+function Get-GatewayProcess {{ return [pscustomobject]@{{ Id = 1; Path = (Join-Path $BinDir 'defenseclaw-gateway.exe') }} }}
+function Get-GatewayHealthReport {{ return [pscustomobject]@{{ running = $true; health = [pscustomobject]@{{ connectors = @(
+    [pscustomobject]@{{ name = 'codex'; state = 'running' }},
+    [pscustomobject]@{{ name = 'cursor'; state = 'needs_attention' }}
+) }} }} }}
+function Get-ConfiguredConnectors {{ return @('codex', 'cursor') }}
+function Get-EffectiveConfigConnectors {{ return @('codex', 'cursor') }}
+function Get-ExternalConfig {{ return '' }}
+function Get-BinariesState {{ return @{{}} }}
+function Get-OptionalSha256 {{ return '' }}
+function Test-BinDirProtected {{ return $true }}
+function Get-GatewayDigestProblem {{ return '' }}
+{_ps1_function('Get-Field')}
+{_ps1_function('Get-GuardedConnectors')}
+{_ps1_function('ConvertTo-Map')}
+{_ps1_function('Get-LifecycleState')}
+{_ps1_function('Test-LifecycleProof')}
+$state = Get-LifecycleState
+if (($state.Connectors -join ',') -ne 'codex') {{ throw "unsafe proof roster: $($state.Connectors -join ',')" }}
+$problems = @(Test-LifecycleProof @{{}} $true ([string[]]$state.Connectors) -RequireProtected $false)
+if ($problems.Count) {{ throw "upgrade could not prove its old guarded set: $($problems -join '; ')" }}
+'OK'
+"""
+    result = _run_powershell(script)
+    assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
+
+
 def test_effective_config_fallback_reads_old_external_connector_roster(tmp_path: Path) -> None:
     # The staged interpreter reads the old config as data, so a missing old
     # status --json does not erase a multi-connector external deployment.
     config = tmp_path / "external.yaml"
     config.write_text(
-        "guardrail:\n  connectors:\n    codex: {}\n    claude-code: {}\n",
+        "guardrail:\n  connectors:\n    codex: {}\n    claude-code: {}\n    cursor:\n      enabled: false\n",
         encoding="utf-8",
     )
     helper = _ps1_function("Get-EffectiveConfigConnectors")
     match = re.search(r"\$code = '((?:''|[^'])*)'", helper)
     assert match is not None
     result = subprocess.run(
-        [sys.executable, "-I", "-c", match.group(1).replace("''", "'"), str(config)],
+        [
+            sys.executable, "-I", "-c",
+            f"import sys; sys.path.insert(0, {str(ROOT / 'cli')!r}); " + match.group(1).replace("''", "'"),
+            str(config),
+        ],
         capture_output=True, text=True, timeout=30, check=False,
     )
     assert result.returncode == 0, result.stderr
@@ -143,7 +184,10 @@ def test_effective_config_reader_works_through_native_windows_powershell(tmp_pat
     # The installed Python -c reader must survive Windows PowerShell 5.1's
     # native argument quoting during a live local upgrade.
     config = tmp_path / "config.yaml"
-    config.write_text("guardrail:\n  connectors:\n    codex: {}\n    claude-code: {}\n", encoding="utf-8")
+    config.write_text(
+        "guardrail:\n  connectors:\n    codex: {}\n    claude-code: {}\n    cursor:\n      enabled: false\n",
+        encoding="utf-8",
+    )
     quoted_data_dir = str(tmp_path).replace("'", "''")
     quoted_venv = str(Path(sys.executable).parents[1]).replace("'", "''")
     script = f"""

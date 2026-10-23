@@ -5282,6 +5282,14 @@ function Grant-DefenseClawStandaloneVendorUsersRead {
     }
     Assert-DefenseClawNoReparsePath -Path $Path
     Assert-DefenseClawTrustedAncestor -Path $Path
+    if ($null -ne $record) {
+        # A different installer may have reset the shared vendor DACL. Drop
+        # only our exact recorded ACE if it remains, then calculate a fresh
+        # separate ACE against the administrator's current Users grants.
+        [void](Set-DefenseClawSharedDirectoryRawAce `
+            -Path $Path -SID $script:UsersSID -Action RemoveExact `
+            -AccessMask ([int]$record.AddedRights))
+    }
     $security = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
     $present = [int64]0
     foreach ($rule in @(Get-DefenseClawVendorUsersThisFolderRules -Security $security)) {
@@ -5289,20 +5297,20 @@ function Grant-DefenseClawStandaloneVendorUsersRead {
     }
     $added = [int64]$script:VendorDirectoryUsersRights -band (-bnot $present)
     if ($added -eq 0) {
-        Register-DefenseClawVendorUsersReadGrantScope -Path $Path -Scope $Scope -Record $record
+        if (-not (Test-DefenseClawStandaloneVendorUsersRead -Path $Path)) {
+            throw "the shared vendor directory still denies standard users the required read grant: $Path"
+        }
+        if ($null -ne $record) { Remove-DefenseClawVendorUsersReadGrant }
         return
     }
-    if ($null -ne $record) {
-        throw "the shared vendor directory's Users grant changed after Setup: $Path; restore its previous DACL before repair"
-    }
-    Set-DefenseClawVendorUsersReadGrant -Path $Path -AddedRights $added -Scopes @($Scope)
-    try {
-        [void](Set-DefenseClawSharedDirectoryRawAce `
-            -Path $Path -SID $script:UsersSID -Action Add -AccessMask ([int]$added))
-    }
-    catch {
-        Remove-DefenseClawVendorUsersReadGrant
-        throw
+    $scopes = if ($null -ne $record) { @(@($record.Scopes) + $Scope) } else { @($Scope) }
+    # Record before publication. If the raw ACL write is interrupted, the
+    # next repair can retry and uninstall can still remove an applied ACE.
+    Set-DefenseClawVendorUsersReadGrant -Path $Path -AddedRights $added -Scopes $scopes
+    [void](Set-DefenseClawSharedDirectoryRawAce `
+        -Path $Path -SID $script:UsersSID -Action Add -AccessMask ([int]$added))
+    if (-not (Test-DefenseClawStandaloneVendorUsersRead -Path $Path)) {
+        throw "the shared vendor directory still denies standard users the required read grant: $Path"
     }
 }
 

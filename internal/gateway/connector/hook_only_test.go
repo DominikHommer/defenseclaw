@@ -1267,6 +1267,9 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 			if err := conn.Setup(context.Background(), opts); err != nil {
 				t.Fatalf("Setup: %v", err)
 			}
+			if _, err := EnsureHookAPIToken(dataDir, conn.Name()); err != nil {
+				t.Fatalf("issue scoped hook token: %v", err)
+			}
 			if present, err := OwnedHooksPresent(conn, opts); err != nil || !present {
 				t.Fatalf("OwnedHooksPresent after Setup = %t, %v; want true, nil", present, err)
 			}
@@ -1319,6 +1322,9 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 			}
 			if err := conn.Teardown(context.Background(), opts); err != nil {
 				t.Fatalf("Teardown: %v", err)
+			}
+			if token, err := LoadHookAPIToken(dataDir, conn.Name()); err != nil || token != "" {
+				t.Fatalf("removed %s still authenticates with scoped token: %q, %v", conn.Name(), token, err)
 			}
 			if _, err := os.Stat(cfgPath); err == nil {
 				t.Fatalf("config file still exists after teardown of previously missing config: %s", cfgPath)

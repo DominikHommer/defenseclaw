@@ -1605,26 +1605,35 @@ func (c *hookOnlyConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 		if err := prepareHermesLifecycleDataDir(opts); err != nil {
 			return fmt.Errorf("prepare Hermes lifecycle state: %w", err)
 		}
-		return withOwnedFileLock(filepath.Join(opts.DataDir, ".hermes-lifecycle.lock"), func() error {
+		if err := withOwnedFileLock(filepath.Join(opts.DataDir, ".hermes-lifecycle.lock"), func() error {
 			return c.teardown(ctx, opts, configPath)
-		})
-	}
-	if c.name == "copilot" {
-		removeOrphanedCopilotVSCodeLocalRendersForPerUser(opts)
-	}
-	if err := c.teardown(ctx, opts, ""); err != nil {
-		return err
-	}
-	if c.name == "devin" && !opts.ManagedEnterprise {
-		// A removed connector must not keep a scoped credential that rotate-token
-		// could later refresh. Revoke only after the agent registration is proven
-		// gone; a cached hook command finds the disabled tombstone instead.
-		if err := c.VerifyClean(opts); err != nil {
+		}); err != nil {
 			return err
 		}
-		if err := RemoveHookAPIToken(opts.DataDir, c.name); err != nil {
-			return fmt.Errorf("devin revoke removed hook credential: %w", err)
+	} else {
+		if c.name == "copilot" {
+			removeOrphanedCopilotVSCodeLocalRendersForPerUser(opts)
 		}
+		if err := c.teardown(ctx, opts, ""); err != nil {
+			return err
+		}
+	}
+	if !opts.ManagedEnterprise && opts.DataDir != "" {
+		// A cached hook command finds its disabled tombstone after teardown.
+		// Revoke only once the host registration is proven gone.
+		if err := c.VerifyClean(opts); err != nil {
+			if !c.pluginArtifact {
+				return err
+			}
+			// An operator-edited plugin remains by design; its registration
+			// cannot be proven gone, so keep the credential for this teardown.
+		} else {
+			if err := revokePerUserHookAPIToken(opts, c.name); err != nil {
+				return err
+			}
+		}
+	}
+	if c.name == "devin" && !opts.ManagedEnterprise {
 		backupDir := filepath.Join(opts.DataDir, "connector_backups", c.name)
 		info, err := os.Lstat(backupDir)
 		switch {

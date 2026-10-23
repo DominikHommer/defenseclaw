@@ -804,6 +804,8 @@ def test_every_managed_path_kind_has_an_exact_descriptor(engine: str) -> None:
         "split_explicit_aces_rejected": True,
         "acl_kind_sets_agree": True,
         "state_ancestor_grant_is_additive": True,
+        "widened_prior_grant_collapsed": True,
+        "tree_not_seized": True,
         "managed_ipc_scope_cleanup_exact": True,
         "managed_ipc_other_service_ace_preserved": True,
         "managed_ipc_cleanup_idempotent": True,

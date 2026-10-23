@@ -1029,7 +1029,7 @@ with locked_file_update(lock_base):
             cmd_setup._rotate_token_hook_fingerprint(new_value),
         )
 
-    def test_removed_connector_sidecar_is_not_rotated_or_advertised(self) -> None:
+    def test_removed_connector_sidecar_is_revoked_and_not_advertised(self) -> None:
         from tempfile import TemporaryDirectory
 
         with TemporaryDirectory() as td:
@@ -1064,10 +1064,10 @@ with locked_file_update(lock_base):
                 result = CliRunner().invoke(cmd_setup.rotate_token_cmd, ["--yes"], obj=app)
 
             codex_value = Path(td, "hooks", ".hook-codex.token").read_text(encoding="ascii").strip()
-            orphan_value = orphan.read_text(encoding="ascii").strip()
+            orphan_exists = orphan.exists()
 
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertEqual(orphan_value, old_orphan)
+        self.assertFalse(orphan_exists, "the gateway still authenticates a leftover scoped token on disk")
         self.assertEqual(len(states), 1)
         self.assertEqual(
             states[0]["hook_token_fingerprints"],

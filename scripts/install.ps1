@@ -1199,7 +1199,7 @@ function Get-EffectiveConfigConnectors {
     if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw "Cannot read the effective config's connectors without a checked Python environment: $path" }
     # Windows PowerShell 5.1 strips embedded double quotes from native argv.
     # Keep Python's string literals single-quoted so -c receives valid code.
-    $code = 'import json,sys,yaml; from defenseclaw.connector_paths import normalize; c=yaml.safe_load(open(sys.argv[1],encoding=''utf-8'')); c=c if isinstance(c,dict) else {}; g=c.get(''guardrail'') or {}; g=g if isinstance(g,dict) else {}; m=g.get(''connectors'') or {}; names=list(m) if isinstance(m,dict) and m else [g.get(''connector'') or (c.get(''claw'') or {}).get(''mode'')]; print(json.dumps(sorted({normalize(n) for n in names if isinstance(n,str) and n.strip()})))'
+    $code = 'import json,sys,yaml; from defenseclaw.connector_paths import normalize; c=yaml.safe_load(open(sys.argv[1],encoding=''utf-8'')); c=c if isinstance(c,dict) else {}; g=c.get(''guardrail'') or {}; g=g if isinstance(g,dict) else {}; m=g.get(''connectors'') or {}; claw=c.get(''claw'') or {}; claw=claw if isinstance(claw,dict) else {}; names=[n for n,v in m.items() if isinstance(n,str) and n.strip() and not (isinstance(v,dict) and v.get(''enabled'') is False)] if isinstance(m,dict) and m else [g.get(''connector'') or claw.get(''mode'')]; print(json.dumps(sorted({normalize(n) for n in names if isinstance(n,str) and n.strip()})))'
     $probe = Get-NativeProbe $python @("-I", "-c", $code, $path)
     if ($probe.Exit -ne 0) { throw "Cannot read the effective config's connectors: $path" }
     try {
@@ -1697,11 +1697,20 @@ function Get-LifecycleState {
     $connectors = @()
     if ($running) {
         $report = Get-GatewayHealthReport $gateway
-        # The old gateway's JSON can be absent or omit a configured hook.
-        # Keep the effective config roster in the baseline in either case,
-        # including when DEFENSECLAW_CONFIG points outside DataDir.
-        $reported = if ($report) { @(Get-GuardedConnectors $report) } else { @() }
-        $connectors = @($reported + @(Get-ConfiguredConnectors) + @(Get-EffectiveConfigConnectors) |
+        # The old gateway's JSON can be absent or omit an enabled hook.
+        # A connector it explicitly reports as not running was already
+        # unhealthy, so requiring it here would make upgrade and rollback
+        # impossible. The effective config is authoritative over a stale
+        # active_connector.json, including with external DEFENSECLAW_CONFIG.
+        if ($report) { $reported = @(Get-GuardedConnectors $report) } else { $reported = @() }
+        $notRunning = @()
+        if ($report) {
+            $notRunning = @(@(Get-Field (Get-Field $report "health") "connectors") |
+                Where-Object { $_ -and [string](Get-Field $_ "state") -ne "running" } |
+                ForEach-Object { [string](Get-Field $_ "name") })
+        }
+        $enabled = @(Get-EffectiveConfigConnectors)
+        $connectors = @($reported + @($enabled | Where-Object { $notRunning -notcontains $_ }) |
             Where-Object { $_ -and $_ -ne "none" } | Sort-Object -Unique)
     }
     $external = Get-ExternalConfig
