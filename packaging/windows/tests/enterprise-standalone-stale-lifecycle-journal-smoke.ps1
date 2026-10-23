@@ -61,7 +61,10 @@ try {
         $dataDir = [IO.Path]::Combine($Root, 'user', '.defenseclaw')
         $hooksDir = [IO.Path]::Combine($dataDir, 'hooks')
         [void][IO.Directory]::CreateDirectory($hooksDir)
+        $otherDataDir = [IO.Path]::Combine($Root, 'other-user', '.defenseclaw')
+        $otherHooksDir = [IO.Path]::Combine($otherDataDir, 'hooks')
         $targetSID = 'S-1-5-21-1-2-3-1017'
+        $otherSID = 'S-1-5-21-1-2-3-1018'
         $generationID = '0123456789abcdef0123456789abcdef'
         # Each is the error the installed gateway puts in its retire report.
         $gcRefusal = 'retire kiro managed runtime generations for SID S-1-5-21-1-2-3-1017: enterprise hooks: refusing to collect an invalid managed runtime bundle'
@@ -90,7 +93,7 @@ try {
             return [pscustomobject]@{ ok = $true }
         }
         $run = {
-            param([string]$Name, [string]$EnterpriseProfile, [string]$RetireError, [bool]$Pending, [bool]$WantThrow, [bool]$WantRemoved, [string]$Shape = 'report', [string]$BundleCase = 'open')
+            param([string]$Name, [string]$EnterpriseProfile, [string]$RetireError, [bool]$Pending, [bool]$WantThrow, [bool]$WantRemoved, [string]$Shape = 'report', [string]$BundleCase = 'open', [string]$OtherTargetCase = '')
             $script:TestRetireShape = $Shape
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile $EnterpriseProfile
             $journal = [ordered]@{
@@ -105,6 +108,16 @@ try {
                     sid = $targetSID
                     data_dir = $dataDir
                 })
+            }
+            if ($OtherTargetCase) {
+                $otherConnector = if ($OtherTargetCase.StartsWith('other SID')) { 'claudecode' } else { 'codex' }
+                $otherTargetSID = if ($OtherTargetCase.StartsWith('other SID')) { $otherSID } else { $targetSID }
+                $otherTargetDataDir = if ($OtherTargetCase.StartsWith('other SID')) { $otherDataDir } else { $dataDir }
+                $journal.targets += [ordered]@{
+                    connector = $otherConnector
+                    sid = $otherTargetSID
+                    data_dir = $otherTargetDataDir
+                }
             }
             [IO.File]::WriteAllText($layout.ManagedHooksLifecycleJournalPath, ($journal | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 5 -Compress))
             $bundle = [ordered]@{
@@ -165,6 +178,40 @@ try {
                     (($bundle | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 5 -Compress) + [char]10)
                 )
             }
+            if ($OtherTargetCase) {
+                $otherBundle = [ordered]@{}
+                foreach ($field in $bundle.Keys) {
+                    $otherBundle[$field] = $bundle[$field]
+                }
+                $otherBundle.generation_id = 'fedcba9876543210fedcba9876543210'
+                $otherBundle.connector = $otherConnector
+                $otherBundle.target_sid = $otherTargetSID
+                $otherBundle.data_dir = $otherTargetDataDir
+                $otherBundle.fail_mode = 'closed'
+                switch ($OtherTargetCase) {
+                    'other connector schema 2' { $otherBundle.schema_version = 2 }
+                    'other connector bad mode' { $otherBundle.fail_mode = 'permissive' }
+                    'other SID schema 2' { $otherBundle.schema_version = 2 }
+                    'other SID bad mode' { $otherBundle.fail_mode = 'permissive' }
+                }
+                if ($OtherTargetCase -ceq 'other SID unreadable hooks') {
+                    [void][IO.Directory]::CreateDirectory($otherTargetDataDir)
+                    [IO.File]::WriteAllText($otherHooksDir, 'not a directory')
+                }
+                else {
+                    [void][IO.Directory]::CreateDirectory(
+                        [IO.Path]::Combine($otherTargetDataDir, 'hooks')
+                    )
+                    $otherBundlePath = [IO.Path]::Combine(
+                        $otherTargetDataDir, 'hooks',
+                        ".managed-runtime-$otherConnector-fedcba9876543210fedcba9876543210.json"
+                    )
+                    [IO.File]::WriteAllText(
+                        $otherBundlePath,
+                        (($otherBundle | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 5 -Compress) + [char]10)
+                    )
+                }
+            }
             if ($Pending) {
                 [IO.File]::WriteAllText($layout.PendingPath, '{}')
             }
@@ -200,12 +247,30 @@ try {
             foreach ($file in [IO.Directory]::GetFiles($hooksDir)) {
                 [IO.File]::Delete($file)
             }
+            if ([IO.Directory]::Exists($otherHooksDir)) {
+                foreach ($file in [IO.Directory]::GetFiles($otherHooksDir)) {
+                    [IO.File]::Delete($file)
+                }
+                [IO.Directory]::Delete($otherHooksDir)
+            }
+            if ([IO.File]::Exists($otherHooksDir)) {
+                [IO.File]::Delete($otherHooksDir)
+            }
         }
         try {
             & $run 'retired' 'Standalone' '' $false $false $true
             & $run 'legacy bundle refused' 'Standalone' $gcRefusal $false $false $true
             & $run 'older gateway refuses prior open generation' 'Standalone' $openGenerationRefusal $false $false $true
             & $run 'older gateway refuses open beside selected closed' 'Standalone' $openGenerationRefusal $false $false $true 'report' 'second closed'
+            & $run 'open with another connector closed' 'Standalone' $openGenerationRefusal $false $false $true 'report' 'open' 'other connector closed'
+            & $run 'open with another SID closed' 'Standalone' $openGenerationRefusal $false $false $true 'report' 'open' 'other SID closed'
+            foreach ($otherTargetCase in @(
+                    'other connector schema 2', 'other connector bad mode',
+                    'other SID schema 2', 'other SID bad mode',
+                    'other SID unreadable hooks'
+                )) {
+                & $run "selector mismatch with $otherTargetCase bundle" 'Standalone' $openGenerationRefusal $false $true $false 'report' 'open' $otherTargetCase
+            }
             foreach ($bundleCase in @(
                     'schema 2', 'schema string', 'closed', 'invalid fail mode',
                     'foreign generation', 'foreign connector', 'foreign SID',
