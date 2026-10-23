@@ -818,6 +818,15 @@ func TestCopilotLocalStatusUsesCurrentAccountScope(t *testing.T) {
 				!reflect.DeepEqual(out, []string{h.env.P("/home/bob"), h.env.P("/home/carol")}) {
 				t.Fatalf("scoped=%v out=%v", scoped, out)
 			}
+			// A selected Copilot connector is managed even without an explicit
+			// enterprise.machine_policy.connectors.copilot row.
+			cfg.Enterprise.MachinePolicy.Connectors = nil
+			cfg.Guardrail.Connector = "copilot"
+			scoped, out, err = (&policyManager{env: h.env}).copilotAccountHomes(cfg)
+			if err != nil || !reflect.DeepEqual(scoped, []string{h.env.P("/home/alice")}) ||
+				!reflect.DeepEqual(out, []string{h.env.P("/home/bob"), h.env.P("/home/carol")}) {
+				t.Fatalf("active connector without machine-policy row: scoped=%v out=%v err=%v", scoped, out, err)
+			}
 			if err := os.Remove(h.env.P(h.env.Layout.ManifestPath)); err != nil {
 				t.Fatal(err)
 			}

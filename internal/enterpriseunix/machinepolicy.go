@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -109,7 +110,7 @@ func (m *policyManager) options(cfg *config.Config) (enterprisepolicy.Options, e
 // or exclude_users edit. The guardian's own record also names old homes that
 // need removal, so verify can report a still-active hook outside scope.
 func (m *policyManager) copilotAccountHomes(cfg *config.Config) ([]string, []string, error) {
-	if _, managed := cfg.Enterprise.MachinePolicy.Connectors[enterprisepolicy.ConnectorCopilot]; !managed {
+	if !slices.Contains(enterprisepolicy.StandaloneConnectors(cfg), enterprisepolicy.ConnectorCopilot) {
 		return nil, nil, nil
 	}
 	env := m.env
