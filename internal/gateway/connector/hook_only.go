@@ -28,7 +28,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -4788,17 +4787,33 @@ func patchCopilotHooksForOS(path, hookScript string, events []string, goos strin
 			return fmt.Errorf("copilot: unsupported hook event %q in resolved contract", event)
 		}
 		selected[event] = true
-		hooks[event] = reconcileCopilotFlatHook(hooks[event], hookScript, copilotHookRegistration(goos, event, hookScript))
+		// defenseclaw.json is DefenseClaw's file: on an event it binds, any
+		// entry but Setup's render (an old copy, a wrapper, a renamed script)
+		// is not DefenseClaw's current hook, and Copilot ran it beside the
+		// re-added entry (rel-1-0-4 GAP-0600). The event holds the render alone.
+		hooks[event] = []interface{}{copilotHookRegistration(goos, event, hookScript)}
 	}
-	// A version downgrade must remove only the now-out-of-contract managed
-	// handler (currently userPromptTransformed), while retaining operator hooks
-	// registered for that event and every unknown/future event verbatim.
-	for _, event := range copilotCurrentHookEvents {
+	// Remove DefenseClaw's handler from events outside this contract too. An
+	// operator's own handlers on those events stay intact.
+	for event, raw := range hooks {
 		if selected[event] {
 			continue
 		}
-		remaining := removeOwnedFlatHooks(hooks[event], hookScript)
-		remaining = slices.DeleteFunc(remaining, copilotOldManagedCopyEntry)
+		entries, ok := raw.([]interface{})
+		if !ok {
+			// Presence and Doctor also find our command in a malformed mapping.
+			// Remove it here so the guardian's next Setup can converge.
+			if copilotUnexpectedEventOwnsHook(raw, hookScript) {
+				delete(hooks, event)
+			}
+			continue
+		}
+		remaining := make([]interface{}, 0, len(entries))
+		for _, entry := range entries {
+			if !copilotUnexpectedEventOwnsHook(entry, hookScript) {
+				remaining = append(remaining, entry)
+			}
+		}
 		if len(remaining) == 0 {
 			delete(hooks, event)
 		} else {
@@ -4806,6 +4821,69 @@ func patchCopilotHooksForOS(path, hookScript string, events []string, goos strin
 		}
 	}
 	return writeJSONObject(path, cfg)
+}
+
+func copilotUnexpectedEventOwnsHook(raw interface{}, hookScript string) bool {
+	if containsHookScript(raw, hookScript) || editedDefenseClawHookEntry(raw, hookScriptBaseName(hookScript)) || copilotOldManagedCopyEntry(raw) {
+		return true
+	}
+	if !isCopilotPowerShellAdapterCommand(hookScript) {
+		return copilotCommandContainsScript(raw, hookScript)
+	}
+	adapter := strings.ToLower(strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(hookScript), "& '"), "'"))
+	return copilotPowerShellCommandContainsAdapter(raw, adapter)
+}
+
+// copilotCommandContainsScript matches the POSIX doctor's command-key search.
+// A changed command on an unexpected event must be removed by Setup, even
+// when another command prefixes it or the handler is nested in a mapping.
+func copilotCommandContainsScript(raw interface{}, hookScript string) bool {
+	if hookScript == "" {
+		return false
+	}
+	switch value := raw.(type) {
+	case []interface{}:
+		for _, item := range value {
+			if copilotCommandContainsScript(item, hookScript) {
+				return true
+			}
+		}
+	case map[string]interface{}:
+		for key, item := range value {
+			switch key {
+			case "command", "bash", "powershell", "command_windows", "commandWindows":
+				if command, ok := item.(string); ok && strings.Contains(command, hookScript) {
+					return true
+				}
+			}
+			if copilotCommandContainsScript(item, hookScript) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func copilotPowerShellCommandContainsAdapter(raw interface{}, adapter string) bool {
+	switch value := raw.(type) {
+	case []interface{}:
+		for _, item := range value {
+			if copilotPowerShellCommandContainsAdapter(item, adapter) {
+				return true
+			}
+		}
+	case map[string]interface{}:
+		for key, item := range value {
+			if key == "powershell" {
+				if command, ok := item.(string); ok && strings.Contains(strings.ToLower(command), adapter) {
+					return true
+				}
+			} else if copilotPowerShellCommandContainsAdapter(item, adapter) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // copilotHookRegistration is the one Copilot hook entry DefenseClaw registers
@@ -5047,27 +5125,6 @@ func ensureJSONObject(obj map[string]interface{}, key string) map[string]interfa
 	return child
 }
 
-func reconcileCopilotFlatHook(raw interface{}, hookScript string, entry map[string]interface{}) []interface{} {
-	list, _ := raw.([]interface{})
-	out := make([]interface{}, 0, len(list)+1)
-	replaced := false
-	edited := hookScriptBaseName(hookScript)
-	for _, item := range list {
-		if managedHookCommandEntry(item, hookScript) || editedDefenseClawHookEntry(item, edited) || copilotOldManagedCopyEntry(item) {
-			if !replaced {
-				out = append(out, entry)
-				replaced = true
-			}
-			continue
-		}
-		out = append(out, item)
-	}
-	if !replaced {
-		out = append(out, entry)
-	}
-	return out
-}
-
 // copilotOldManagedCopyEntry recognizes a copied DefenseClaw launcher outside
 // the usual data directory. A stale registered copy can still answer open
 // after the current launcher is rendered closed. Only a regular script with
@@ -5179,6 +5236,26 @@ func removeCopilotHookReferencesProfile(path string, secureClient bool, hookScri
 	}
 	if !secureClient {
 		if hooks, ok := pruned["hooks"].(map[string]interface{}); ok {
+			// Doctor and Setup claim an edited handler on any event in this
+			// DefenseClaw-owned file. Teardown must use the same predicate:
+			// the generic remover only recognizes exact commands in lists.
+			for event, raw := range hooks {
+				if entries, ok := raw.([]interface{}); ok {
+					remaining := make([]interface{}, 0, len(entries))
+					for _, entry := range entries {
+						if !copilotUnexpectedEventOwnsHook(entry, hookScript) {
+							remaining = append(remaining, entry)
+						}
+					}
+					if len(remaining) == 0 && len(entries) > 0 {
+						delete(hooks, event)
+					} else {
+						hooks[event] = remaining
+					}
+				} else if copilotUnexpectedEventOwnsHook(raw, hookScript) {
+					delete(hooks, event)
+				}
+			}
 			before, _ := cfg["hooks"].(map[string]interface{})
 			pruneNewlyEmptyHookEntries(before, hooks)
 			if len(hooks) == 0 {
