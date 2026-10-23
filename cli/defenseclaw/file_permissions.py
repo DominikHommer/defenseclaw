@@ -1650,6 +1650,47 @@ def windows_acl_confidentiality_error(path: str | os.PathLike[str]) -> str | Non
     return None
 
 
+def windows_private_file_protection_error(path: str | os.PathLike[str]) -> str | None:
+    """Match the guard's Windows ``safefile.ValidatePrivateFile`` check.
+
+    Reuse the native ACL snapshot and reparse checks here. The generic secret
+    confidentiality check has different rules: the guard rejects even an
+    unrelated metadata-only allow ACE and requires owner and SYSTEM ACEs.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        _reject_reparse_chain(os.fspath(path))
+        owner_sid, null_dacl, entries = _windows_acl_snapshot(os.fspath(path))
+        current_sid = _windows_current_user_sid()
+    except OSError as exc:
+        return f"Windows private file protection cannot be checked ({exc})"
+    if not current_sid or owner_sid != current_sid:
+        return "Windows private file owner is not the current user"
+    if null_dacl:
+        return "Windows private file has a null DACL"
+
+    system_sid = "S-1-5-18"
+    owner_rights_sid = "S-1-3-4"
+    trusted = {current_sid, system_sid, owner_rights_sid}
+    found_owner = False
+    found_system = current_sid == system_sid
+    for mask, access_mode, _flags, sid in entries:
+        if not mask:
+            continue
+        if access_mode == 3:
+            if sid in trusted:
+                return "Windows private file denies its owner or SYSTEM"
+            continue
+        if sid not in trusted:
+            return f"Windows private file grants access to untrusted SID {sid or '<unknown>'}"
+        found_owner |= sid in {current_sid, owner_rights_sid}
+        found_system |= sid == system_sid
+    if not found_owner or not found_system:
+        return "Windows private file owner or SYSTEM grant is missing"
+    return None
+
+
 def windows_acl_custody_confidentiality_error(
     path: str | os.PathLike[str], *, allow_inheritable: bool = False
 ) -> str | None:

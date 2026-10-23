@@ -9,6 +9,7 @@ import contextlib
 import copy
 import hashlib
 import io
+import ipaddress
 import json
 import ntpath
 import os
@@ -21,6 +22,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import click
 
@@ -34,10 +36,16 @@ from defenseclaw.file_permissions import (
     atomic_write_text_secure,
     make_private_directory,
     protect_private_file,
+    windows_private_file_protection_error,
 )
 
 _SCHEMA_VERSION = "schema-v1.21.0"
 _SCHEMA_SHA256 = "caf62ff962ada396878372ced11efb2c6764e59d90919a38583c319948931a42"
+# Go strings.TrimSpace excludes U+001C-U+001F, which Python str.strip removes.
+_GO_WHITESPACE = (
+    " \t\n\v\f\r\x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000"
+)
 _REGISTRY = ACP_REGISTRY
 _CLIENTS = set(ACP_CLIENT_IDS)
 _AGENTS = {agent_id: (command, list(args)) for agent_id, (command, args) in ACP_AGENT_ENTRY_POINTS.items()}
@@ -789,13 +797,69 @@ def _guard_token_problem(value: str) -> str | None:
             return f"its --token-file {path} is not a regular file"
         if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
             return f"its --token-file {path} permissions are too broad"
+        if os.name == "nt":
+            protection = windows_private_file_protection_error(path)
+            if protection:
+                return f"its --token-file {path} protection is unsafe: {protection}"
         if info.st_size > 16 << 10:
             return f"its --token-file {path} is unexpectedly large"
-        if not path.read_bytes().strip():
+        if not path.read_bytes().decode("utf-8", errors="surrogateescape").strip(_GO_WHITESPACE):
             return f"its --token-file {path} is empty"
     except OSError:
         return f"its --token-file {path} cannot be read"
     return None
+
+
+def _guard_contract_lock_problem(path: Path) -> str | None:
+    """Check the lock's file type, size and protection before the guard reads it."""
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 64 << 10:
+            return "is missing or unsafe"
+        if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
+            return "permissions are too broad"
+        if os.name == "nt":
+            protection = windows_private_file_protection_error(path)
+            if protection:
+                return f"protection is unsafe: {protection}"
+    except OSError:
+        return "is missing or unsafe"
+    return None
+
+
+def _guard_gateway_problem(value: str) -> str | None:
+    """Match NewHTTPEvaluator: only a literal HTTP loopback endpoint starts."""
+    endpoint = value.strip(_GO_WHITESPACE)
+    if any(ord(character) < 32 or ord(character) == 127 for character in endpoint):
+        return "its --gateway is not an HTTP literal loopback URL"
+    for index, character in enumerate(endpoint):
+        if character == "%" and (
+            index + 2 >= len(endpoint)
+            or any(digit not in "0123456789abcdefABCDEF" for digit in endpoint[index + 1:index + 3])
+        ):
+            return "its --gateway is not an HTTP literal loopback URL"
+    try:
+        parsed = urlsplit(endpoint)
+        host = parsed.hostname
+        if parsed.scheme != "http" or not host or parsed.username is not None or parsed.query or parsed.fragment:
+            return "its --gateway is not an HTTP literal loopback URL"
+        if "%" in host:  # net.ParseIP rejects IPv6 zone identifiers.
+            return "its --gateway is not an HTTP literal loopback URL"
+        # Go's URL parser accepts an empty or decimal port, without applying
+        # the socket layer's range check during evaluator construction.
+        authority = parsed.netloc
+        port = authority[authority.find("]") + 1:] if authority.startswith("[") else authority[len(host):]
+        if port and (not port.startswith(":") or (port[1:] and (not port[1:].isascii() or not port[1:].isdigit()))):
+            return "its --gateway is not an HTTP literal loopback URL"
+        address = ipaddress.ip_address(host)
+        loopback = address.is_loopback or (
+            isinstance(address, ipaddress.IPv6Address)
+            and address.ipv4_mapped is not None
+            and address.ipv4_mapped.is_loopback
+        )
+    except ValueError:
+        return "its --gateway is not an HTTP literal loopback URL"
+    return None if loopback else "its --gateway is not an HTTP literal loopback URL"
 
 
 def _copy_refusal(entry: dict[str, Any], lock: dict[str, Any], lock_path: Path) -> str | None:
@@ -805,8 +869,8 @@ def _copy_refusal(entry: dict[str, Any], lock: dict[str, Any], lock_path: Path) 
     binding's. Follows run in cmd/defenseclaw-acp/main.go and
     ValidateRuntimeContract: flags take the guard's defaults, paths compare
     as the guard compares them, the guard falls back to the catalog command
-    without a command after --, and --token-file is checked. The lock itself
-    (its digests and pins) is checked once for the binding.
+    without a command after --, and --token-file and --gateway are checked.
+    The lock itself (its digests and pins) is checked once for the binding.
     """
     args = entry.get("args")
     parsed = _guard_argv(args)
@@ -816,8 +880,9 @@ def _copy_refusal(entry: dict[str, Any], lock: dict[str, Any], lock_path: Path) 
     values, launch = parsed
     if not _names_file(values["contract-lock"], lock_path):
         return None
-    if Path(values["contract-lock"]).is_symlink():
-        return "its --contract-lock is a symlink, which the guard does not open"
+    lock_problem = _guard_contract_lock_problem(Path(values["contract-lock"]))
+    if lock_problem:
+        return f"its --contract-lock {lock_problem}"
     if launch:
         command = launch[0]
     elif values["agent"] in _AGENTS:
@@ -848,7 +913,7 @@ def _copy_refusal(entry: dict[str, Any], lock: dict[str, Any], lock_path: Path) 
         guard = os.path.realpath(guard)
     if not isinstance(lock_guard.get("path"), str) or not _same_guard_path(guard, lock_guard["path"]):
         return "it starts another guard executable than the lock"
-    return _guard_token_problem(values["token-file"])
+    return _guard_token_problem(values["token-file"]) or _guard_gateway_problem(values["gateway"])
 
 
 def _verify_binding(
@@ -882,8 +947,9 @@ def _verify_binding(
     if not names:
         problems.append("managed editor entry is missing")
     lock_path = _contract_lock_path(data_dir, client, agent)
-    if lock_path.is_symlink() or not lock_path.is_file():
-        problems.append("contract lock is missing or unsafe")
+    lock_problem = _guard_contract_lock_problem(lock_path)
+    if lock_problem:
+        problems.append(f"contract lock {lock_problem}")
         return problems
     try:
         lock = json.loads(lock_path.read_text(encoding="utf-8"))
@@ -981,17 +1047,25 @@ def _verify_binding(
             }.items())
         ):
             problems.append(f"editor launch command does not match the lock: {name}")
-    # An entry setup did not write (a copy) that starts the guard on this
-    # pair's lock: the guard refuses it and sends the user here, so verify
-    # must report exactly the copies the guard refuses (GAP-0525).
+    # A copied entry with an edited gateway can look like an adopted alias to
+    # the ownership check. Check those flags on owned entries too; the other
+    # launch fields are checked in the names loop above.
     for name, entry in servers.items() if isinstance(servers, dict) else ():
-        if name in names or not isinstance(entry, dict) or not _entry_is_guarded(entry):
+        if not isinstance(entry, dict) or not _entry_is_guarded(entry):
             continue
-        reason = _copy_refusal(entry, lock, lock_path)
+        if name in names:
+            options = _guard_options(entry)
+            reason = _guard_token_problem(options.get("--token-file", "")) or _guard_gateway_problem(
+                options.get("--gateway", "")
+            )
+        else:
+            reason = _copy_refusal(entry, lock, lock_path)
         if reason:
+            origin = "" if name in names else "setup did not write it and "
+            remedy = f"re-run acp setup for {client}/{agent}" if name in names else f"delete it from {client_path}"
             problems.append(
-                f"editor entry {name!r} cannot start: setup did not write it and {reason} "
-                f"(delete it from {client_path})"
+                f"editor entry {name!r} cannot start: {origin}{reason} "
+                f"({remedy})"
             )
     return problems
 

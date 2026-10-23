@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,6 +16,7 @@ from click.testing import CliRunner
 from defenseclaw.acp_catalog import ACP_AGENT_ENTRY_POINTS
 from defenseclaw.commands.cmd_acp import _write_token, acp_cmd
 from defenseclaw.config import ACPBinding, ACPProfile
+from defenseclaw.file_permissions import atomic_write_private_bytes, windows_acl_confidentiality_error
 
 from tests.helpers import cleanup_app, make_app_context
 
@@ -240,12 +242,14 @@ def test_verify_reports_a_copied_guard_entry_the_guard_refuses(tmp_path, monkeyp
     _isolate_client_config(monkeypatch, tmp_path)
     app, data_dir, db_path = _app(tmp_path)
     settings = _zed_settings(tmp_path)
-    guard = _binary(tmp_path / "defenseclaw-acp")
-    agent = _binary(tmp_path / "kiro-cli")
+    suffix = ".exe" if os.name == "nt" else ""
+    guard = _binary(tmp_path / f"defenseclaw-acp{suffix}")
+    agent = _binary(tmp_path / f"kiro-cli{suffix}")
     setup = ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", agent]
     verify = ["verify", "--client", "zed", "--agent", "kiro"]
     try:
-        assert CliRunner().invoke(acp_cmd, setup, obj=app).exit_code == 0
+        setup_result = CliRunner().invoke(acp_cmd, setup, obj=app)
+        assert setup_result.exit_code == 0, setup_result.output
         document = json.loads(settings.read_text())
         exact = dict(document["agent_servers"]["DefenseClaw · Kiro"])
         args = list(exact["args"])
@@ -272,29 +276,86 @@ def _flag_set(args: list[str], flag: str, value: str) -> list[str]:
     return [*args[:args.index(flag) + 1], value, *args[args.index(flag) + 2:]]
 
 
+def test_guard_token_refuses_unicode_whitespace(tmp_path):
+    token = tmp_path / "whitespace.token"
+    atomic_write_private_bytes(token, "\u00a0".encode())
+    assert cmd_acp_module._guard_token_problem(str(token)) is not None
+    atomic_write_private_bytes(token, b"\x1c")
+    assert cmd_acp_module._guard_token_problem(str(token)) is None
+
+
+def test_verify_rejects_a_contract_lock_the_guard_cannot_open(tmp_path, monkeypatch):
+    """GAP-0525: size and platform protection checks apply to owned entries."""
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    suffix = ".exe" if os.name == "nt" else ""
+    guard = _binary(tmp_path / f"defenseclaw-acp{suffix}")
+    agent = _binary(tmp_path / f"kiro-cli{suffix}")
+    setup = ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", agent]
+    verify = ["verify", "--client", "zed", "--agent", "kiro"]
+    try:
+        result = CliRunner().invoke(acp_cmd, setup, obj=app)
+        assert result.exit_code == 0, result.output
+        assert CliRunner().invoke(acp_cmd, verify, obj=app).exit_code == 0
+        lock_path = Path(data_dir) / "acp" / "zed-kiro.contract-lock.json"
+        original = lock_path.read_bytes()
+        lock_path.write_bytes(original + b" " * (65537 - len(original)))
+        result = CliRunner().invoke(acp_cmd, verify, obj=app)
+        assert result.exit_code != 0, result.output
+        assert "contract lock is missing or unsafe" in result.output
+        lock_path.write_bytes(original)
+
+        if os.name == "nt":
+            subprocess.run(
+                ["icacls", str(lock_path), "/grant", "*S-1-1-0:(RA)"], check=True, capture_output=True, text=True
+            )
+            assert windows_acl_confidentiality_error(lock_path) is None
+            expected = "contract lock protection is unsafe"
+        else:
+            lock_path.chmod(0o644)
+            expected = "contract lock permissions are too broad"
+        result = CliRunner().invoke(acp_cmd, verify, obj=app)
+        assert result.exit_code != 0, result.output
+        assert expected in result.output
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
 def test_verify_checks_copied_guard_entries_by_the_guards_rules(tmp_path, monkeypatch):
     """GAP-0525: verify reports exactly the copies the guard refuses.
 
     The guard defaults --client, --profile and --mode, compares paths after
-    making them absolute (ignoring case on Windows), checks --token-file, and
-    falls back to the catalog command without --. A copy is this lock's when
-    its --contract-lock is the same file, whatever its --client or --agent.
+    making them absolute (ignoring case on Windows), checks --token-file and
+    --gateway, and falls back to the catalog command without --. A copy is
+    this lock's when its --contract-lock is the same file, whatever its
+    --client or --agent.
     """
     _isolate_client_config(monkeypatch, tmp_path)
     app, data_dir, db_path = _app(tmp_path)
     settings = _zed_settings(tmp_path)
-    guard = _binary(tmp_path / "defenseclaw-acp")
-    agent = _binary(tmp_path / "kiro-cli")
+    suffix = ".exe" if os.name == "nt" else ""
+    guard = _binary(tmp_path / f"defenseclaw-acp{suffix}")
+    agent = _binary(tmp_path / f"kiro-cli{suffix}")
     setup = ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", agent]
     verify = ["verify", "--client", "zed", "--agent", "kiro"]
     try:
-        assert CliRunner().invoke(acp_cmd, setup, obj=app).exit_code == 0
+        setup_result = CliRunner().invoke(acp_cmd, setup, obj=app)
+        assert setup_result.exit_code == 0, setup_result.output
         exact = json.loads(settings.read_text())["agent_servers"]["DefenseClaw · Kiro"]
         args = list(exact["args"])
         lock = args[args.index("--contract-lock") + 1]
-        (tmp_path / "linked").symlink_to(Path(lock).parent, target_is_directory=True)
-        (tmp_path / "loose.token").write_text("token\n")
-        (tmp_path / "loose.token").chmod(0o644)
+        linked = tmp_path / "linked"
+        if os.name != "nt":
+            linked.symlink_to(Path(lock).parent, target_is_directory=True)
+        else:
+            try:
+                linked.symlink_to(Path(lock).parent, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                # Windows CI can run without the symlink creation privilege.
+                linked = None
+        if os.name != "nt":
+            (tmp_path / "loose.token").write_text("test token\n")
+            (tmp_path / "loose.token").chmod(0o644)
         (tmp_path / "empty.token").write_text("\n")
         (tmp_path / "empty.token").chmod(0o600)
         starts = {
@@ -303,24 +364,63 @@ def test_verify_checks_copied_guard_entries_by_the_guards_rules(tmp_path, monkey
                 *_flag_removed(args, "--profile")[:args.index("--profile")], "-profile=default",
                 *_flag_removed(args, "--profile")[args.index("--profile"):],
             ],
+            "IPv6 gateway": _flag_set(args, "--gateway", "http://[::1]:18970/api/v1/acp/evaluate"),
+            "Mapped gateway": _flag_set(args, "--gateway", "http://[::ffff:127.0.0.1]:18970/api/v1/acp/evaluate"),
         }
         refused = {
             "Other agent": _flag_set(args, "--agent", "cursor"),
             "No client": _flag_removed(args, "--client"),
-            "Linked lock": _flag_set(_flag_set(args, "--contract-lock", str(tmp_path / "linked" / Path(lock).name)),
-                                     "--profile", "watch"),
             "Catalog fallback": args[:args.index("--")],
             "No token": _flag_removed(args, "--token-file"),
             "Missing token": _flag_set(args, "--token-file", str(tmp_path / "missing.token")),
-            "Loose token": _flag_set(args, "--token-file", str(tmp_path / "loose.token")),
             "Empty token": _flag_set(args, "--token-file", str(tmp_path / "empty.token")),
+            "HTTPS gateway": _flag_set(args, "--gateway", "https://127.0.0.1:18970/api/v1/acp/evaluate"),
+            "Hostname gateway": _flag_set(args, "--gateway", "http://localhost:18970/api/v1/acp/evaluate"),
+            "Remote gateway": _flag_set(args, "--gateway", "http://192.0.2.1/api/v1/acp/evaluate"),
+            "Userinfo gateway": _flag_set(args, "--gateway", "http://user@127.0.0.1:18970/api/v1/acp/evaluate"),
+            "Query gateway": _flag_set(args, "--gateway", "http://127.0.0.1:18970/api/v1/acp/evaluate?x=1"),
+            "Fragment gateway": _flag_set(args, "--gateway", "http://127.0.0.1:18970/api/v1/acp/evaluate#x"),
+            "Scoped gateway": _flag_set(args, "--gateway", "http://[::1%25zone]:18970/api/v1/acp/evaluate"),
+            "Bad port gateway": _flag_set(args, "--gateway", "http://127.0.0.1:bad/api/v1/acp/evaluate"),
+            "Control gateway": _flag_set(args, "--gateway", "http://127.0.0.1/api/v1/acp/evaluate\x7f"),
+            "Bad escape gateway": _flag_set(args, "--gateway", "http://127.0.0.1/api/v1/acp/%zz"),
+            "Untrimmed control gateway": _flag_set(args, "--gateway", "http://127.0.0.1/api/v1/acp/evaluate\x1c"),
             "Unknown flag": ["--sandbox", "on", *args],
         }
+        if os.name != "nt":
+            refused["Loose token"] = _flag_set(args, "--token-file", str(tmp_path / "loose.token"))
+        whitespace_token = Path(data_dir) / "acp" / "whitespace.token"
+        atomic_write_private_bytes(whitespace_token, "\u00a0".encode())
+        assert cmd_acp_module._guard_token_problem(str(whitespace_token)) is not None
+        refused["Unicode whitespace token"] = _flag_set(args, "--token-file", str(whitespace_token))
+        if linked is not None:
+            refused["Linked lock"] = _flag_set(
+                _flag_set(args, "--contract-lock", str(linked / Path(lock).name)), "--profile", "watch"
+            )
+            if os.name == "nt":
+                refused["Reparse lock"] = _flag_set(args, "--contract-lock", str(linked / Path(lock).name))
+        if os.name == "nt":
+            acl_token = Path(data_dir) / "acp" / "acl.token"
+            atomic_write_private_bytes(acl_token, b"test token\n")
+            assert windows_acl_confidentiality_error(acl_token) is None
+            subprocess.run(
+                ["icacls", str(acl_token), "/grant", "*S-1-1-0:(R)"], check=True, capture_output=True, text=True
+            )
+            assert windows_acl_confidentiality_error(acl_token) is not None
+            assert cmd_acp_module._guard_token_problem(str(acl_token)) is not None
+            refused["Readable token"] = _flag_set(args, "--token-file", str(acl_token))
+            metadata_token = Path(data_dir) / "acp" / "metadata.token"
+            atomic_write_private_bytes(metadata_token, b"test token\n")
+            subprocess.run(
+                ["icacls", str(metadata_token), "/grant", "*S-1-1-0:(RA)"], check=True, capture_output=True, text=True
+            )
+            assert windows_acl_confidentiality_error(metadata_token) is None
+            assert cmd_acp_module._guard_token_problem(str(metadata_token)) is not None
+            refused["Metadata token"] = _flag_set(args, "--token-file", str(metadata_token))
         document = json.loads(settings.read_text())
         for name, copy_args in {**starts, **refused}.items():
             document["agent_servers"][name] = dict(exact, args=copy_args)
         settings.write_text(json.dumps(document))
-        assert CliRunner().invoke(acp_cmd, setup, obj=app).exit_code == 0
 
         result = CliRunner().invoke(acp_cmd, verify, obj=app)
         assert result.exit_code != 0, result.output
@@ -383,7 +483,11 @@ def test_doctor_reports_acp_bindings_and_fails_on_drift(tmp_path, monkeypatch):
         [row] = drifted.checks
         assert row["status"] == "fail"
         assert "agent executable digest has drifted" in row["detail"]
-        assert row["remediation"].startswith("defenseclaw acp setup --client zed --agent kiro --profile default")
+        setup_prefix = (
+            "defenseclaw 'acp' 'setup' '--client' 'zed' '--agent' 'kiro' '--profile' 'default'"
+            if os.name == "nt" else "defenseclaw acp setup --client zed --agent kiro --profile default"
+        )
+        assert row["remediation"].startswith(setup_prefix)
         assert "--activate" not in row["remediation"]
     finally:
         cleanup_app(app, db_path, data_dir)
@@ -1051,7 +1155,11 @@ def test_source_install_and_doctor_fix_repin_only_defenseclaws_guard(tmp_path, m
         guard_path.write_bytes(b"upgraded-guard")
         agent_path.write_bytes(b"updated-agent")
         tag, plan = _fix_acp_guard_pins(app.cfg, assume_yes=True, plan_only=True)
-        assert tag == "plan" and "zed/kiro" in plan and "defenseclaw acp setup --client zed --agent kiro" in plan
+        setup_prefix = (
+            "defenseclaw 'acp' 'setup' '--client' 'zed' '--agent' 'kiro'"
+            if os.name == "nt" else "defenseclaw acp setup --client zed --agent kiro"
+        )
+        assert tag == "plan" and "zed/kiro" in plan and setup_prefix in plan
         assert _fix_acp_guard_pins(app.cfg, assume_yes=True)[0] == "pass"
         tag, detail = _fix_acp_guard_pins(app.cfg, assume_yes=True, plan_only=True)
         assert tag == "skip" and "pins are current" in detail
