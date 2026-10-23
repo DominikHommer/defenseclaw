@@ -327,28 +327,27 @@ func (r *bundleReceiptReporter) reportChanges() {
 // offered again; once one failed (refused, dropped, abandoned at shutdown)
 // the next poll offers it again, and the logger sends the stored record to
 // the destinations that do not have it. Each acknowledgement is recorded on
-// disk as it arrives, so a gateway restarted before its next poll marked the
-// change reported does not send it again to a destination that has it
-// (GAP-0526); the others get it again under the same record id.
+// disk as it arrives, scoped to the effective transport and routing identity,
+// so a restart does not send it again to the same destination (GAP-0526)
+// but reoffers it to a replacement that uses the same name.
 func (r *bundleReceiptReporter) reportChange(ev enterprisestatus.ChangeEvent) {
 	state := r.changes[ev.EventID]
 	if state == nil {
 		id := ev.EventID
 		state = &changeDelivery{delivery: observability.NewRecordedRemoteDelivery(
-			r.acknowledgedDestinations(id), func(destination string) { r.recordAcknowledged(id, destination) })}
+			id, r.acknowledgedDestinations(id), func(destination string) { r.recordAcknowledged(id, destination) })}
 		if r.changes == nil {
 			r.changes = make(map[string]*changeDelivery)
 		}
 		r.changes[ev.EventID] = state
 	} else if !state.retry {
-		settled, delivered := state.delivery.Settled()
-		if settled && delivered {
-			r.changeReported(ev.EventID)
-			return
-		}
+		settled, _ := state.delivery.Settled()
 		if !settled && time.Since(state.offered) < bundleChangeDeliveryWait {
 			return
 		}
+		// Acknowledgement can finish after a graph reload. Reoffer once
+		// against the current graph before marking reported: unchanged
+		// destination identities are skipped, while a replacement gets it.
 	}
 	state.offered = time.Now()
 	err := r.sink.LogConfigChange(audit.ConfigChange{
@@ -374,13 +373,14 @@ func (r *bundleReceiptReporter) changeReported(id string) {
 }
 
 // acknowledgedDir is <data_dir>/bundle-receipt.acknowledged.d: per change
-// event not reported yet, one file per remote destination that has it.
+// event not reported yet, one file per acknowledged destination identity.
 func (r *bundleReceiptReporter) acknowledgedDir() string {
 	return filepath.Join(filepath.Dir(r.markerPath), bundleAcknowledgedDirName)
 }
 
-// acknowledgedDestinations returns the destinations recorded as having
-// change event id.
+// acknowledgedDestinations returns the event-scoped destination identities
+// recorded as having change event id. Name-only records from an earlier
+// 1.0.4 build are ignored; they cannot identify the endpoint that received it.
 func (r *bundleReceiptReporter) acknowledgedDestinations(id string) []string {
 	if !enterprisestatus.ValidChangeEventID(id) {
 		return nil
@@ -396,17 +396,17 @@ func (r *bundleReceiptReporter) acknowledgedDestinations(id string) []string {
 			continue
 		}
 		raw, err := safefile.ReadRegularFileBounded(filepath.Join(dir, entry.Name()), 1<<10)
-		if name := string(raw); err == nil && acknowledgedFileName(name) == entry.Name() {
+		if name := string(raw); err == nil && observability.ValidRecordedDeliveryKey(name) && acknowledgedFileName(name) == entry.Name() {
 			destinations = append(destinations, name)
 		}
 	}
 	return destinations
 }
 
-// recordAcknowledged records that destination has change event id. It runs
-// on the destination's queue.
+// recordAcknowledged records that an effective destination has change event
+// id. It runs on the destination's queue.
 func (r *bundleReceiptReporter) recordAcknowledged(id, destination string) {
-	if !enterprisestatus.ValidChangeEventID(id) || destination == "" {
+	if !enterprisestatus.ValidChangeEventID(id) || !observability.ValidRecordedDeliveryKey(destination) {
 		return
 	}
 	dir := filepath.Join(r.acknowledgedDir(), id)
@@ -415,8 +415,8 @@ func (r *bundleReceiptReporter) recordAcknowledged(id, destination string) {
 	}
 }
 
-// acknowledgedFileName names a destination's file: destination names are
-// configuration text, not file names.
+// acknowledgedFileName names a tracking key's file without treating the key
+// as a path component.
 func acknowledgedFileName(destination string) string {
 	sum := sha256.Sum256([]byte(destination))
 	return hex.EncodeToString(sum[:16])

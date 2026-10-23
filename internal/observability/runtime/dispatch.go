@@ -12,6 +12,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -134,8 +135,15 @@ func (factory *destinationDispatchFactory) Prepare(
 		if err != nil {
 			return nil, &destinationDispatchError{}
 		}
+		// The compiled destination contains the effective transport and
+		// routes. Keep its unmasked bytes in this graph only: RemoteDelivery
+		// scopes their hash to one event before journaling an acknowledgement.
+		identity, err := json.Marshal(destination)
+		if err != nil {
+			return nil, &destinationDispatchError{}
+		}
 		entry := &destinationDispatcher{
-			kind: destination.Kind, dispatcher: dispatcher,
+			kind: destination.Kind, dispatcher: dispatcher, identity: string(identity),
 		}
 		component.order = append(component.order, destination.Name)
 		component.byName[destination.Name] = entry
@@ -249,6 +257,7 @@ func (*destinationDispatchError) Error() string {
 type destinationDispatcher struct {
 	kind       config.ObservabilityV8DestinationKind
 	dispatcher *delivery.Dispatcher
+	identity   string
 }
 
 // destinationDispatchComponent owns only immutable destination identities and
@@ -350,10 +359,11 @@ func (component *destinationDispatchComponent) Enqueue(
 		tracker.Fail(route.DestinationName)
 		return
 	}
+	key := tracker.TrackingKey(route.DestinationName, entry.identity)
 	encoded, err := work.Projection().Bytes()
 	if err != nil {
 		component.observeBoundedFailure(route.DestinationName)
-		tracker.Fail(route.DestinationName)
+		tracker.Fail(key)
 		return
 	}
 	identity := work.Identity()
@@ -364,16 +374,26 @@ func (component *destinationDispatchComponent) Enqueue(
 	})
 	if err != nil {
 		component.observeBoundedFailure(route.DestinationName)
-		tracker.Fail(route.DestinationName)
+		tracker.Fail(key)
 		return
 	}
 	if tracker != nil {
-		payload = payload.WithCompletion(tracker.Track(route.DestinationName))
+		payload = payload.WithCompletion(tracker.Track(key))
 	}
 	result := entry.dispatcher.Enqueue(payload)
 	if result.Disposition == delivery.EnqueueRejected {
 		component.observeBoundedFailure(route.DestinationName)
 	}
+}
+
+func (component *destinationDispatchComponent) trackingKey(
+	name string, kind config.ObservabilityV8DestinationKind, tracker *observability.RemoteDelivery,
+) string {
+	entry := component.byName[name]
+	if entry == nil || entry.dispatcher == nil || entry.kind != kind {
+		return ""
+	}
+	return tracker.TrackingKey(name, entry.identity)
 }
 
 func (component *destinationDispatchComponent) ObserveProjectionFailure(failure pipeline.OptionalFailure) {

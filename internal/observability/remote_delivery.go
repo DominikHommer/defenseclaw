@@ -18,6 +18,8 @@ package observability
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"sync"
 )
 
@@ -47,6 +49,8 @@ type RemoteDelivery struct {
 	localDurable bool
 	// record, if set, keeps a destination's acknowledgement on disk.
 	record func(destination string)
+	// scope binds recorded keys to the producer's durable occurrence id.
+	scope string
 }
 
 // NewRemoteDelivery returns the delivery state of one occurrence.
@@ -54,18 +58,46 @@ func NewRemoteDelivery() *RemoteDelivery {
 	return &RemoteDelivery{delivered: make(map[string]bool)}
 }
 
-// NewRecordedRemoteDelivery returns the delivery state of one occurrence
-// whose acknowledged destinations were recorded by an earlier process.
-// record is called with each destination that acknowledges it, before the
+// NewRecordedRemoteDelivery returns the delivery state of one durable
+// occurrence. scope is its stable event id; acknowledged contains tracking
+// keys recorded by an earlier process. record is called with each key before
 // acknowledgement counts, so a restart between the acknowledgement and the
-// producer's next offer does not send the occurrence to it again.
-func NewRecordedRemoteDelivery(acknowledged []string, record func(destination string)) *RemoteDelivery {
+// producer's next offer does not send the occurrence to the same destination.
+func NewRecordedRemoteDelivery(scope string, acknowledged []string, record func(destination string)) *RemoteDelivery {
 	delivery := NewRemoteDelivery()
 	for _, destination := range acknowledged {
 		delivery.delivered[destination] = true
 	}
 	delivery.record = record
+	delivery.scope = scope
 	return delivery
+}
+
+// TrackingKey uses the compiled destination's unmasked transport and routing
+// identity for a recorded occurrence. The identity is hashed with the
+// occurrence id, so a private acknowledgement file cannot be reused for a
+// different change or expose a reusable secret-derived plan fingerprint.
+// In-memory deliveries continue to use the destination name.
+func (delivery *RemoteDelivery) TrackingKey(destination, identity string) string {
+	if delivery == nil || delivery.record == nil {
+		return destination
+	}
+	sum := sha256.Sum256([]byte(delivery.scope + "\x00" + identity))
+	return "v2:" + hex.EncodeToString(sum[:])
+}
+
+// ValidRecordedDeliveryKey rejects pre-identity, name-only journal records.
+// Those records cannot prove which endpoint or route received a change.
+func ValidRecordedDeliveryKey(key string) bool {
+	if len(key) != len("v2:")+sha256.Size*2 || key[:3] != "v2:" {
+		return false
+	}
+	for _, digit := range key[3:] {
+		if digit < '0' || digit > '9' && digit < 'a' || digit > 'f' {
+			return false
+		}
+	}
+	return true
 }
 
 // WithRemoteDelivery attaches delivery to ctx, so the runtime reports every

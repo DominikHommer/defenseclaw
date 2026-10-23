@@ -556,8 +556,11 @@ func leaseRecordBuilder(
 			return observability.Record{}, &emitBuilderError{}
 		}
 		provenance := record.Provenance()
-		if provenance.ConfigDigest != snapshot.Digest() || provenance.ConfigGeneration < 0 ||
-			uint64(provenance.ConfigGeneration) != snapshot.Generation() {
+		// A durable occurrence replay keeps the provenance of its stored
+		// record. The audit producer checks that the rebuilt record exactly
+		// matches the stored row before offering it through this path.
+		if !observability.StoredReplay(ctx) && (provenance.ConfigDigest != snapshot.Digest() ||
+			provenance.ConfigGeneration < 0 || uint64(provenance.ConfigGeneration) != snapshot.Generation()) {
 			return observability.Record{}, &emitBuilderError{}
 		}
 		return record, nil
@@ -661,10 +664,15 @@ func (runtime *Runtime) dispatchOptional(
 	}
 	for _, failure := range outcome.OptionalFailures() {
 		dispatch.ObserveProjectionFailure(failure)
-		tracker.Fail(failure.DestinationName())
+		key := dispatch.trackingKey(failure.DestinationName(), failure.DestinationKind(), tracker)
+		if key == "" {
+			key = failure.DestinationName()
+		}
+		tracker.Fail(key)
 	}
 	for _, work := range outcome.OptionalWork() {
-		if tracker.Acknowledged(work.Delivery().DestinationName) {
+		key := dispatch.trackingKey(work.Delivery().DestinationName, work.Delivery().DestinationKind, tracker)
+		if key != "" && tracker.Acknowledged(key) {
 			continue
 		}
 		dispatch.Enqueue(work, tracker)

@@ -22,6 +22,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -33,15 +34,20 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/observability/runtimegraph"
 )
 
 // changeExportFixture is a bootstrapped gateway runtime with one OTLP log
 // destination that can be told to refuse the change's exports (HTTP 400), the
 // gateway's audit database, and one credential change event in a spool.
 type changeExportFixture struct {
-	capture  *hookModelV8OTLPCapture
-	refusing atomic.Bool
-	refused  atomic.Int64
+	capture    *hookModelV8OTLPCapture
+	sidecar    *Sidecar
+	dataDir    string
+	configPath string
+	endpoint   string
+	refusing   atomic.Bool
+	refused    atomic.Int64
 	// slow delays the destination's answer to the change's exports.
 	slow     atomic.Bool
 	logger   *audit.Logger
@@ -81,6 +87,10 @@ func newChangeExportFixture(t *testing.T) *changeExportFixture {
 		t.Fatalf("bootstrap bound=%t error=%v", bound, err)
 	}
 	f.logger = fixture.logger
+	f.sidecar = fixture.sidecar
+	f.dataDir = fixture.dataDir
+	f.configPath = fixture.configPath
+	f.endpoint = server.URL
 	database, err := sql.Open("sqlite", filepath.Join(fixture.dataDir, config.DefaultAuditDBName))
 	if err != nil {
 		t.Fatal(err)
@@ -279,5 +289,90 @@ func TestBundleReceiptReporterDoesNotExportAnAcknowledgedChangeAgainAfterARestar
 	time.Sleep(300 * time.Millisecond)
 	if n := f.exported(); n != 1 {
 		t.Fatalf("the destination has the change %d times after a restart, want once", n)
+	}
+}
+
+// A destination name is reusable. Its old acknowledgement must not suppress
+// a pending change at a replacement endpoint or route after reload or restart.
+func TestBundleReceiptReporterReoffersAChangeAfterDestinationRebind(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		restartReporter bool
+		routeOnly       bool
+	}{
+		{name: "live reload"},
+		{name: "reporter restart", restartReporter: true},
+		{name: "route change", routeOnly: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newChangeExportFixture(t)
+			f.slow.Store(true)
+			first := f.reporter()
+			first.poll(t.Context())
+			deadline := time.Now().Add(20 * time.Second)
+			for settled, delivered := false, false; !settled || !delivered; time.Sleep(20 * time.Millisecond) {
+				if time.Now().After(deadline) {
+					t.Fatal("endpoint A did not acknowledge the change")
+				}
+				settled, delivered = first.changes[f.ev.EventID].delivery.Settled()
+			}
+			if first.hasSeen(f.ev.EventID) || f.exported() != 1 {
+				t.Fatalf("before rebind: reported=%t, endpoint A exports=%d", first.hasSeen(f.ev.EventID), f.exported())
+			}
+			if test.restartReporter {
+				// A 1.0.4 journal written before this fix has only the name.
+				// It cannot prove that the replacement endpoint received it.
+				dir := filepath.Join(first.acknowledgedDir(), f.ev.EventID)
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, acknowledgedFileName("hook-otlp")), []byte("hook-otlp"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			var secondCapture *hookModelV8OTLPCapture
+			endpoint := f.endpoint
+			if !test.routeOnly {
+				secondCapture = &hookModelV8OTLPCapture{}
+				secondServer := httptest.NewServer(http.HandlerFunc(secondCapture.handler))
+				t.Cleanup(secondServer.Close)
+				endpoint = secondServer.URL
+			}
+			raw := hookModelV8BootstrapRaw(f.dataDir, endpoint, []string{"logs"})
+			if test.routeOnly {
+				changed := bytes.Replace(raw, []byte("        buckets: ['*']\n"),
+					[]byte("        buckets: ['*']\n        redaction_profile: strict\n"), 1)
+				if bytes.Equal(changed, raw) {
+					t.Fatal("test did not change the destination route")
+				}
+				raw = changed
+			}
+			result, err := f.sidecar.ReloadObservabilityRuntime(t.Context(), f.configPath,
+				raw)
+			if err != nil || result.Status() != runtimegraph.ReloadApplied {
+				t.Fatalf("rebind destination: status=%v error=%v", result.Status(), err)
+			}
+			reporter := first
+			if test.restartReporter {
+				reporter = f.reporter()
+			}
+			pollUntil(t, reporter, func() bool { return reporter.hasSeen(f.ev.EventID) })
+			countB := 0
+			if secondCapture != nil {
+				for _, record := range hookModelV8CapturedLogs(secondCapture.logSnapshot()) {
+					if encoded, err := protojson.Marshal(record); err == nil && strings.Contains(string(encoded), f.ev.EventID) {
+						countB++
+					}
+				}
+			}
+			wantA, wantB := 1, 1
+			if test.routeOnly {
+				wantA, wantB = 2, 0
+			}
+			if countB != wantB || f.exported() != wantA {
+				t.Fatalf("pending change exports: endpoint A=%d, endpoint B=%d; want %d and %d", f.exported(), countB, wantA, wantB)
+			}
+		})
 	}
 }
