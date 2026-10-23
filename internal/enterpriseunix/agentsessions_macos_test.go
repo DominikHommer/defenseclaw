@@ -189,6 +189,7 @@ func TestAgentCLIOfScriptControls(t *testing.T) {
 		{"unrelated module", []string{"python3", "-m", "http.server"}, ""},
 		{"claude", []string{"claude", "--resume"}, "claude"},
 		{"codex", []string{"codex", "exec"}, "codex"},
+		{"antigravity", []string{"antigravity", "--headless"}, "antigravity"},
 		{"hermes module", []string{"python3", "-m", "hermes_cli"}, "hermes"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
