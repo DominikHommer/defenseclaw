@@ -452,6 +452,56 @@ def test_okta_group_verifier_uses_complete_case_insensitive_name(tmp_path: Path)
     assert full.returncode == 0 and "lists DC-KIT ml research" in full.stdout
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux") or not shutil.which("bash"), reason="a Linux host script")
+def test_okta_profile_verifier_refuses_a_diagnostic_candidate(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, source in {
+        "systemctl": "#!/bin/sh\nexit 0\n",
+        "id": "#!/bin/sh\necho dc-kit\n",
+        "getent": "#!/bin/sh\nprintf 'alice:x:2001:2001::/home/alice:/bin/bash\\n'\n",
+        "defenseclaw": "#!/bin/sh\ncat \"$OKTA_TEST_EXPLAIN\"\n",
+    }.items():
+        target = bin_dir / name
+        target.write_text(source, encoding="ascii")
+        target.chmod(0o755)
+    rules = tmp_path / "rules.ini"
+    rules.write_text("option = ldap_use_ppolicy\n", encoding="ascii")
+    explain = tmp_path / "explain.json"
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+           "OKTA_KIT_SSSD_CFG_RULES": str(rules), "OKTA_TEST_EXPLAIN": str(explain)}
+    script = OKTA.parent / "verify-okta-identity.sh"
+    answer = {"profiles_configured": True, "profile": "okta-strict", "match": "default_lookup_failed",
+              "refused": True, "refused_reason": "group membership is unconfirmed",
+              "warnings": ["directory warning | retry after recovery"]}
+    explain.write_text(json.dumps(answer), encoding="ascii")
+    for extra in (["--expect-profile", "okta-strict"], []):
+        run = subprocess.run(["bash", str(script), "--user", "alice", "--defenseclaw", str(bin_dir / "defenseclaw"),
+                              *extra], env=env, capture_output=True, text=True)
+        assert run.returncode == 1
+        assert "FAIL  DefenseClaw refuses requests for alice: group membership is unconfirmed" in run.stdout
+        assert "PASS  DefenseClaw picks profile okta-strict" not in run.stdout
+        assert "used the default profile" not in run.stdout
+
+    answer["lookup_error"] = "directory lookup timed out"
+    explain.write_text(json.dumps(answer), encoding="ascii")
+    with_lookup_error = subprocess.run(["bash", str(script), "--user", "alice", "--defenseclaw",
+                                        str(bin_dir / "defenseclaw"), "--expect-profile", "okta-strict"],
+                                       env=env, capture_output=True, text=True)
+    assert with_lookup_error.returncode == 1
+    assert "FAIL  DefenseClaw refuses requests for alice: group membership is unconfirmed" in with_lookup_error.stdout
+
+    answer["refused"] = False
+    answer.pop("refused_reason")
+    answer.pop("lookup_error")
+    answer.pop("warnings")
+    explain.write_text(json.dumps(answer), encoding="ascii")
+    settled = subprocess.run(["bash", str(script), "--user", "alice", "--defenseclaw", str(bin_dir / "defenseclaw")],
+                             env=env, capture_output=True, text=True)
+    assert settled.returncode == 1  # The directory outage still fails kit verification.
+    assert "the default profile applies; no assignment needs the missing fact" in settled.stdout
+
+
 def test_entra_apply_validates_password_file_before_graph_write(tmp_path: Path) -> None:
     entra = _load(ENTRA)
     plan = tmp_path / "tenant.json"

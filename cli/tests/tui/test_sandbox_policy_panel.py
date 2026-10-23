@@ -114,10 +114,12 @@ def test_the_policy_line_replaces_the_local_organization_line() -> None:
     assert SandboxesPanelModel().policy_line() == ""
 
 
-def test_provisional_default_match_says_no_assignment_needs_missing_facts() -> None:
+def test_provisional_default_match_names_the_directory_outage() -> None:
     profile = dict(managed_policy_pairs({"profile": "offline-floor", "match": "default_lookup_failed"}, NOW))["Profile"]
-    assert "no assignment needs missing facts" in profile
-    assert "directory couldn't be reached" not in profile
+    assert profile == (
+        "offline-floor   matched: the default (your directory couldn't be reached; "
+        "no assignment needs the missing facts)"
+    )
 
 
 def test_policy_pairs_follow_the_plan() -> None:
