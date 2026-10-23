@@ -18026,11 +18026,18 @@ function Invoke-DefenseClawGatewayCommand {
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string[]]$Arguments,
+        [string]$GatewayPath,
         [switch]$Capture,
         [switch]$AllowFailure,
         [ValidateRange(1, 1800)][int]$TimeoutSeconds = 300
     )
-    $gateway = Resolve-DefenseClawFullPath -Path $Layout.GatewayPath -MustExist -Leaf
+    $commandPath = if ([string]::IsNullOrWhiteSpace($GatewayPath)) {
+        $Layout.GatewayPath
+    }
+    else {
+        $GatewayPath
+    }
+    $gateway = Resolve-DefenseClawFullPath -Path $commandPath -MustExist -Leaf
     Assert-DefenseClawNoReparsePath -Path $gateway
     $keys = @(
         'DEFENSECLAW_HOME',
@@ -21777,6 +21784,7 @@ function Assert-DefenseClawInstalledConfig {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
+        [hashtable]$GatewaySource,
         # Only the install-like lifecycle records (and migrates) the config,
         # inside its transaction; verify validates read-only.
         [switch]$RecordLifecycle
@@ -21791,10 +21799,67 @@ function Assert-DefenseClawInstalledConfig {
     if ($RecordLifecycle) {
         $arguments += '--record-lifecycle'
     }
-    [void](Invoke-DefenseClawGatewayCommand `
-        -Layout $Layout `
-        -GatewayServiceName $GatewayServiceName `
-        -Arguments $arguments)
+    $gatewayPath = [string]$Layout.GatewayPath
+    if ($null -ne $GatewaySource) {
+        [void](Assert-DefenseClawSourceDescriptorCurrent -Source $GatewaySource)
+        $gatewayPath = [string]$GatewaySource.path
+    }
+    try {
+        [void](Invoke-DefenseClawGatewayCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Arguments $arguments `
+            -GatewayPath $gatewayPath)
+    }
+    finally {
+        if ($null -ne $GatewaySource) {
+            [void](Assert-DefenseClawSourceDescriptorCurrent -Source $GatewaySource)
+        }
+    }
+}
+
+function Assert-DefenseClawRepairRollbackConfig {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][hashtable]$Sources,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    # A pending transaction must recover its recorded preimage first. A
+    # deferred install has stopped services and supplies its real config in
+    # Repair; it has no running gateway policy to preserve.
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath) {
+        return
+    }
+    $service = Get-DefenseClawServiceChecked -Name $GatewayServiceName
+    if ($null -eq $service -or [string]$service.Status -ceq 'Stopped') {
+        return
+    }
+    if ([string]$service.Status -cne 'Running') {
+        throw "Repair refused while $GatewayServiceName is $($service.Status); wait for a stable service state"
+    }
+    $gatewaySource = if ($Sources.ContainsKey('gateway')) {
+        [hashtable]$Sources['gateway']
+    }
+    else {
+        $null
+    }
+    try {
+        # Validate with the authenticated replacement gateway when present:
+        # older installed releases may not implement validate-service-config.
+        # Without --record-lifecycle this runs the strict startup checks but
+        # neither migrates nor records the installed config.
+        Assert-DefenseClawInstalledConfig `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GatewaySource $gatewaySource
+    }
+    catch {
+        throw (
+            "Repair refused: the running gateway's installed config cannot " +
+            'be validated for rollback (services and deployment metadata ' +
+            'were not changed): ' + $_.Exception.Message
+        )
+    }
 }
 
 function Test-DefenseClawStandaloneFleetSourceEnabled {
@@ -36014,6 +36079,10 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             Assert-DefenseClawNoOtherProfileDeployment
         }
         if ($Action -eq 'Repair' -and (Test-DefenseClawStandaloneProfile)) {
+            Assert-DefenseClawRepairRollbackConfig `
+                -Layout $layout `
+                -Sources $sources `
+                -GatewayServiceName $GatewayServiceName
             [void](Repair-DefenseClawUnreadableDeploymentMetadata `
                 -Layout $layout `
                 -Sources $sources `
