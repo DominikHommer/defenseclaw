@@ -1086,12 +1086,14 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 			return err
 		}
 		selected := false
+		selectedGenerationID := ""
 		if exists {
 			if current, ok := windowsManagedRuntimeSelectorTargetForSID(selector, validated.TargetSID); ok {
 				if err := validateWindowsManagedRuntimeSelectorTargetAgainstSnapshot(current, validated); err != nil {
 					return err
 				}
 				selected = true
+				selectedGenerationID = current.GenerationID
 				preserve[current.GenerationID] = struct{}{}
 			}
 		}
@@ -1158,6 +1160,18 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 				return errors.New("enterprise hooks: managed runtime generation GC candidate limit exceeded")
 			}
 			if _, keep := preserve[generationID]; keep {
+				if generationID == selectedGenerationID {
+					// The current hook may still read this bundle, so leave it in
+					// place. Classify its contents now with the same rules that
+					// post-commit GC will apply once it is unselected. Otherwise
+					// retiring the old journal could admit a transaction whose
+					// later GC refuses this bundle.
+					if _, _, err := loadUnselectedWindowsManagedRuntimeBundle(
+						validated, target, generationID,
+					); err != nil {
+						return err
+					}
+				}
 				continue
 			}
 			entry, data, err := loadUnselectedWindowsManagedRuntimeBundle(

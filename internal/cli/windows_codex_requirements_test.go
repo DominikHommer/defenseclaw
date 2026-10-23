@@ -37,11 +37,11 @@ func TestValidateWindowsStagedRetireGatewayLayout(t *testing.T) {
 		wantError  string
 	}{
 		{name: "verified Setup gateway", executable: stage, stateRoot: roots.StateRoot},
-		{name: "installed gateway", executable: filepath.Join(roots.InstallRoot, "bin", "defenseclaw-gateway.exe"), stateRoot: roots.StateRoot, wantError: "exact protected Setup gateway path"},
-		{name: "foreign staging root", executable: filepath.Join(programData, "other", "defenseclaw-gateway.exe"), stateRoot: roots.StateRoot, wantError: "exact protected Setup gateway path"},
-		{name: "wrong executable", executable: filepath.Join(filepath.Dir(stage), "defenseclaw-hook.exe"), stateRoot: roots.StateRoot, wantError: "exact protected Setup gateway path"},
-		{name: "short Setup ID", executable: filepath.Join(programData, "DefenseClaw-Enterprise-Setup-aa", "defenseclaw-gateway.exe"), stateRoot: roots.StateRoot, wantError: "exact protected Setup gateway path"},
-		{name: "nonhex Setup ID", executable: filepath.Join(programData, "DefenseClaw-Enterprise-Setup-"+strings.Repeat("g", 32), "defenseclaw-gateway.exe"), stateRoot: roots.StateRoot, wantError: "exact protected Setup gateway path"},
+		{name: "protected payload folder gateway", executable: filepath.Join(programData, "DefenseClaw-Staging", "defenseclaw-gateway.exe"), stateRoot: roots.StateRoot},
+		{name: "installed gateway", executable: filepath.Join(roots.InstallRoot, "bin", "defenseclaw-gateway.exe"), stateRoot: roots.StateRoot, wantError: "replacement gateway"},
+		{name: "wrong executable", executable: filepath.Join(filepath.Dir(stage), "defenseclaw-hook.exe"), stateRoot: roots.StateRoot, wantError: "exact replacement gateway path"},
+		{name: "relative source", executable: `payload\defenseclaw-gateway.exe`, stateRoot: roots.StateRoot, wantError: "exact replacement gateway path"},
+		{name: "noncanonical source", executable: programData + `\DefenseClaw-Staging\..\DefenseClaw-Staging\defenseclaw-gateway.exe`, stateRoot: roots.StateRoot, wantError: "exact replacement gateway path"},
 		{name: "wrong state root", executable: stage, stateRoot: filepath.Join(programData, "other"), wantError: "matching installed deployment metadata"},
 		{name: "wrong schema", executable: stage, stateRoot: roots.StateRoot, mutate: func(m *windowsCodexDeploymentMetadata) { m.SchemaVersion = 2 }, wantError: "matching installed deployment metadata"},
 		{name: "wrong mode", executable: stage, stateRoot: roots.StateRoot, mutate: func(m *windowsCodexDeploymentMetadata) { m.DeploymentMode = "personal" }, wantError: "matching installed deployment metadata"},
@@ -54,7 +54,7 @@ func TestValidateWindowsStagedRetireGatewayLayout(t *testing.T) {
 			if tc.mutate != nil {
 				tc.mutate(&current)
 			}
-			got, err := validateWindowsStagedRetireGatewayLayout(tc.executable, tc.stateRoot, programData, current, roots)
+			got, err := validateWindowsStagedRetireGatewayLayout(tc.executable, tc.stateRoot, current, roots)
 			if tc.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
 					t.Fatalf("layout error = %v, want %q", err, tc.wantError)
