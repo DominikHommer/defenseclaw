@@ -448,10 +448,10 @@ func TestRemovedTeardownFailuresRemainRetryable(t *testing.T) {
 				t.Fatal("VerifyClean passed with the old hook in place")
 			}
 		})
-		// The stub is written into the script, but its copy cannot be
-		// renamed over it: the script blocks already, the tokens stay until
+		// The stub is written into the script, but its distinct copy cannot
+		// be published: the script blocks already, and the tokens stay until
 		// the next start, which revokes them.
-		t.Run(c.name+"/the stub's copy cannot be renamed", func(t *testing.T) {
+		t.Run(c.name+"/the stub's copy cannot be published", func(t *testing.T) {
 			if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 				t.Skip("directory modes do not stop writes here")
 			}
@@ -468,8 +468,8 @@ func TestRemovedTeardownFailuresRemainRetryable(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = os.Chmod(hooks, 0o700) })
 			conn, _ := RetiredConnector(c.name)
-			if err := conn.Teardown(context.Background(), h.opts); err == nil || !strings.Contains(err.Error(), "could not be renamed over it") {
-				t.Fatalf("Teardown = %v, want the rename failure", err)
+			if err := conn.Teardown(context.Background(), h.opts); err == nil || !strings.Contains(err.Error(), "could not be safely replaced") {
+				t.Fatalf("Teardown = %v, want the publication failure", err)
 			}
 			if err := os.Chmod(hooks, 0o700); err != nil {
 				t.Fatal(err)
@@ -485,7 +485,7 @@ func TestRemovedTeardownFailuresRemainRetryable(t *testing.T) {
 			if err := conn.VerifyClean(h.opts); err == nil {
 				t.Fatal("VerifyClean passed with the tokens left")
 			}
-			requireRemovedSame(t, "a teardown whose rename failed", h.snapshot(t, skip...), before)
+			requireRemovedSame(t, "a teardown whose publication failed", h.snapshot(t, skip...), before)
 			if err := conn.Teardown(context.Background(), h.opts); err != nil {
 				t.Fatalf("retry: %v", err)
 			}

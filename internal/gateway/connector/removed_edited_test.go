@@ -220,7 +220,7 @@ func TestRemovedTeardownSavesTheEditBeforeEveryWrite(t *testing.T) {
 		h.stage(t, c)
 		writeRemovedFile(t, h.script(c), removedOmnigentEditedModule, 0o600)
 		var got []byte
-		err := c.writeStubInPlace(h.script(c), func(old []byte, _ os.FileInfo) error {
+		_, err := c.writeStubInPlace(h.script(c), func(old []byte, _ os.FileInfo) error {
 			got = append([]byte(nil), old...)
 			return errors.New("the disk is full")
 		})
