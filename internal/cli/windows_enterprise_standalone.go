@@ -2603,9 +2603,9 @@ func writeWindowsEnterpriseStandaloneConfigRefusal(
 // supplied config the gateway could not load, and reports refused=false
 // when the config passes. An interrupted upgrade leaves a pending
 // transaction with the services stopped, and only a lifecycle run recovers
-// it: refusing an ensure or upgrade before that run left the host stopped on
-// every MDM retry (GAP-1433). Those two actions first run the repair ensure
-// uses to recover a pending transaction, which restores the previous
+// it: refusing a supplied config before that run left the host stopped on
+// every MDM retry (GAP-1433, GAP-0705). Each action first runs a source-free
+// repair to recover a pending transaction, which restores the previous
 // deployment and its services, and check the config again: the restored
 // rule packs can make it load. A config still refused is refused, and the
 // refusal reports the restored host.
@@ -2622,7 +2622,7 @@ func refuseWindowsEnterpriseStandaloneSuppliedConfig(
 	if err == nil {
 		err = windowsEnterpriseStandaloneConfigPreflight(opts.configPath)
 	}
-	if err != nil && (action == "ensure" || action == "upgrade") && windowsEnterpriseStandaloneTransactionPending() {
+	if err != nil && (action == "ensure" || action == "upgrade" || action == "repair") && windowsEnterpriseStandaloneTransactionPending() {
 		recovery := *opts
 		recovery.jsonOutput = true
 		clearWindowsEnterpriseSources(&recovery)
@@ -3660,7 +3660,8 @@ func windowsEnterpriseReleaseHotConfigClosureIfProven(ctx context.Context, resul
 	if err != nil || !held {
 		return err
 	}
-	if !windowsEnterpriseHotConfigEnforcesInstalled(ctx, windowsEnterpriseHotConfigTimeout) {
+	// An unavailable CLI proves nothing either: the closure stays.
+	if enforced, _ := windowsEnterpriseHotConfigEnforcesInstalled(ctx, windowsEnterpriseHotConfigTimeout); !enforced {
 		return errors.New("the gateway has not proven the installed config's policy")
 	}
 	layout, err := windowsEnterpriseHotConfigLayout()

@@ -175,6 +175,8 @@ const (
 	// TrustRulePack is an administrator rule pack: its folders above, and
 	// every folder and file in it (see rulePackTrust).
 	TrustRulePack
+	// TrustRuntimeFile is a policy-tree file the service account may own.
+	TrustRuntimeFile
 )
 
 // Env binds the lifecycle to one host. Zero values are replaced by
@@ -471,6 +473,8 @@ func defaultTrust(path string, kind TrustKind) error {
 		return managed.ValidateTrustedFilePath(path, "managed file")
 	case TrustRuntimeDir:
 		return managed.ValidateTrustedRuntimeDir(path, "managed runtime directory")
+	case TrustRuntimeFile:
+		return managed.ValidateTrustedServiceRuntimeFilePath(path, "managed runtime file", "")
 	case TrustRulePack:
 		return rulePackTrust(path)
 	}
