@@ -579,7 +579,23 @@ async function defenseclawLogFailOpen(reason, category) {
   }
 }
 
-{{end}}async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity, actionable) {
+{{if and (not .Managed) (not .SecureClient)}}// The installer holds this data-directory lock while it replaces this
+// account's stopped gateway. An open outage mode cannot bypass that upgrade.
+const DC_INSTALL_WINDOW_TEXT = "DefenseClaw blocked this tool call: DefenseClaw is being installed or upgraded for this account, " +
+  "and its gateway starts again when that is done. Try again in a moment; if it does not come back, run `defenseclaw-gateway start`.";
+
+async function defenseclawInstallWindow() {
+  try {
+    await lstat(join(dirname(dirname(DC_TOKEN_FILE)), ".install.lock"));
+    return true;
+  } catch (err) {
+    // Only a missing lock ends the install window. An unreadable lock must
+    // never turn an upgrade into a fail-open outage.
+    return !(err && err.code === "ENOENT");
+  }
+}
+
+{{end}}{{end}}async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity, actionable) {
   let token;
   try {
     token = DC_HOOK_SOCKET ? "" : await defenseclawToken();
@@ -625,7 +641,8 @@ async function defenseclawLogFailOpen(reason, category) {
     }, token), controller.signal);{{end}}
     if (!res.ok) {
       // Gateway answered with a bad status (auth/5xx). Honor fail mode.
-      if (DC_FAIL_MODE === "closed") {
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}      if (await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
+{{end}}      if (DC_FAIL_MODE === "closed") {
         return { reason: "DefenseClaw hook failed closed (HTTP " + res.status + ")" };
       }
 {{if not .Sandbox}}      await defenseclawLogFailOpen("gateway returned HTTP " + res.status, res.status >= 500 ? "transport" : "response");
@@ -637,7 +654,8 @@ async function defenseclawLogFailOpen(reason, category) {
       return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };
     }
 {{else}}{{if not .SecureClient}}    if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
-{{if not .Managed}}      if (DC_FAIL_MODE === "open") {
+{{if not .Managed}}      if (await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
+{{end}}{{if not .Managed}}      if (DC_FAIL_MODE === "open") {
         await defenseclawLogFailOpen("invalid gateway verdict", "response");
         return null;
       }
@@ -659,7 +677,8 @@ async function defenseclawLogFailOpen(reason, category) {
     // Transport failure (gateway unreachable / timeout). Honor fail mode:
     // closed → block, open → allow. An uninstalled deployment allows.
     if (await defenseclawDeploymentRemoved()) return null;
-    if (DC_FAIL_MODE === "closed") {
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}    if (await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
+{{end}}    if (DC_FAIL_MODE === "closed") {
       if ((DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && defenseclawGatewayStopped(err)) return { reason: DC_GATEWAY_STOPPED_TEXT };
       return { reason: "DefenseClaw hook failed closed (" + (err && err.message ? err.message : String(err)) + ")" };
     }

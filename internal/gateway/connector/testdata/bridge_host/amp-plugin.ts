@@ -413,6 +413,22 @@ function gatewayStopped(error: unknown): boolean {
 	return codes.some((code) => code === "ENOENT" || code === "ECONNREFUSED" || code === "ConnectionRefused")
 }
 
+// The installer holds this data-directory lock while it replaces this
+// account's stopped gateway. An open outage mode cannot bypass that upgrade.
+const DC_INSTALL_WINDOW_TEXT = "DefenseClaw blocked this tool call: DefenseClaw is being installed or upgraded for this account, " +
+	"and its gateway starts again when that is done. Try again in a moment; if it does not come back, run `defenseclaw-gateway start`."
+
+async function installWindow(): Promise<boolean> {
+	try {
+		await lstat(join(dirname(dirname(DC_TOKEN_FILE)), ".install.lock"))
+		return true
+	} catch (error) {
+		// Only a missing lock ends the install window. An unreadable lock must
+		// never turn an upgrade into a fail-open outage.
+		return (error as { code?: unknown } | null)?.code !== "ENOENT"
+	}
+}
+
 function failureResponse(reason: string): GatewayResponse {
 	if (DC_FAIL_MODE === "closed") {
 		return { action: "block", reason: `DefenseClaw hook failed closed (${reason})` }
@@ -592,15 +608,20 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 				body,
 				signal: controller.signal,
 			}, token), controller.signal)
-			if (!response.ok) return failureResponse(`HTTP ${response.status}`)
+			if (!response.ok) {
+				if (await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+				return failureResponse(`HTTP ${response.status}`)
+			}
 
 			const data = await response.json() as GatewayResponse
 			if (!data || !["allow", "block", "confirm", "alert"].includes(data.action || "")) {
+				if (await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
 				return failureResponse("invalid gateway verdict")
 			}
 			return data
 		} catch (error) {
 			if (await deploymentRemoved()) return { action: "allow" }
+			if (await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
 			if (DC_FAIL_MODE === "closed" && (DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && gatewayStopped(error)) {
 				return { action: "block", reason: DC_GATEWAY_STOPPED_TEXT }
 			}

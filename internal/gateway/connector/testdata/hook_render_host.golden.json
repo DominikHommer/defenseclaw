@@ -1642,15 +1642,15 @@
   "plugin/amp-plugin.ts/managed=0/fail=closed": {
     "amp-plugin.ts": {
       "mode": "-rw-------",
-      "size": 32296,
-      "sha256": "214bd1f6c5eb17f7e87ff8df4383134eb717f84613d295d382587f6ee8512366"
+      "size": 33350,
+      "sha256": "37b852d0ff5214ef64c6773d50ea5a15420624cbca9a75f8ac6cbfb7acdae87d"
     }
   },
   "plugin/amp-plugin.ts/managed=0/fail=open": {
     "amp-plugin.ts": {
       "mode": "-rw-------",
-      "size": 32294,
-      "sha256": "b1c6039cc2f433a85428dca9d696e15430bf831e25b18397744c4d001c767f8c"
+      "size": 33348,
+      "sha256": "94d55f9e720ef17a537c2c1332b5fe4f1cec106c9675236a32368242e144c5cd"
     }
   },
   "plugin/amp-plugin.ts/managed=1/fail=closed": {
@@ -1670,15 +1670,15 @@
   "plugin/opencode-plugin.js/managed=0/fail=closed": {
     "opencode-plugin.js": {
       "mode": "-rw-------",
-      "size": 34769,
-      "sha256": "adc51172e7ccb1f1ebe299a89da8b93deaae9567a112b2f4e60fbd2452f914a0"
+      "size": 35787,
+      "sha256": "1f58af32101e87db2a3b7f9dabad32e9f7875594c2322fae3987a6b9ed7a3fe4"
     }
   },
   "plugin/opencode-plugin.js/managed=0/fail=open": {
     "opencode-plugin.js": {
       "mode": "-rw-------",
-      "size": 34767,
-      "sha256": "fe8fcfa434aba60d0fdd1f511f603787cf050e04788324a409756c7213e6b9f4"
+      "size": 35785,
+      "sha256": "9e3d71c87818313c5fd43373d1e48ea61d3c98cf13c9f5c209d9353658ca1af7"
     }
   },
   "plugin/opencode-plugin.js/managed=1/fail=closed": {
