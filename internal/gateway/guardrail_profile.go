@@ -1100,9 +1100,6 @@ func userEntryMatches(subject *profileSubject, entry string) bool {
 	if subject.localAccount {
 		bareName = ""
 	}
-	if ambiguousBareUserEntry(subject, entry) {
-		bareName = ""
-	}
 	if anyEqualFold([]string{subject.UserID, bareName}, entry) ||
 		useridentity.PrincipalsEqual(subject.Principal, entry) || useridentity.PrincipalsEqual(subject.UPN, entry) {
 		return true
