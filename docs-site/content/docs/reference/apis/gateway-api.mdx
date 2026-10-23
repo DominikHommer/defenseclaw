@@ -626,10 +626,15 @@ from its first hook after the gateway linked that session to the parent.
 `last_subagent_id` is the `ais-`
 instance of the newest one, the one its own records carry. `upn` is the
 account's UPN in the directory facts the gateway holds for its uid or SID,
-recorded when the agent was last seen; a local account, and a directory that
-gives the account none, have no `upn`. Linux, macOS and Windows rows carry the
-same fields, and rows written before 1.0.4 gain them when their agent is seen
-again. `total` counts every matching identity; while
+recorded when the agent was last seen. A local account, and a directory that
+gives the account none, have no `upn`. On Windows, a cold Active Directory
+lookup can still be running when the first hook records the row, so `upn` may
+be absent. The completed background lookup does not update that row; it gains
+`upn` only if a later hook runs after the cache has the UPN. If no later hook
+runs, the row remains without a UPN. Linux, macOS and Windows rows carry the
+same fields, and rows written before 1.0.4 gain the new fields when their
+agent is seen again, subject to that `upn` timing. `total` counts every
+matching identity; while
 `next_cursor` is not empty, pass it as `cursor` for the next page.
 `defenseclaw agent identities` reads every page.
 

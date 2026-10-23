@@ -85,6 +85,22 @@ describe('agent identity rows (rel-1-0-4 GAP-0596)', () => {
     }
     assert.ok(api.includes('Linux, macOS and Windows rows carry the same fields'));
   });
+
+  it('explains when a cold Windows AD UPN reaches an existing row', () => {
+    const identity = source('internal/gateway/agent_identity.go');
+    const windows = source('internal/gateway/identity_resolve_windows.go');
+    assert.match(identity, /func agentIdentityAccountUPN\(userID string\)[\s\S]*?peerDirectoryCache\(\)\.peek\(userID\)/);
+    assert.match(windows, /wait := time\.Duration\(0\)[\s\S]*?if identityLookupBlocking\.Load\(\)/);
+
+    const api = page('reference/apis/gateway-api.mdx');
+    const upn = api.slice(api.indexOf('`upn` is the account'), api.indexOf('`total` counts'));
+    assert.ok(upn.includes('a cold Active Directory lookup can still be running when the first hook records the row'));
+    assert.ok(upn.includes('a later hook runs after the cache has the UPN'));
+    assert.ok(upn.includes('If no later hook runs, the row remains without a UPN'));
+
+    const reference = page('enterprise/identity/reference.mdx');
+    assert.ok(reference.includes('another hook runs after the directory cache has the UPN'));
+  });
 });
 
 describe('the TUI page on a managed computer (rel-1-0-4 GAP-0597)', () => {
