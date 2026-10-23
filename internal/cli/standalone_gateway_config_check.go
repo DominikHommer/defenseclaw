@@ -147,6 +147,83 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 	return nil
 }
 
+// compileStandaloneGatewayRepairRollbackConfig checks only the installed
+// config's content and startup semantics while a running gateway retains its
+// last good policy. Repair later restamps managed ACLs and runs the strict
+// service validator before activation. Checking path trust here would refuse
+// the ACL drift that Repair is meant to heal.
+func compileStandaloneGatewayRepairRollbackConfig(configPath, dataDir string) (*config.Config, error) {
+	restore := snapshotProcessEnvironment()
+	defer restore()
+	loaded, err := loadConfigV8FileWithCredentials(configPath, dataDir, "")
+	if err != nil {
+		var secretError *config.V8SecretReferenceError
+		if !errors.As(err, &secretError) || secretError.Credential {
+			return nil, err
+		}
+		// Setup does not inherit environment secrets resolved by the gateway
+		// service. Compile with the same placeholder-secret path as the strict
+		// validator, then independently check runtime semantics and the roster.
+		raw, err := readConfigV8Source(configPath)
+		if err != nil {
+			return nil, err
+		}
+		secretsDir := managed.StandaloneSecretsDirForConfig(runtime.GOOS, configPath)
+		compiled, err := config.ParseCompileObservabilityV8(configPath, raw, config.ObservabilityV8CompileOptions{
+			DefaultDataDir: dataDir,
+			Secrets:        standalonePathPreflightSecrets{credentialsDir: secretsDir},
+		})
+		if err != nil {
+			return nil, err
+		}
+		runtimeConfig, err := config.LoadRuntimeV8InspectionCandidateFromBytes(configPath, raw)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := config.WithObservabilityV8ManagedAIDDestination(
+			compiled.Plan, config.ObservabilityV8ManagedAIDOptionsFromConfig(runtimeConfig, raw)); err != nil {
+			return nil, err
+		}
+		document, err := config.ParseV8YAML(configPath, raw)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateRuntimeV8ConnectorRoster(document, runtimeConfig); err != nil {
+			return nil, err
+		}
+		loaded = &loadedConfigV8File{runtime: runtimeConfig}
+	}
+	if loaded == nil || loaded.runtime == nil {
+		return nil, errors.New("config compiler returned no runtime configuration")
+	}
+	if !loaded.runtime.StandaloneEnterprise() {
+		return nil, fmt.Errorf("managed config resolves the %q enterprise profile, not %s",
+			loaded.runtime.EnterpriseProfile(), managed.ProfileStandalone)
+	}
+	if err := config.ValidateManagedEnterpriseListenerBindings(loaded.runtime); err != nil {
+		return nil, err
+	}
+	// Pins and rule-pack contents cannot be repaired by an ACL restamp. Read
+	// them as Setup's elevated identity, without asking whether the service
+	// account can currently traverse the managed paths.
+	if err := loaded.runtime.Scanners.CheckPinnedFiles(); err != nil {
+		return nil, err
+	}
+	if loaded.runtime.Guardrail.Enabled {
+		for _, pack := range standaloneGatewayRulePackDirs(loaded.runtime) {
+			if _, err := guardrail.LoadRulePack(pack.dir); err != nil {
+				return nil, fmt.Errorf("the gateway cannot load the guardrail rule pack %s that %s names: %w",
+					pack.dir, configPath, err)
+			}
+		}
+		if err := gateway.CheckRulePacks(loaded.runtime); err != nil {
+			return nil, fmt.Errorf("the gateway cannot load the guardrail rule packs that %s selects: %w",
+				configPath, err)
+		}
+	}
+	return loaded.runtime, nil
+}
+
 // standaloneRulePackUnreadableText starts the refusal of a rule pack the
 // gateway service account cannot read. The Windows Setup preflight reports
 // it as rule_pack_unreadable, the code the enumerator's report gets and the

@@ -1500,12 +1500,12 @@ Invoke-Case 'valid drifted' $valid $true $full
     assert cases["valid drifted"]["repair"].startswith("managed DACL is not protected")
 
 
-def test_repair_checks_the_running_gateway_rollback_config_before_rebuilding_metadata(tmp_path: Path) -> None:
+def _repair_rollback_config_cases(tmp_path: Path) -> dict[str, dict]:
     """A running gateway can hold the last good policy after config.yaml is edited.
 
-    Repair must ask the authenticated replacement gateway to run its strict,
-    read-only startup check before it rebuilds deployment.json or opens a
-    transaction, including when deployment.json itself is unreadable.
+    Repair must ask the authenticated replacement gateway to check the
+    rollback config before rebuilding deployment.json or opening a transaction.
+    An ACL drift that Repair can heal must not block that check.
     """
     import json
 
@@ -1520,6 +1520,13 @@ def test_repair_checks_the_running_gateway_rollback_config_before_rebuilding_met
     assert entry.index("Assert-DefenseClawRepairRollbackConfig `") < entry.index(
         "return Invoke-DefenseClawInstallLikeLifecycle `"
     )
+    install = _function_body(module, "Invoke-DefenseClawInstallLikeLifecycle")
+    repair_stamp = install.index("if ($Action -eq 'Repair' -and (Test-DefenseClawStandaloneProfile)) {")
+    stamp_end = install.index("\n        }\n", repair_stamp)
+    assert "Set-DefenseClawManagedAcls" in install[repair_stamp:stamp_end]
+    assert install.index("$snapshot = New-DefenseClawTransaction `") < repair_stamp
+    assert install.index("Stop-DefenseClawService -Name $GatewayServiceName") < repair_stamp
+    assert repair_stamp < install.index("Assert-DefenseClawInstalledConfig -Layout $Layout")
     assert "[string]$GatewayPath" in _function_body(module, "Invoke-DefenseClawGatewayCommand")
     functions = "\n".join(
         _function_body(module, name)
@@ -1553,7 +1560,10 @@ function Invoke-DefenseClawGatewayCommand {
     $global:GatewayCalls++
     if ($GatewayPath -cne $Sources.gateway.path -or $Arguments -notcontains 'validate-service-config' -or
         $Arguments -contains '--record-lifecycle' -or $Arguments -notcontains $Layout.ConfigPath) {
-        throw 'repair did not use the authenticated gateway strict read-only config check'
+        throw 'repair did not use the authenticated gateway read-only config check'
+    }
+    if ($global:TrustProblem -and $Arguments -notcontains '--repair-rollback') {
+        throw $global:TrustProblem
     }
     if ([IO.File]::ReadAllText($Layout.ConfigPath).Contains('0.0.0.0')) {
         throw 'gateway.api_bind must bind to exact canonical 127.0.0.1'
@@ -1573,12 +1583,14 @@ function Write-DefenseClawJsonAtomic {
     [IO.File]::WriteAllText($Path, ($Value | ConvertTo-Json -Depth 10))
 }
 function Set-DefenseClawPathAcl { param($Path, $Kind, $GatewayServiceSID) $global:Stamps++ }
-function Invoke-Case([string]$Name, [string]$Metadata, [string]$Bind, [string]$Status, [bool]$Pending) {
+function Invoke-Case([string]$Name, [string]$Metadata, [string]$Bind, [string]$Status,
+        [bool]$Pending, [string]$TrustProblem = '') {
     [IO.File]::WriteAllText($Layout.MetadataPath, $Metadata)
     [IO.File]::WriteAllText($Layout.ConfigPath, "gateway:`n  api_bind: $Bind`n")
     if ($Pending) { [IO.File]::WriteAllText($Layout.PendingPath, '{}') }
     elseif (Test-Path -LiteralPath $Layout.PendingPath) { Remove-Item -LiteralPath $Layout.PendingPath }
     $global:ServiceStatus = $Status
+    $global:TrustProblem = $TrustProblem
     $global:GatewayCalls = 0
     $global:SourceChecks = 0
     $global:Stamps = 0
@@ -1599,6 +1611,8 @@ function Invoke-Case([string]$Name, [string]$Metadata, [string]$Bind, [string]$S
 Invoke-Case 'invalid malformed' 'broken metadata' '0.0.0.0' 'Running' $false
 Invoke-Case 'invalid valid' '{"installed":true}' '0.0.0.0' 'Running' $false
 Invoke-Case 'valid malformed' 'broken metadata' '127.0.0.1' 'Running' $false
+Invoke-Case 'runtime ACL drift' 'broken metadata' '127.0.0.1' 'Running' $false 'managed data_dir trust check failed'
+Invoke-Case 'service read ACL drift' 'broken metadata' '127.0.0.1' 'Running' $false 'gateway service cannot read rule pack'
 Invoke-Case 'pending recovery' 'broken metadata' '0.0.0.0' 'Running' $true
 Invoke-Case 'stopped deferred' 'broken metadata' '0.0.0.0' 'Stopped' $false
 """.replace("__ROOT__", str(tmp_path)),
@@ -1613,6 +1627,13 @@ Invoke-Case 'stopped deferred' 'broken metadata' '0.0.0.0' 'Stopped' $false
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     cases = {case["name"]: case for case in map(json.loads, completed.stdout.strip().splitlines())}
+    return cases
+
+
+def test_repair_checks_the_running_gateway_rollback_config_before_rebuilding_metadata(tmp_path: Path) -> None:
+    import json
+
+    cases = _repair_rollback_config_cases(tmp_path)
     for name, original in (("invalid malformed", "broken metadata"), ("invalid valid", '{"installed":true}')):
         assert "gateway.api_bind" in cases[name]["error"], cases[name]
         assert cases[name]["metadata"] == original, cases[name]
@@ -1622,6 +1643,17 @@ Invoke-Case 'stopped deferred' 'broken metadata' '0.0.0.0' 'Stopped' $false
     assert cases["valid malformed"]["error"] == "", cases["valid malformed"]
     assert json.loads(cases["valid malformed"]["metadata"])["installed"] is True
     assert cases["valid malformed"]["stamps"] == 1
+    for name in ("runtime ACL drift", "service read ACL drift"):
+        assert cases[name]["error"] == "", cases[name]
+        assert json.loads(cases[name]["metadata"])["installed"] is True, cases[name]
+        assert cases[name]["stamps"] == 1, cases[name]
     assert cases["pending recovery"]["metadata"] == "broken metadata"
     assert cases["pending recovery"]["gateway_calls"] == 0
     assert cases["stopped deferred"]["gateway_calls"] == 0
+
+
+def test_repair_rollback_refusal_names_the_supported_next_step(tmp_path: Path) -> None:
+    cases = _repair_rollback_config_cases(tmp_path)
+    for name in ("invalid malformed", "invalid valid"):
+        assert "Next step:" in cases[name]["error"], cases[name]
+        assert "/ensure CONFIG=" in cases[name]["error"], cases[name]

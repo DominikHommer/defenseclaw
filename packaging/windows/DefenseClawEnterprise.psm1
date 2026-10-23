@@ -21787,7 +21787,8 @@ function Assert-DefenseClawInstalledConfig {
         [hashtable]$GatewaySource,
         # Only the install-like lifecycle records (and migrates) the config,
         # inside its transaction; verify validates read-only.
-        [switch]$RecordLifecycle
+        [switch]$RecordLifecycle,
+        [switch]$RepairRollback
     )
     $arguments = @(
         'enterprise', 'windows', 'validate-service-config',
@@ -21798,6 +21799,9 @@ function Assert-DefenseClawInstalledConfig {
     )
     if ($RecordLifecycle) {
         $arguments += '--record-lifecycle'
+    }
+    if ($RepairRollback) {
+        $arguments += '--repair-rollback'
     }
     $gatewayPath = [string]$Layout.GatewayPath
     if ($null -ne $GatewaySource) {
@@ -21846,18 +21850,23 @@ function Assert-DefenseClawRepairRollbackConfig {
     try {
         # Validate with the authenticated replacement gateway when present:
         # older installed releases may not implement validate-service-config.
-        # Without --record-lifecycle this runs the strict startup checks but
-        # neither migrates nor records the installed config.
+        # The repair-only preflight checks config content and listener binds,
+        # but leaves managed path trust to Repair's journaled ACL restamp and
+        # strict validation before activation. Neither path records config.
         Assert-DefenseClawInstalledConfig `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
-            -GatewaySource $gatewaySource
+            -GatewaySource $gatewaySource `
+            -RepairRollback
     }
     catch {
         throw (
             "Repair refused: the running gateway's installed config cannot " +
             'be validated for rollback (services and deployment metadata ' +
-            'were not changed): ' + $_.Exception.Message
+            'were not changed): ' + $_.Exception.Message +
+            ' Next step: restore an approved, gateway-valid config.yaml and ' +
+            'retry Setup /repair, or run Setup /ensure CONFIG=<approved config> ' +
+            'when deployment metadata is readable.'
         )
     }
 }
@@ -31877,6 +31886,15 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         Stop-DefenseClawService -Name $Layout.SensorHelperServiceName
         if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
             Stop-DefenseClawService -Name $Layout.BrokerServiceName
+        }
+        if ($Action -eq 'Repair' -and (Test-DefenseClawStandaloneProfile)) {
+            # The snapshot is durable and services are stopped. Heal managed
+            # runtime and bundle ACL drift before any helper or strict config
+            # check reads those paths; the final stamp below also covers files
+            # Repair writes later in this transaction.
+            Set-DefenseClawManagedAcls `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName
         }
         # Upgrade/Repair must capture the old machine-policy identity before a
         # replacement config or manifest changes its endpoint/target set. New
