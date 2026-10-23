@@ -6,8 +6,10 @@
 package enterprisehooks
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -94,6 +96,42 @@ func TestLegacyAgentOwnersSurviveRollbackWithoutAStaleIdentityRecord(t *testing.
 	}
 	if got, ok := ReadLegacyAgentOwners(dir, nil); !ok || got[501] != owners[501] {
 		t.Fatalf("migration changed the account binding: %+v, %t", got, ok)
+	}
+}
+
+func TestCorruptPre104AgentOwnersMapDoesNotStopIdentitySpool(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		data []byte
+	}{
+		{"truncated", []byte(`{"v":1,"owners":`)},
+		{"oversized", bytes.Repeat([]byte("x"), maxLegacyAgentOwnersBytes+1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, oldLegacyAgentOwnersFile), tc.data, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			previous := identitySpoolCollect
+			t.Cleanup(func() { identitySpoolCollect = previous })
+			identitySpoolCollect = func(_ context.Context, account IdentitySpoolAccount, now time.Time) (IdentitySpoolRecord, error) {
+				return IdentitySpoolRecord{Key: "501", User: account.User, UpdatedAt: now}, nil
+			}
+			var logs []string
+			if err := WriteIdentitySpool(context.Background(), dir, []IdentitySpoolAccount{{UID: 501, User: "alice"}}, nil,
+				func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }, nil); err != nil {
+				t.Fatalf("corrupt pre-1.0.4 map blocked the pass: %v", err)
+			}
+			if _, err := ReadIdentitySpoolRecord(dir, "501", nil); err != nil {
+				t.Fatalf("account record was not refreshed: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(dir, oldLegacyAgentOwnersFile)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("bad map still visible to rollback readers: %v", err)
+			}
+			if len(logs) == 0 || !strings.Contains(strings.Join(logs, "\n"), "invalid previous agent identity migration map") {
+				t.Fatalf("bad map not explained: %v", logs)
+			}
+		})
 	}
 }
 

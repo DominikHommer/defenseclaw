@@ -19,6 +19,84 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
+// A slow Open Directory answer can finish after one hook's wait expires.
+// The next hook must consume that answer rather than starting another slow
+// lookup and refusing on every request. Calls in one short hook interval
+// share one answer, so exempt and profile checks do not run serial lookups.
+func TestFreshDirectoryReadUsesCompletedTimedOutLookup(t *testing.T) {
+	firstRelease, secondRelease := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() { close(secondRelease) })
+	var calls atomic.Int32
+	cache := newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
+		if calls.Add(1) == 1 {
+			<-firstRelease
+		} else {
+			<-secondRelease
+		}
+		return useridentity.DirectoryFacts{Groups: []string{"current"}, ResolvedAt: time.Now()}, nil
+	})
+	if _, ok := cache.getFresh("501", 5*time.Millisecond); ok {
+		t.Fatal("slow lookup answered before release")
+	}
+	close(firstRelease)
+	deadline := time.Now().Add(time.Second)
+	for {
+		cache.mu.Lock()
+		ready := cache.entries["501"].inflight == nil
+		cache.mu.Unlock()
+		if ready {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("completed lookup was not published")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	for i := 0; i < 2; i++ {
+		if facts, ok := cache.getFresh("501", 5*time.Millisecond); !ok || !slices.Equal(facts.Groups, []string{"current"}) {
+			t.Fatalf("read %d lost the completed groups: %+v, ok=%t", i, facts, ok)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("fresh reads started %d lookups, want one", got)
+	}
+}
+
+func TestManagedMacNonblockingDirectoryReadDoesNotWait(t *testing.T) {
+	previous := managedHookDirectoryNeedsFresh
+	previousHosted, previousFacts := managedServiceHosted.Load(), identityFactsEnabled.Load()
+	previousConfirmed := managedHookPeerAccountsConfirmed
+	managedHookDirectoryNeedsFresh = true
+	setManagedServiceHosted(true)
+	setIdentityFactsEnabled(true)
+	managedHookPeerAccountsConfirmed = func() bool { return true }
+	t.Cleanup(func() {
+		managedHookDirectoryNeedsFresh = previous
+		setManagedServiceHosted(previousHosted)
+		setIdentityFactsEnabled(previousFacts)
+		managedHookPeerAccountsConfirmed = previousConfirmed
+	})
+	const uid = 41964
+	cache := &managedHookPeerHomeCache{newResolver: func() unixidentity.Resolver {
+		return &fakePeerHomeResolver{accounts: map[int]unixidentity.Account{uid: {Name: "macuser", UID: uid, Home: "/Users/macuser"}}}
+	}, now: time.Now}
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	cache.directoriesOnce.Do(func() {
+		cache.directories = newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
+			<-release
+			return useridentity.DirectoryFacts{ResolvedAt: time.Now()}, nil
+		})
+	})
+	started := time.Now()
+	if _, ok := cache.directory(uid, false); ok {
+		t.Fatal("slow telemetry lookup unexpectedly answered")
+	}
+	if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
+		t.Fatalf("nonblocking directory read waited %s", elapsed)
+	}
+}
+
 // Managed macOS hooks must not reuse a former secondary membership while
 // the directory can answer with the new membership, or during an outage.
 func TestManagedMacHookRefreshesSecondaryGroupsBeforeDecision(t *testing.T) {
@@ -41,6 +119,7 @@ func TestManagedMacHookRefreshesSecondaryGroupsBeforeDecision(t *testing.T) {
 			uid: {Name: "macuser", UID: uid, Home: "/Users/macuser"},
 		}}
 	}, now: time.Now}
+	now := time.Now()
 	var mu sync.Mutex
 	groups := []string{"relaxed"}
 	failed := false
@@ -53,6 +132,7 @@ func TestManagedMacHookRefreshesSecondaryGroupsBeforeDecision(t *testing.T) {
 			}
 			return useridentity.DirectoryFacts{Groups: slices.Clone(groups), ResolvedAt: time.Now()}, nil
 		})
+		cache.directories.now = func() time.Time { return now }
 	})
 	read := func() (useridentity.DirectoryFacts, bool) { return cache.directory(uid, true) }
 	if first, ok := read(); !ok || !slices.Contains(first.Groups, "relaxed") {
@@ -61,12 +141,14 @@ func TestManagedMacHookRefreshesSecondaryGroupsBeforeDecision(t *testing.T) {
 	mu.Lock()
 	groups = []string{"staff"}
 	mu.Unlock()
+	now = now.Add(identityDirectoryFreshCoalesce + time.Nanosecond)
 	if next, ok := read(); !ok || slices.Contains(next.Groups, "relaxed") {
 		t.Fatalf("removed secondary group still reached the hook: %v, ok=%t", next.Groups, ok)
 	}
 	mu.Lock()
 	failed = true
 	mu.Unlock()
+	now = now.Add(identityDirectoryFreshCoalesce + time.Nanosecond)
 	if stale, ok := read(); ok {
 		t.Fatalf("directory outage reused former groups: %v", stale.Groups)
 	}

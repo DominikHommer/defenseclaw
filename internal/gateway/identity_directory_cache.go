@@ -58,8 +58,11 @@ import (
 const (
 	identityDirectoryTTL    = 15 * time.Minute
 	identityDirectoryBudget = 2 * time.Second
-	identityDirectoryRetry  = 15 * time.Second
-	identityDirectoryMax    = 4096
+	// Consecutive identity checks in one hook share a completed directory
+	// answer. A later hook starts another lookup so removal is seen soon.
+	identityDirectoryFreshCoalesce = 100 * time.Millisecond
+	identityDirectoryRetry         = 15 * time.Second
+	identityDirectoryMax           = 4096
 	// identityDirectoryIncompleteTTL is how long an incomplete answer lasts.
 	identityDirectoryIncompleteTTL = 2 * time.Minute
 	// identityDirectoryMaxAge is the age past which directory facts are no
@@ -124,11 +127,17 @@ type identityCache[T any] struct {
 }
 
 type identityCacheEntry[T any] struct {
-	facts       T
-	ok          bool
-	fetchedAt   time.Time
-	nextAttempt time.Time
-	inflight    chan struct{}
+	facts     T
+	ok        bool
+	fetchedAt time.Time
+	// generation identifies a successful current lookup. A fresh read that
+	// timed out may use its completion on the next call, and nearby reads
+	// within one hook interval share that answer.
+	generation, servedGeneration uint64
+	pendingFresh                 bool
+	freshUntil                   time.Time
+	nextAttempt                  time.Time
+	inflight                     chan struct{}
 	// failedSince is when the key's lookup began failing (zero while it
 	// succeeds) and lastErr the reason last logged for it.
 	failedSince time.Time
@@ -570,9 +579,20 @@ func (c *identityCache[T]) refreshLocked(key string, entry *identityCacheEntry[T
 		switch {
 		case err == nil:
 			entry.facts, entry.ok, entry.fetchedAt, entry.trustedUntil = facts, true, now, until
+			entry.generation++
+			if !entry.pendingFresh {
+				// An ordinary cache refresh has no timed-out fresh reader
+				// waiting to consume its result.
+				entry.servedGeneration = entry.generation
+			}
+			entry.freshUntil = now.Add(identityDirectoryFreshCoalesce)
 		case entry.ok && errors.As(err, &unconfirmed):
 			var none T
 			entry.facts, entry.ok = none, false
+		}
+		if err != nil {
+			entry.pendingFresh = false
+			entry.freshUntil = time.Time{}
 		}
 		entry.nextAttempt = now.Add(identityDirectoryRetry)
 		entry.inflight = nil

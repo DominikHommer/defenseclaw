@@ -803,7 +803,8 @@ func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profile
 		qualifiedNamesMayCollide: (s.Directory.Source == useridentity.SourceSSSD ||
 			s.Directory.Source == useridentity.SourceSSSDInfoPipe) &&
 			s.Directory.Directory == useridentity.DirectoryActiveDirectory &&
-			strings.ContainsAny(s.UserName, `@\`),
+			strings.ContainsAny(s.UserName, `@\`) &&
+			(s.Directory.QualifiedNamesMayCollide || len(useridentity.TrustedADChildDomains()) > 0),
 	}
 }
 

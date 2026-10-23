@@ -122,7 +122,7 @@ func WriteLegacyAgentOwners(dir string, owners map[int]LegacyAgentOwner, now tim
 	if dir == "" {
 		return false, nil
 	}
-	if err := moveLegacyAgentOwners(dir); err != nil {
+	if _, err := moveLegacyAgentOwners(dir); err != nil {
 		return false, err
 	}
 	if LegacyAgentOwnersRecorded(dir) {
@@ -196,20 +196,36 @@ func readLegacyAgentOwnersFile(path string, trust func(path, label string) error
 	return out, true
 }
 
-func moveLegacyAgentOwners(dir string) error {
+// moveLegacyAgentOwners moves a valid previous map to its rollback-safe
+// name. An invalid map proves no account binding; quarantine it so the
+// guardian can publish fresh records and, when possible, a new map.
+func moveLegacyAgentOwners(dir string) (invalid bool, err error) {
 	oldPath := filepath.Join(dir, oldLegacyAgentOwnersFile)
 	if _, err := os.Lstat(oldPath); errors.Is(err, os.ErrNotExist) {
-		return nil
+		return false, nil
 	} else if err != nil {
-		return err
+		return false, err
 	}
 	if _, ok := readLegacyAgentOwnersFile(oldPath, nil); !ok {
-		return errors.New("invalid previous agent identity migration map")
+		quarantine, err := os.CreateTemp(dir, "legacy-agent-owners-corrupt-*.bad")
+		if err != nil {
+			return false, err
+		}
+		path := quarantine.Name()
+		if err := quarantine.Close(); err != nil {
+			_ = os.Remove(path)
+			return false, err
+		}
+		if err := os.Rename(oldPath, path); err != nil {
+			_ = os.Remove(path)
+			return false, err
+		}
+		return true, nil
 	}
 	if LegacyAgentOwnersRecorded(dir) {
-		return os.Remove(oldPath)
+		return false, os.Remove(oldPath)
 	}
-	return os.Rename(oldPath, filepath.Join(dir, LegacyAgentOwnersFile))
+	return false, os.Rename(oldPath, filepath.Join(dir, LegacyAgentOwnersFile))
 }
 
 func validLegacyAgentOwner(owner LegacyAgentOwner) bool {

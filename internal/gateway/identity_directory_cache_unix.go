@@ -27,7 +27,13 @@ func (c *identityCache[T]) getFresh(key string, wait time.Duration) (T, bool) {
 	}
 	now := c.now()
 	c.dropAgedLocked(key, entry, now)
-	before := entry.fetchedAt
+	if entry.ok && (entry.pendingFresh && entry.generation > entry.servedGeneration || now.Before(entry.freshUntil)) {
+		entry.pendingFresh, entry.servedGeneration = false, entry.generation
+		facts := entry.facts
+		c.mu.Unlock()
+		return facts, true
+	}
+	before := entry.generation
 	if entry.inflight == nil && (entry.failedSince.IsZero() || !now.Before(entry.nextAttempt)) {
 		c.refreshLocked(key, entry)
 	}
@@ -36,17 +42,27 @@ func (c *identityCache[T]) getFresh(key string, wait time.Duration) (T, bool) {
 	if done == nil {
 		return zero, false
 	}
+	if wait <= 0 {
+		c.mu.Lock()
+		entry.pendingFresh = true
+		c.mu.Unlock()
+		return zero, false
+	}
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	select {
 	case <-done:
 	case <-timer.C:
+		c.mu.Lock()
+		entry.pendingFresh = true
+		c.mu.Unlock()
 		return zero, false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.dropAgedLocked(key, entry, c.now())
-	if entry.ok && !entry.fetchedAt.Equal(before) {
+	if entry.ok && entry.generation > before {
+		entry.pendingFresh, entry.servedGeneration = false, entry.generation
 		return entry.facts, true
 	}
 	return zero, false
