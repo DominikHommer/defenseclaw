@@ -51,7 +51,7 @@ describe('managed outage documentation', () => {
     const failMode = guide.split('## Fail mode')[1]?.split('## ')[0];
     assert.ok(failMode, 'guardrail fail-mode section');
     assert.match(failMode, /default is `closed`/);
-    assert.match(failMode, /managed.*`open`.*gateway outage/i);
+    assert.match(failMode, /administrator's `open` can allow an unguarded managed tool call[^.]*stopped[^.]*restarting[^.]*no answer in time/i);
     assert.ok(failMode.includes('/docs/reference/apis/capability-matrix#gateway-outage'));
     assert.doesNotMatch(failMode, /authentication failure.*`open` allows/i);
     assert.doesNotMatch(guide, /Observe mode never blocks/i);
@@ -89,11 +89,15 @@ describe('managed outage documentation', () => {
     assert.match(modes, /- Another program answers in place of the gateway service\./);
   });
 
-  it('limits administrator open to a proven not-running gateway on every OS', () => {
-    // W7b accepts only errManagedGatewayNotRunning in ManagedOutageFailsOpen.
-    // A trusted Unix socket directory with no socket, or a Windows service
-    // reported not running with no port listener, can establish that case.
-    // A restart refusal and an unanswered request close even under open.
+  it('documents restart and no-answer allowances for unguarded managed tool calls', () => {
+    const hook = readFileSync(join(repo, 'internal/gateway/connector/hookexec/hookexec.go'), 'utf8');
+    const outage = hook.split('func ManagedOutageFailsOpen')[1]?.split('// managedCopilotOpen')[0];
+    assert.match(outage ?? '', /return errors\.Is\(err, errManagedGatewayNotRunning\) \|\| errors\.Is\(err, errGatewayRestarting\) \|\|\s*errors\.Is\(err, errGatewayNoAnswer\)/);
+    assert.match(hook, /if readErr != nil \{\s*return failNoAnswer\(opts, sp, failMode\)/);
+    const deadline = readFileSync(join(repo, 'internal/gateway/connector/hookexec/answer_deadline.go'), 'utf8');
+    const noAnswer = deadline.split('func noAnswerFailMode')[1]?.split('func failNoAnswer')[0];
+    assert.match(noAnswer ?? '', /!toolGateEvent\(opts\.Connector, opts\.Event\)[\s\S]*return "closed"[\s\S]*return failMode/);
+
     const pages = [
       'reference/configuration/fail-modes.mdx',
       'reference/apis/capability-matrix.mdx',
@@ -105,27 +109,56 @@ describe('managed outage documentation', () => {
     ];
     for (const name of pages) {
       const text = page(name);
-      assert.match(text, /administrator(?:'s)? `open` applies only when the gateway is proven not running/i, name);
-      assert.doesNotMatch(text, /(?:stopped|not running),? (?:is )?restarting or (?:gives )?no answer in time/i, name);
+      assert.match(text, /administrator(?:'s)? `open` can allow an unguarded managed tool call when the gateway is stopped, still restarting or gives no answer in time/i, name);
+      assert.doesNotMatch(text, /administrator(?:'s)? `open` applies only when the gateway is proven not running/i, name);
     }
-    const staleManagedOpen = /(?:administrator|managed)[^.]{0,120}`open`[^.]{0,160}(?:allows?|covers?)[^.]{0,160}(?:restart|no answer in time)|gateway service stopped, restarting or no answer in time/i;
+    const staleClaims = [
+      /administrator(?:'s)? `open` applies only when the gateway is proven not running/i,
+      /(?:a )?restarting refusal or a request with no answer blocks?[^.]*`open`/i,
+      /once the socket exists[^.]*refused connection[^.]*blocks?(?: even under `open`)?/i,
+      /a running service with no listener blocks/i,
+      /managed standalone hooks block when the no-answer deadline expires[^.]*`open`/i,
+    ];
     for (const path of docPages()) {
-      assert.doesNotMatch(readFileSync(path, 'utf8').split(/\s+/).join(' '), staleManagedOpen, path);
+      const text = readFileSync(path, 'utf8').split(/\s+/).join(' ');
+      for (const claim of staleClaims) assert.doesNotMatch(text, claim, path);
     }
 
     const modes = page('reference/configuration/fail-modes.mdx');
     const matrix = page('reference/apis/capability-matrix.mdx');
     for (const [name, text] of [['fail modes', modes], ['capability matrix', matrix]] as const) {
-      assert.match(text, /Linux and macOS[^.]*trusted directory[^.]*socket[^.]*missing/i, name);
-      assert.match(text, /Windows[^.]*service manager[^.]*not running[^.]*no listener/i, name);
-      assert.match(text, /`enterprise_managed_gateway_restarting`[^.]*`enterprise_managed_gateway_no_answer`[^.]*block[^.]*`open`/i, name);
+      assert.match(text, /`enterprise_managed_gateway_restarting`[^.]*`enterprise_managed_gateway_no_answer`[^.]*can follow[^.]*`open`/i, name);
+      assert.match(text, /foreign-hook guard[^.]*gateway[^.]*session[^.]*blocks/i, name);
+      assert.match(text, /complete but unusable answers?[^.]*block/i, name);
     }
     const component = readFileSync(join(site, 'components/capability-matrix.tsx'), 'utf8');
-    assert.match(component, /Managed standalone, administrator open, proven not-running gateway/);
+    assert.match(component, /Managed standalone, administrator open, gateway outage/);
 
     const threat = readFileSync(join(repo, 'docs/ENTERPRISE-THREAT-MODEL.md'), 'utf8').split(/\s+/).join(' ');
-    assert.match(threat, /administrator(?:'s)? `open` applies only when the gateway is proven not running/i);
-    assert.doesNotMatch(threat, /gateway service stopped, restarting or no answer in time/i);
+    assert.match(threat, /administrator(?:'s)? `open` can allow an unguarded managed tool call when the gateway is stopped, still restarting or gives no answer in time/i);
+  });
+
+  it('documents listener gaps classified as a stopped gateway on each OS', () => {
+    const unix = readFileSync(join(repo, 'internal/gateway/connector/hookexec/managed_standalone_transport.go'), 'utf8');
+    assert.match(unix, /errors\.Is\(err, syscall\.ECONNREFUSED\) \|\| errors\.Is\(err, syscall\.ENOENT\) \{\s*return nil, standaloneGatewayStoppedError\(err\)/);
+    const windows = readFileSync(join(repo, 'internal/gateway/connector/hookexec/managed_transport_windows.go'), 'utf8');
+    assert.match(windows, /if listening, known := managedEnterpriseListening\(canonicalAddr\); known && !listening \{\s*return nil, fmt\.Errorf\("%w: %w: nothing listens on %s yet",\s*errManagedGatewayPeerUnverified, errManagedGatewayNotRunning/);
+    for (const name of ['reference/configuration/fail-modes.mdx', 'reference/apis/capability-matrix.mdx']) {
+      const text = page(name);
+      assert.match(text, /Linux and macOS[^.]*existing socket[^.]*refuses a connection[^.]*disappears while dialing[^.]*gateway not running/i, name);
+      assert.match(text, /Windows[^.]*running service with no listener[^.]*gateway not running/i, name);
+      assert.match(text, /After retries[^.]*administrator `open`[^.]*without a verdict/i, name);
+    }
+    for (const name of [
+      'enterprise/operate/lifecycle.mdx',
+      'enterprise/operate/reference.mdx',
+      'enterprise/configure/reference.mdx',
+      'appendix/coverage-by-layer.mdx',
+    ]) {
+      const text = page(name);
+      assert.match(text, /Linux and macOS[^.]*refuses a connection/i, name);
+      assert.match(text, /Windows[^.]*running service with no listener/i, name);
+    }
   });
 
   it('distinguishes Secure Client request timeout from a standalone no-answer deadline', () => {
@@ -134,7 +167,9 @@ describe('managed outage documentation', () => {
     const hook = readFileSync(join(repo, 'internal/gateway/connector/hookexec/hookexec.go'), 'utf8');
     assert.match(hook, /if readErr != nil \{\s*return failNoAnswer\(opts, sp, failMode\)/);
     const modes = page('reference/configuration/fail-modes.mdx');
-    assert.match(modes, /Managed standalone hooks block when the no-answer deadline expires, even under `open`\./);
+    assert.match(modes, /A managed standalone tool hook with administrator `open` can allow when its gateway gives no answer by the deadline/);
+    assert.match(modes, /guarded calls, locally spent budgets and calls answered first with HTTP 429 block/);
+    assert.match(modes, /Other events use their event-specific outcomes/);
     assert.match(modes, /Secure Client hooks have no separate no-answer deadline and keep their whole request budget/);
     assert.match(modes, /a request that times out before headers follows its effective fail mode/);
     assert.match(modes, /a successful response cut off after headers blocks/);
@@ -147,7 +182,7 @@ describe('managed outage documentation', () => {
     assert.match(transport.split('func stoppedManagedGatewayError')[1] ?? '', /case !known:/);
     for (const name of ['reference/configuration/fail-modes.mdx', 'reference/apis/capability-matrix.mdx']) {
       const text = page(name);
-      assert.match(text, /A stopped service whose listener table cannot be read, a stopped service with another listener on its port, or a running service with no listener blocks\./, name);
+      assert.match(text, /A stopped Windows service whose listener table cannot be read, or with another listener on its port, blocks\./, name);
       assert.match(text, /A connected listener owned by another process also blocks\./, name);
       assert.match(text, /When the service is running and the listener table cannot be read, the hook dials and verifies the connected peer\./, name);
       assert.doesNotMatch(text, /a running service with no listener(?: or|,) an unreadable listener table/i, name);
