@@ -528,6 +528,15 @@ func copilotVSCodeStatus(opts Options, state *State) {
 	for _, install := range DiscoverVSCode(opts) {
 		state.detail("vscode: found VS Code %s at %s", install.Version, install.Path)
 	}
+	for _, home := range opts.CopilotOutOfScopeHomes {
+		file, plugin := CopilotVSCodeUserState(home, opts.goos(), opts.HookBinary)
+		if file {
+			state.conflict("DefenseClaw's Copilot Local hook remains for an account outside enrollment: %s; run the guardian to remove it", CopilotVSCodeLocalHookFilePath(home))
+		}
+		if plugin {
+			state.conflict("DefenseClaw's Copilot plugin remains for an account outside enrollment: %s; run the guardian to remove it", CopilotPluginHooksPath(home))
+		}
+	}
 	if len(opts.CopilotUserHomes) == 0 {
 		return
 	}

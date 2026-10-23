@@ -100,6 +100,32 @@ func TestCopilotVSCodeLocalAndManagedSettings(t *testing.T) {
 	}
 }
 
+func TestCopilotVSCodeStatusRejectsHookOutsideEnrollment(t *testing.T) {
+	home := t.TempDir()
+	if _, err := EnsureCopilotVSCodeUser(CopilotVSCodeUserRequest{
+		Home: home, GOOS: "linux", HookBinary: testHookBinary, HookFile: true, Plugin: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	opts := testOptions(t)
+	opts.CopilotOutOfScopeHomes = []string{home}
+	state := State{}
+	copilotVSCodeStatus(opts, &state)
+	if len(state.Conflicts) == 0 || !strings.Contains(strings.Join(state.Conflicts, " "), CopilotVSCodeLocalHookFilePath(home)) {
+		t.Fatalf("active hook for an unenrolled account must be a conflict: %+v", state)
+	}
+	if _, err := EnsureCopilotVSCodeUser(CopilotVSCodeUserRequest{
+		Home: home, GOOS: "linux", HookBinary: testHookBinary,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state = State{}
+	copilotVSCodeStatus(opts, &state)
+	if len(state.Conflicts) != 0 {
+		t.Fatalf("cleaned unenrolled account is still a conflict: %+v", state)
+	}
+}
+
 // A managed 1.0.0 install wrote the Local hook file and plugin without the
 // removed-deployment guard; testdata holds the bytes 1.0.0 (06b1c9e68)
 // rendered. After the upgrade both are DefenseClaw's: the guard allows the

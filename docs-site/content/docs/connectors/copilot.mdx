@@ -1,6 +1,6 @@
 ---
 title: GitHub Copilot CLI
-description: Guard GitHub Copilot CLI with DefenseClaw hooks that can ask or block before a tool runs.
+description: Guard GitHub Copilot CLI with DefenseClaw hooks that block before a tool runs.
 keywords:
   - GitHub Copilot CLI connector
   - Copilot hooks
@@ -39,7 +39,7 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` reports n
 
 <HookEventsList connector="copilot" />
 
-- `preToolUse` can ask you first. The approval appears inside Copilot CLI.
+- `preToolUse` blocks an action-mode call that needs confirmation. Copilot CLI does not tell its hook whether it can show an approval prompt, so DefenseClaw records the delivered denial as a block.
 - `permissionRequest`, `agentStop` and `subagentStop` can return a deny or block.
 - `postToolUseFailure` is advisory. It can add recovery context after the tool failed.
 - Copilot CLI has no hook that can stop a prompt. A matching prompt reaches the model and the alert reads `detected in the prompt (cannot block)`. Tool-call rules still block.

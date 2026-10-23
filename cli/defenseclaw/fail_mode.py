@@ -433,6 +433,7 @@ def _resolve_native_deny_fail_mode(cfg: Any, name: str, configured: str, desired
         drift.append("registration-stale")
     if lock_drift:
         drift.append(lock_drift)
+    drift.extend(registration_integrity_drift(cfg, name))
     try:
         registration = _native_deny_registration_freshness(cfg, name)
     except Exception:  # noqa: BLE001 - an unreadable registration is not current, never a crash.
@@ -565,9 +566,12 @@ def connector_fail_mode_report(
     guardrail = cfg.guardrail
     resolver = getattr(guardrail, "effective_hook_fail_mode", None)
     configured = normalize_fail_mode(resolver(name) if callable(resolver) else getattr(guardrail, "hook_fail_mode", ""))
-    # The upstream fail-open connectors (Antigravity, Copilot, Hermes) have no
-    # runtime record of their own, so they are never in this branch.
-    if name in _EXPECTED_CONTRACTS or name == "opencode":
+    # Ordinary Antigravity, Copilot and Hermes hooks render a fail mode. Read
+    # that mode and the current registration before reporting them healthy.
+    # Secure Client retains its upstream fail-open reporting contract.
+    if name in _EXPECTED_CONTRACTS or name == "opencode" or (
+        name in _UPSTREAM_FAIL_OPEN_CONNECTORS and not upstream_fail_open(cfg, name)
+    ):
         return resolve_connector_fail_mode(
             cfg,
             name,
