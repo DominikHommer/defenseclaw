@@ -20,6 +20,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -56,11 +57,18 @@ func TestCodexPageQuotesTheVerifyLines(t *testing.T) {
 	if err := os.WriteFile(present, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	groups, err := connector.ManagedHookGroupsForOS("codex", "", "windows")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) == 0 {
+		t.Fatal("Windows Codex machine policy has no managed hook groups")
+	}
 	report := enterprisePolicyReport{goos: "windows", HookBinary: opts.HookBinary, Result: enterprisepolicy.Result{States: []enterprisepolicy.State{
 		{
 			Connector: "codex", Route: enterprisepolicy.RouteMachinePolicy,
 			Covered: true, EffectiveLock: config.ManagedHooksOnlyEnforce,
-			ForeignHooks: config.ForeignHooksRemove, OwnedEntries: 11,
+			ForeignHooks: config.ForeignHooksRemove, OwnedEntries: len(groups),
 			Paths: []string{present},
 		},
 	}}}
