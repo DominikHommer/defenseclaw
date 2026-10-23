@@ -387,12 +387,12 @@ $ancestorCases = & $module {
         $after = [Security.AccessControl.RawSecurityDescriptor]::new(
             [byte[]]$snapshot.SecurityDescriptor, 0)
         [pscustomobject]@{
-            foreign_vendor_ace_preserved = ($granted.DiscretionaryAcl | Microsoft.PowerShell.Core\Where-Object {
+            foreign_vendor_ace_preserved = @($granted.DiscretionaryAcl | Microsoft.PowerShell.Core\Where-Object {
                 $_ -is [Security.AccessControl.KnownAce] -and $_.SecurityIdentifier.Value -ceq 'S-1-5-32-545' -and
                 $_.AccessMask -eq 0x1200a0
             }).Count -eq 1
             owner_preserved = $granted.Owner.Value -ceq $before.Owner.Value
-            traverse_ace_not_inherited = ($granted.DiscretionaryAcl | Microsoft.PowerShell.Core\Where-Object {
+            traverse_ace_not_inherited = @($granted.DiscretionaryAcl | Microsoft.PowerShell.Core\Where-Object {
                 $_ -is [Security.AccessControl.KnownAce] -and $_.SecurityIdentifier.Value -ceq $GatewaySID -and
                 $_.AccessMask -eq 0x1200a9 -and $_.AceFlags -eq [Security.AccessControl.AceFlags]::None
             }).Count -eq 1

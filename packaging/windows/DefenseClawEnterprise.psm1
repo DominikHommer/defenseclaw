@@ -4797,7 +4797,8 @@ function Update-DefenseClawSharedRawDescriptor {
         if ($ace -isnot [Security.AccessControl.KnownAce] -or
             $null -eq $ace.SecurityIdentifier -or
             $ace.SecurityIdentifier.Value -cne $identity.Value -or
-            ($ace.AceFlags -band [Security.AccessControl.AceFlags]::Inherited) -ne 0) {
+            ([int]$ace.AceFlags -band
+                [int][Security.AccessControl.AceFlags]::Inherited) -ne 0) {
             continue
         }
         if ($Action -eq 'RemoveExact' -and
@@ -4835,8 +4836,8 @@ function Update-DefenseClawSharedRawDescriptor {
         )
         $insert = $updated.DiscretionaryAcl.Count
         for ($index = 0; $index -lt $updated.DiscretionaryAcl.Count; $index++) {
-            if (($updated.DiscretionaryAcl[$index].AceFlags -band
-                    [Security.AccessControl.AceFlags]::Inherited) -ne 0) {
+            if (([int]$updated.DiscretionaryAcl[$index].AceFlags -band
+                    [int][Security.AccessControl.AceFlags]::Inherited) -ne 0) {
                 $insert = $index
                 break
             }
