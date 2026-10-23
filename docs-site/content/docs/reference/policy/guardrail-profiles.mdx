@@ -343,7 +343,7 @@ What follows when the identity is missing:
   when that assignment could change the profile. `profile-explain` uses the
   same fresh lookup. A group removal takes effect on the first hook after
   Open Directory reports it.
-- **Group changes take time.** SSSD caches the account first (90 minutes by
+- **Group changes take time on Linux and per-user macOS.** SSSD caches the account first (90 minutes by
   default). The gateway caches each successful directory lookup for up to
   15 minutes from the last successful lookup, then starts a background refresh
   on a request. Incomplete or partial answers are retried sooner. A request
@@ -367,8 +367,8 @@ What follows when the identity is missing:
   every call after Open Directory reports the change. On Windows, group profiles use a current desktop sign-in token. After sign-out,
   group membership is unknown: a group-dependent assignment refuses an SSH
   or scheduled-task agent until the user signs in at the desktop again. A membership change also needs a new
-  desktop sign-in. While the directory does not answer, the gateway keeps using a
-  user's last facts, for at most an hour (four times the cache lifetime). After
+  desktop sign-in. On Linux and per-user macOS, while the directory does not answer,
+  the gateway keeps using a user's last facts for at most an hour (four times the cache lifetime). After
   that group-dependent assignments cannot be proven and refuse requests with
   the missing group fact named until a lookup succeeds (`default_lookup_failed`). A verified UID, SID or agent
   assignment still matches when no assignment needs the missing group fact.
