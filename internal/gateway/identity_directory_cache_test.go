@@ -18,43 +18,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
-// A large group list may take longer than one hook's two-second budget.
-// Once that lookup completes, the next hook must be able to use its fresh
-// answer instead of starting another slow lookup and refusing forever.
-func TestFreshDirectoryReadUsesCompletedTimedOutLookup(t *testing.T) {
-	firstRelease, secondRelease := make(chan struct{}), make(chan struct{})
-	t.Cleanup(func() { close(secondRelease) })
-	var calls atomic.Int32
-	cache := newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
-		if calls.Add(1) == 1 {
-			<-firstRelease
-		} else {
-			<-secondRelease
-		}
-		return useridentity.DirectoryFacts{Groups: []string{"current"}, ResolvedAt: time.Now()}, nil
-	})
-	if facts, ok := cache.getFresh("501", 5*time.Millisecond); ok {
-		t.Fatalf("slow lookup unexpectedly answered: %v", facts.Groups)
-	}
-	close(firstRelease)
-	deadline := time.Now().Add(time.Second)
-	for {
-		cache.mu.Lock()
-		ready := cache.entries["501"].generation > 0
-		cache.mu.Unlock()
-		if ready {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the completed lookup was not published")
-		}
-		time.Sleep(time.Millisecond)
-	}
-	if facts, ok := cache.getFresh("501", 5*time.Millisecond); !ok || len(facts.Groups) != 1 || facts.Groups[0] != "current" {
-		t.Fatalf("next hook lost completed current groups: %v, ok=%t", facts.Groups, ok)
-	}
-}
-
 // TestIdentityDirectoryCacheWaitsForColdLookup pins the cold-cache budget: a
 // blocking caller gets facts from a lookup slower than a fast local one, as a
 // cold SSSD lookup is, instead of default_lookup_failed.

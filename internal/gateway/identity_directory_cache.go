@@ -127,12 +127,9 @@ type identityCacheEntry[T any] struct {
 	fetchedAt time.Time
 	// generation advances only when a lookup succeeds. A hook that needs
 	// current facts can distinguish a new answer from old cached facts.
-	generation, servedGeneration uint64
-	// pendingFresh says an earlier current-facts read timed out while its
-	// lookup kept running. Its completed answer may be used by the next call.
-	pendingFresh bool
-	nextAttempt  time.Time
-	inflight     chan struct{}
+	generation  uint64
+	nextAttempt time.Time
+	inflight    chan struct{}
 	// failedSince is when the key's lookup began failing (zero while it
 	// succeeds) and lastErr the reason last logged for it.
 	failedSince time.Time
@@ -169,12 +166,6 @@ func (c *identityCache[T]) getFresh(key string, wait time.Duration) (T, bool) {
 	}
 	now := c.now()
 	c.dropAgedLocked(key, entry, now)
-	if entry.pendingFresh && entry.ok && entry.generation > entry.servedGeneration {
-		entry.pendingFresh, entry.servedGeneration = false, entry.generation
-		facts := entry.facts
-		c.mu.Unlock()
-		return facts, true
-	}
 	before := entry.generation
 	if entry.inflight == nil && (entry.failedSince.IsZero() || !now.Before(entry.nextAttempt)) {
 		c.refreshLocked(key, entry)
@@ -189,16 +180,12 @@ func (c *identityCache[T]) getFresh(key string, wait time.Duration) (T, bool) {
 	select {
 	case <-done:
 	case <-timer.C:
-		c.mu.Lock()
-		entry.pendingFresh = true
-		c.mu.Unlock()
 		return zero, false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.dropAgedLocked(key, entry, c.now())
 	if entry.ok && entry.generation > before {
-		entry.pendingFresh, entry.servedGeneration = false, entry.generation
 		return entry.facts, true
 	}
 	return zero, false
