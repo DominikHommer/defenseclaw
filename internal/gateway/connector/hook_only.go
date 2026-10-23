@@ -5083,10 +5083,40 @@ func copilotUnexpectedEventOwnsHook(raw interface{}, hookScript string) bool {
 		return true
 	}
 	if !isCopilotPowerShellAdapterCommand(hookScript) {
-		return false
+		return copilotCommandContainsScript(raw, hookScript)
 	}
 	adapter := strings.ToLower(strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(hookScript), "& '"), "'"))
 	return copilotPowerShellCommandContainsAdapter(raw, adapter)
+}
+
+// copilotCommandContainsScript matches the POSIX doctor's command-key search.
+// A changed command on an unexpected event must be removed by Setup, even
+// when another command prefixes it or the handler is nested in a mapping.
+func copilotCommandContainsScript(raw interface{}, hookScript string) bool {
+	if hookScript == "" {
+		return false
+	}
+	switch value := raw.(type) {
+	case []interface{}:
+		for _, item := range value {
+			if copilotCommandContainsScript(item, hookScript) {
+				return true
+			}
+		}
+	case map[string]interface{}:
+		for key, item := range value {
+			switch key {
+			case "command", "bash", "powershell", "command_windows", "commandWindows":
+				if command, ok := item.(string); ok && strings.Contains(command, hookScript) {
+					return true
+				}
+			}
+			if copilotCommandContainsScript(item, hookScript) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func copilotPowerShellCommandContainsAdapter(raw interface{}, adapter string) bool {

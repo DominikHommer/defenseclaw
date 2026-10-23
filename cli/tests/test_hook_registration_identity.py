@@ -336,3 +336,39 @@ def test_copilot_handler_on_an_unexpected_event_fails_every_check(tmp_path, monk
     problems = hook_integrity.edited_hook_problems(cfg, "copilot")
     assert problems and "unexpectedEvent" in problems[0], problems
     _assert_every_check_fails(cfg, "copilot", monkeypatch, "registration-foreign")
+
+
+@pytest.mark.parametrize("case", _COPILOT, ids=_case_id)
+@pytest.mark.parametrize("field", ["command", "bash", "powershell", "command_windows", "commandWindows"])
+@pytest.mark.parametrize("shape", ["prefix", "nested-list", "nested-mapping"])
+def test_edited_copilot_handler_on_an_unexpected_event_is_repaired(tmp_path, monkeypatch, case, field, shape):
+    cfg, paths = _install(tmp_path, monkeypatch, case)
+    config = Path(paths[0])
+    document = json.loads(config.read_text(encoding="utf-8"))
+    command = document["hooks"]["preToolUse"][0]["bash"]
+    edited = {field: "echo pre; " + command}
+    if shape != "prefix":
+        edited = {"handlers": [{field: command + "; echo after"}]}
+    operator = {"bash": "echo operator", "note": str(Path(cfg.data_dir) / "hooks" / "copilot-hook.sh")}
+    if shape == "nested-mapping":
+        document["hooks"]["unexpectedEvent"] = edited
+        document["hooks"]["operatorEvent"] = [operator]
+    else:
+        document["hooks"]["unexpectedEvent"] = [edited, operator]
+    config.write_text(json.dumps(document), encoding="utf-8")
+
+    problems = hook_integrity.edited_hook_problems(cfg, "copilot")
+    assert problems and "unexpectedEvent" in problems[0], problems
+    _assert_every_check_fails(cfg, "copilot", monkeypatch, "registration-foreign")
+
+    # The Go Setup test checks this repair; check Python's readers against its
+    # resulting file, with the operator's handler still present.
+    if shape == "nested-mapping":
+        del document["hooks"]["unexpectedEvent"]
+    else:
+        document["hooks"]["unexpectedEvent"] = [operator]
+    config.write_text(json.dumps(document), encoding="utf-8")
+    assert not _doctor_failures(cfg, "copilot", monkeypatch)
+    assert cmd_status._hook_runtime_degraded_suffix(cfg, "copilot") == ""
+    assert bootstrap._connector_runtime_readiness(cfg, "copilot") is None
+    assert "registration-foreign" not in _fail_mode_drift(cfg, "copilot")
