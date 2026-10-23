@@ -45,24 +45,46 @@ func managedStatusFixture() *sandboxapi.ManagedStatus {
 }
 
 // An older managed daemon omits managed.allowed while it keeps an account's
-// running sandbox during an upgrade. The doctor can ask its existing explain
-// endpoint for the harnesses the daemon's own verdict covers: the configured
-// ones, else the daemon's default (claudecode), never the CLI's setup
-// defaults; an explicit denial of one of those still fails.
+// running sandbox during an upgrade. The doctor asks its existing explain
+// endpoint about the harnesses this CLI is configured to run, or, with
+// none configured, about the harness the daemon's own managed
+// configuration runs (an explain that names none: the daemon's first
+// harness, else claudecode), never about the CLI's setup defaults; an
+// explicit denial of one of those still fails.
 func TestManagedDoctorUsesLegacyDaemonPolicyExplanation(t *testing.T) {
 	withManagedHost(t)
+	const daemonDefault = "(daemon)"
 	for _, tc := range []struct {
-		name       string
+		name string
+		// configured is this CLI's openshell.harnesses; daemon the first
+		// harness of the daemon's own managed configuration ("" = none).
 		configured []string
-		denied     string
-		want       openshell.CheckStatus
-		asked      []string
+		daemon     string
+		// permitted are the harnesses the organization's profiles allow
+		// (nil = every one); listed a profile's allowed_harnesses.
+		permitted []string
+		listed    []string
+		want      openshell.CheckStatus
+		asked     []string
+		named     string
 	}{
-		{"permitted", nil, "", openshell.StatusPass, []string{"claudecode"}},
-		{"default harness denied", nil, "claudecode", openshell.StatusFail, []string{"claudecode"}},
-		{"unconfigured harness denied", nil, "codex", openshell.StatusPass, []string{"claudecode"}},
-		{"configured harness denied", []string{"claudecode", "codex"}, "codex", openshell.StatusFail, []string{"claudecode", "codex"}},
-		{"only a configured harness denied", []string{"codex"}, "codex", openshell.StatusFail, []string{"codex"}},
+		{name: "permitted", want: openshell.StatusPass, asked: []string{daemonDefault}},
+		{name: "daemon default denied", permitted: []string{"codex"}, want: openshell.StatusFail, asked: []string{daemonDefault},
+			named: "the agent your sandbox service is configured to run"},
+		{name: "codex only, daemon runs codex", daemon: "codex", permitted: []string{"codex"}, want: openshell.StatusPass,
+			asked: []string{daemonDefault}},
+		{name: "codex only, daemon runs claudecode", daemon: "claudecode", permitted: []string{"codex"}, want: openshell.StatusFail,
+			asked: []string{daemonDefault}, named: "the agent your sandbox service is configured to run"},
+		{name: "unconfigured harness denied", permitted: []string{"claudecode"}, want: openshell.StatusPass, asked: []string{daemonDefault}},
+		{name: "a profile listing codex", daemon: "codex", listed: []string{"codex"}, want: openshell.StatusPass, asked: []string{daemonDefault}},
+		{name: "codex only, CLI runs codex", configured: []string{"codex"}, permitted: []string{"codex"}, want: openshell.StatusPass,
+			asked: []string{"codex"}},
+		{name: "configured harness denied", configured: []string{"claudecode", "codex"}, permitted: []string{"claudecode"},
+			want: openshell.StatusFail, asked: []string{"claudecode", "codex"}, named: "codex"},
+		{name: "only a configured harness denied", configured: []string{"codex"}, permitted: []string{"claudecode"},
+			want: openshell.StatusFail, asked: []string{"codex"}, named: "codex"},
+		{name: "configured harness not listed", configured: []string{"claudecode"}, listed: []string{"codex"},
+			want: openshell.StatusFail, asked: []string{"claudecode"}, named: "claudecode"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ta := newTestApp(t, "")
@@ -71,10 +93,19 @@ func TestManagedDoctorUsesLegacyDaemonPolicyExplanation(t *testing.T) {
 			ta.daemon.statusWithoutAllowed = true
 			var asked []string
 			ta.daemon.onExplain = func(req sandboxapi.ExplainRequest, ex *sandboxapi.Explain) {
-				if req.Harness != "" && !slices.Contains(asked, req.Harness) {
-					asked = append(asked, req.Harness)
+				who, judged := req.Harness, req.Harness
+				if who == "" {
+					// The older daemon judges its own configured harness.
+					who, judged = daemonDefault, tc.daemon
+					if judged == "" {
+						judged = "claudecode"
+					}
 				}
-				ex.Managed = &sandboxapi.ManagedExplain{Allowed: req.Harness != tc.denied}
+				if !slices.Contains(asked, who) {
+					asked = append(asked, who)
+				}
+				ex.Managed = &sandboxapi.ManagedExplain{Allowed: tc.permitted == nil || slices.Contains(tc.permitted, judged),
+					AllowedHarnesses: tc.listed}
 			}
 			rep := ta.runDoctor(bg)
 			if !slices.Equal(asked, tc.asked) {
@@ -87,8 +118,8 @@ func TestManagedDoctorUsesLegacyDaemonPolicyExplanation(t *testing.T) {
 			if tc.want == openshell.StatusPass && !rep.OK() {
 				t.Fatalf("permitted running account was reported unready: %+v", rep.Checks)
 			}
-			if tc.want == openshell.StatusFail && !strings.Contains(row.Detail, tc.denied) {
-				t.Fatalf("denial did not name %s: %+v", tc.denied, row)
+			if tc.want == openshell.StatusFail && (rep.OK() || !strings.Contains(row.Detail, "doesn't allow sandboxes for "+tc.named)) {
+				t.Fatalf("denial did not name %s or left doctor ready: %+v", tc.named, row)
 			}
 		})
 	}

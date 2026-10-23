@@ -345,10 +345,14 @@ var errLegacyFlushUnconfirmed = errors.New("the MicroVM's disk flush could not b
 // stop of a legacy MicroVM, and only while that VM's network is proven
 // closed: a legacy supervisor never keeps running with open egress, so a
 // VM whose containment failed is stopped without the flush, and the feed
-// says what that may have lost (fail closed). An explicit user stop keeps
-// its existing loss-aware behavior when the guest cannot flush. The loss
-// is published once OpenShell takes the stop, never for a stop that was
-// refused or not made.
+// says what that may have lost (fail closed). That flush counts only with
+// the guest's processes paused (quiesceFunc), and they stay paused through
+// the stop, so nothing they write after the sync is lost without a word; a
+// VM that keeps running (the stop was refused, not made, or returned it as
+// it was) gets them back. An explicit user stop keeps its existing
+// loss-aware behavior when the guest cannot flush. The loss is published
+// once OpenShell takes the stop, never for a stop that was refused or not
+// made.
 func (m *Manager) stopWithFlush(ctx context.Context, b *box, requireFlush bool) error {
 	gw, err := m.gateway(ctx)
 	if err != nil {
@@ -370,9 +374,19 @@ func (m *Manager) stopWithFlush(ctx context.Context, b *box, requireFlush bool) 
 	// and its terminal ends as after /exit (graceful.go); a detached run
 	// the stop ends is marked interrupted, and once the stop is published
 	// its log is kept for `sandbox logs` of the stopped sandbox (runlog.go).
-	run, flushed, flushErr := m.endHarness(ctx, gw, b)
+	quiesce := requireFlush && stopLosesWrites(driver)
+	run, fl := m.endHarness(ctx, gw, b, quiesce)
+	taken := false
+	if len(fl.frozen) > 0 {
+		defer func() {
+			if !taken {
+				m.thawGuest(ctx, gw, name, fl.frozen)
+			}
+		}()
+	}
+	flushErr := fl.err
 	var uncontained error
-	if requireFlush && stopLosesWrites(driver) && !flushed {
+	if quiesce && !fl.confirmed {
 		// The VM, whose unsynced writes a stop would lose, is kept only
 		// while its network is closed now.
 		if uncontained = m.proveOldSupervisorNetworkClosed(ctx, b); uncontained == nil {
@@ -434,7 +448,9 @@ func (m *Manager) stopWithFlush(ctx context.Context, b *box, requireFlush bool) 
 		m.lifecycle(ctx, b, ph, audit.SandboxTriggerStop, false, cond, stopped.Status.ExitCode)
 		return nil
 	}
-	// OpenShell took the stop: what the flush did not confirm is lost now.
+	// OpenShell took the stop: the paused processes go down with the VM, and
+	// what the flush did not confirm is lost now.
+	taken = true
 	if flushErr != nil {
 		m.flushFailed(name, flushErr)
 	}
@@ -810,10 +826,13 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 		return err
 	}
 	// Containment may have detached providers or removed rules before an
-	// OpenShell error prevented its final confirmation. Once an explicit
-	// end-vm replaces the legacy supervisor, restore the create-time policy
-	// even when the closed-network checkpoint was not reached.
-	restoreLegacyNetwork := rec.OldSupervisorNetworkClosed || len(rec.OldSupervisorProviders) > 0 ||
+	// OpenShell error prevented its final confirmation, and the legacy VM
+	// may have stopped since: the record said so before the first change
+	// (OldSupervisorNetworkRestore), so the create-time policy comes back
+	// even when the closed-network checkpoint was not reached. The closed
+	// and providers fields alone are what earlier 1.0.4 builds of this
+	// change recorded, until 1.0.4 ships.
+	restoreLegacyNetwork := rec.OldSupervisorNetworkRestore || rec.OldSupervisorNetworkClosed || len(rec.OldSupervisorProviders) > 0 ||
 		oldSupervisorLingering(auditPhase(sb.Status.Phase), rec)
 	// A sandbox an OpenShell before 0.1.5 created keeps a Docker bootstrap
 	// that 0.1.5 cannot read (GAP-0300): it moves to 0.1.5's format first.

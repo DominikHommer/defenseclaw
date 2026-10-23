@@ -939,30 +939,43 @@ func (a *App) managedPolicyCheck(ctx context.Context, m *sandboxapi.ManagedStatu
 	return c
 }
 
-// managedDefaultHarness is the harness the sandbox daemon's managed status
-// judges when openshell.harnesses names none (defaultManagedConnector in
-// internal/gateway): not the CLI's own defaultHarnesses, which setup
-// selects.
-const managedDefaultHarness = "claudecode"
+// legacyDaemonHarness names, in a denial, the agent an older sandbox
+// service judged for a doctor that named none.
+const legacyDaemonHarness = "the agent your sandbox service is configured to run"
 
 // legacyManagedPermission asks an older daemon's existing explain endpoint
-// for each harness the daemon's own aggregate verdict covers: the
-// configured ones (openshell.harnesses), else managedDefaultHarness. Its
-// status did not carry that verdict, so absence must not mean a denial or
-// an approval, and the doctor judges what a newer daemon would.
+// whether sandboxes may run. Its status did not carry that verdict, so
+// absence must not mean a denial or an approval. For each harness this
+// CLI's openshell.harnesses names it asks about that harness; with none,
+// it asks once without a harness, which the daemon answers for the harness
+// its own managed configuration runs (managedConnector in
+// internal/gateway: the first of its harnesses, else Claude Code). The
+// CLI's local setup defaults never stand in for the daemon's
+// configuration. That answer cannot say which harness it judged, so a
+// profile's allowed_harnesses list is the daemon's to apply at run time.
 func (a *App) legacyManagedPermission(ctx context.Context) (bool, []string, error) {
+	api, err := a.api()
+	if err != nil {
+		return false, nil, err
+	}
 	var names []string
 	if a.Cfg != nil {
 		names = a.Cfg.OpenShell.Harnesses
 	}
 	if len(names) == 0 {
-		names = []string{managedDefaultHarness}
+		ex, err := api.Explain(ctx, sandboxapi.ExplainRequest{})
+		if err != nil {
+			return false, nil, err
+		}
+		if ex == nil || ex.Managed == nil {
+			return false, nil, fmt.Errorf("no managed policy for %s", legacyDaemonHarness)
+		}
+		if !ex.Managed.Allowed {
+			return false, []string{legacyDaemonHarness}, nil
+		}
+		return true, nil, nil
 	}
 	specs, err := a.harnesses(names)
-	if err != nil {
-		return false, nil, err
-	}
-	api, err := a.api()
 	if err != nil {
 		return false, nil, err
 	}

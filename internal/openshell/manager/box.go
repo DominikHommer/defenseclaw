@@ -811,7 +811,8 @@ func oldSupervisorMessage(name, release, upgrade string) string {
 // supervisor's network broker can let the sandbox's connections bypass its
 // policy (NVIDIA/OpenShell#4494) for as long as the session runs, whatever
 // the gateway runs now. It contains a ready MicroVM's network before trying
-// to stop, and stops it only after a confirmed disk flush. A failed flush
+// to stop, and stops it only after a confirmed disk flush with the VM's
+// processes paused through the stop (stopWithFlush). A failed flush
 // keeps the VM while its network is proven closed, and is retried; one whose
 // network could not be closed is stopped without the flush (stopWithFlush,
 // fail closed). The next start after a stop runs the
@@ -925,7 +926,7 @@ func oldSupervisorUnflushedStop(name, release string, why error) string {
 func oldSupervisorStopFailed(name, release string, err error) string {
 	which := oldSupervisorRelease(release)
 	if errors.Is(err, errLegacyFlushUnconfirmed) {
-		return "⚠ DefenseClaw kept " + name + "'s legacy MicroVM because its disk flush could not be confirmed. Its network is closed (DefenseClaw's proxy and its direct OpenShell rules) while its compute and disk are kept. " +
+		return "⚠ DefenseClaw kept " + name + "'s legacy MicroVM because its disk flush could not be confirmed with the VM's processes paused. Its network is closed (DefenseClaw's proxy and its direct OpenShell rules) while its compute and disk are kept. " +
 			"Repair guest sync to let the automatic stop retry; if you accept possible loss of unsynced writes, explicitly run `defenseclaw sandbox stop " + name + "`. " +
 			"Its session still runs the supervisor of " + which + " (NVIDIA/OpenShell#4494)"
 	}
