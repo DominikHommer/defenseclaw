@@ -21839,7 +21839,7 @@ function Assert-DefenseClawRepairRollbackConfig {
         return
     }
     if ([string]$service.Status -cne 'Running') {
-        throw "Repair refused while $GatewayServiceName is $($service.Status); wait for a stable service state"
+        throw "Repair refused while $GatewayServiceName is $($service.Status); Next step: wait for a stable service state, then retry Setup /repair"
     }
     $gatewaySource = if ($Sources.ContainsKey('gateway')) {
         [hashtable]$Sources['gateway']
@@ -21864,9 +21864,10 @@ function Assert-DefenseClawRepairRollbackConfig {
             "Repair refused: the running gateway's installed config cannot " +
             'be validated for rollback (services and deployment metadata ' +
             'were not changed): ' + $_.Exception.Message +
-            ' Next step: restore an approved, gateway-valid config.yaml and ' +
-            'retry Setup /repair, or run Setup /ensure CONFIG=<approved config> ' +
-            'when deployment metadata is readable.'
+            ' Next step: fix the named config setting or administrator-selected ' +
+            'path permissions, restore an approved gateway-valid config.yaml ' +
+            'if needed, and retry Setup /repair; or run Setup /ensure ' +
+            'CONFIG=<approved config> when deployment metadata is readable.'
         )
     }
 }
@@ -31889,12 +31890,15 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         }
         if ($Action -eq 'Repair' -and (Test-DefenseClawStandaloneProfile)) {
             # The snapshot is durable and services are stopped. Heal managed
-            # runtime and bundle ACL drift before any helper or strict config
-            # check reads those paths; the final stamp below also covers files
-            # Repair writes later in this transaction.
+            # runtime, bundle and credential ACL drift before any helper or
+            # strict config check reads those paths; the final stamp below
+            # also covers files Repair writes later in this transaction.
             Set-DefenseClawManagedAcls `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName
+            Set-DefenseClawStandaloneSecretsAcls `
+                -Layout $Layout `
+                -GatewayServiceSID (Get-DefenseClawServiceSID -ServiceName $GatewayServiceName)
         }
         # Upgrade/Repair must capture the old machine-policy identity before a
         # replacement config or manifest changes its endpoint/target set. New

@@ -128,7 +128,8 @@ func TestStandaloneRepairRollbackCompileAllowsACLDriftButRejectsInvalidConfig(t 
 			t.Fatal("test runtime directory did not have the intended trust drift")
 		}
 	}
-	pack := filepath.Join(t.TempDir(), "pack")
+	configDir := t.TempDir()
+	pack := filepath.Join(configDir, "bundles", "pack")
 	if err := os.MkdirAll(pack, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -136,8 +137,11 @@ func TestStandaloneRepairRollbackCompileAllowsACLDriftButRejectsInvalidConfig(t 
 		[]byte("version: 1\npre_judge_strips: []\nfinding_suppressions: []\ntool_suppressions: []\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	configPath := writeStandaloneGatewayCheckConfig(t, strings.Replace(standaloneGatewayCheckConfig,
-		`  rule_pack_dir: ""`, "  rule_pack_dir: '"+pack+"'", 1))
+	configPath := filepath.Join(configDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(strings.Replace(standaloneGatewayCheckConfig,
+		`  rule_pack_dir: ""`, "  rule_pack_dir: '"+pack+"'", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv(managed.WindowsServiceAccountEnv, `NT SERVICE\DefenseClawGateway`)
 	restoreRead := standaloneServiceCanReadTree
 	t.Cleanup(func() { standaloneServiceCanReadTree = restoreRead })
@@ -181,15 +185,35 @@ func TestStandaloneRepairRollbackCompileAllowsUnresolvedServiceSecret(t *testing
 	}
 }
 
+func TestStandaloneRepairRollbackCompileChecksJSONLDestinationBeforeStoppingServices(t *testing.T) {
+	// A directory in place of the destination is a config-content error:
+	// restamping the managed runtime cannot turn it into a JSONL file.
+	destination := t.TempDir()
+	body := standaloneGatewayCheckConfig + "observability:\n  destinations:\n" +
+		"    - name: local-copy\n      kind: jsonl\n      path: '" + destination + "'\n"
+	configPath := writeStandaloneGatewayCheckConfig(t, body)
+	if _, err := compileStandaloneGatewayRepairRollbackConfig(configPath, t.TempDir()); err == nil ||
+		!strings.Contains(err.Error(), `destination "local-copy"`) || !strings.Contains(err.Error(), "directory") {
+		t.Fatalf("repair rollback preflight accepted an unusable JSONL destination: %v", err)
+	}
+}
+
 func TestStandaloneRepairRollbackCompileRejectsStaleCustomPackPin(t *testing.T) {
-	pack := t.TempDir()
+	configDir := t.TempDir()
+	pack := filepath.Join(configDir, "bundles", "pack")
+	if err := os.MkdirAll(pack, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	suppressions := "version: 1\npre_judge_strips: []\nfinding_suppressions: []\ntool_suppressions: []\n"
 	if err := os.WriteFile(filepath.Join(pack, "suppressions.yaml"), []byte(suppressions), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	body := strings.Replace(strings.Replace(standaloneGatewayCheckConfig, "config_version: 8\n", "config_version: 9\n", 1),
 		`  rule_pack_dir: ""`, "  rule_pack: acme\n  custom_packs:\n    acme:\n      path: '"+pack+"'\n      digest: sha256:"+strings.Repeat("0", 64), 1)
-	configPath := writeStandaloneGatewayCheckConfig(t, body)
+	configPath := filepath.Join(configDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := compileStandaloneGatewayRepairRollbackConfig(configPath, t.TempDir()); err == nil ||
 		!strings.Contains(err.Error(), "does not match guardrail.custom_packs.acme.digest") {
 		t.Fatalf("repair rollback preflight accepted stale rule-pack pin: %v", err)

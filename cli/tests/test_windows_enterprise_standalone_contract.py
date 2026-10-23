@@ -1524,6 +1524,7 @@ def _repair_rollback_config_cases(tmp_path: Path) -> dict[str, dict]:
     repair_stamp = install.index("if ($Action -eq 'Repair' -and (Test-DefenseClawStandaloneProfile)) {")
     stamp_end = install.index("\n        }\n", repair_stamp)
     assert "Set-DefenseClawManagedAcls" in install[repair_stamp:stamp_end]
+    assert "Set-DefenseClawStandaloneSecretsAcls" in install[repair_stamp:stamp_end]
     assert install.index("$snapshot = New-DefenseClawTransaction `") < repair_stamp
     assert install.index("Stop-DefenseClawService -Name $GatewayServiceName") < repair_stamp
     assert repair_stamp < install.index("Assert-DefenseClawInstalledConfig -Layout $Layout")
@@ -1562,7 +1563,8 @@ function Invoke-DefenseClawGatewayCommand {
         $Arguments -contains '--record-lifecycle' -or $Arguments -notcontains $Layout.ConfigPath) {
         throw 'repair did not use the authenticated gateway read-only config check'
     }
-    if ($global:TrustProblem -and $Arguments -notcontains '--repair-rollback') {
+    if ($global:TrustProblem -and ($Arguments -notcontains '--repair-rollback' -or
+        $global:TrustProblem.Contains("outside Repair's ACL scope"))) {
         throw $global:TrustProblem
     }
     if ([IO.File]::ReadAllText($Layout.ConfigPath).Contains('0.0.0.0')) {
@@ -1612,7 +1614,9 @@ Invoke-Case 'invalid malformed' 'broken metadata' '0.0.0.0' 'Running' $false
 Invoke-Case 'invalid valid' '{"installed":true}' '0.0.0.0' 'Running' $false
 Invoke-Case 'valid malformed' 'broken metadata' '127.0.0.1' 'Running' $false
 Invoke-Case 'runtime ACL drift' 'broken metadata' '127.0.0.1' 'Running' $false 'managed data_dir trust check failed'
-Invoke-Case 'service read ACL drift' 'broken metadata' '127.0.0.1' 'Running' $false 'gateway service cannot read rule pack'
+Invoke-Case 'bundle service read ACL drift' 'broken metadata' '127.0.0.1' 'Running' $false 'gateway service cannot read bundle rule pack'
+Invoke-Case 'external policy ACL drift' 'broken metadata' '127.0.0.1' 'Running' $false "policy_dir is outside Repair's ACL scope"
+Invoke-Case 'transitional service' 'broken metadata' '127.0.0.1' 'StartPending' $false
 Invoke-Case 'pending recovery' 'broken metadata' '0.0.0.0' 'Running' $true
 Invoke-Case 'stopped deferred' 'broken metadata' '0.0.0.0' 'Stopped' $false
 """.replace("__ROOT__", str(tmp_path)),
@@ -1643,10 +1647,15 @@ def test_repair_checks_the_running_gateway_rollback_config_before_rebuilding_met
     assert cases["valid malformed"]["error"] == "", cases["valid malformed"]
     assert json.loads(cases["valid malformed"]["metadata"])["installed"] is True
     assert cases["valid malformed"]["stamps"] == 1
-    for name in ("runtime ACL drift", "service read ACL drift"):
+    for name in ("runtime ACL drift", "bundle service read ACL drift"):
         assert cases[name]["error"] == "", cases[name]
         assert json.loads(cases[name]["metadata"])["installed"] is True, cases[name]
         assert cases[name]["stamps"] == 1, cases[name]
+    assert "outside Repair's ACL scope" in cases["external policy ACL drift"]["error"]
+    assert cases["external policy ACL drift"]["metadata"] == "broken metadata"
+    assert cases["external policy ACL drift"]["stamps"] == 0
+    assert cases["transitional service"]["gateway_calls"] == 0
+    assert cases["transitional service"]["metadata"] == "broken metadata"
     assert cases["pending recovery"]["metadata"] == "broken metadata"
     assert cases["pending recovery"]["gateway_calls"] == 0
     assert cases["stopped deferred"]["gateway_calls"] == 0
@@ -1657,3 +1666,6 @@ def test_repair_rollback_refusal_names_the_supported_next_step(tmp_path: Path) -
     for name in ("invalid malformed", "invalid valid"):
         assert "Next step:" in cases[name]["error"], cases[name]
         assert "/ensure CONFIG=" in cases[name]["error"], cases[name]
+    assert "administrator-selected path permissions" in cases["external policy ACL drift"]["error"]
+    assert "Next step:" in cases["transitional service"]["error"]
+    assert "retry Setup /repair" in cases["transitional service"]["error"]

@@ -147,23 +147,23 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 	return nil
 }
 
-// compileStandaloneGatewayRepairRollbackConfig checks only the installed
-// config's content and startup semantics while a running gateway retains its
-// last good policy. Repair later restamps managed ACLs and runs the strict
-// service validator before activation. Checking path trust here would refuse
-// the ACL drift that Repair is meant to heal.
+// compileStandaloneGatewayRepairRollbackConfig checks the installed config's
+// content, startup semantics and paths outside Repair's ACL scope while a
+// running gateway retains its last good policy. Repair later restamps managed
+// ACLs and runs the strict service validator before activation.
 func compileStandaloneGatewayRepairRollbackConfig(configPath, dataDir string) (*config.Config, error) {
 	restore := snapshotProcessEnvironment()
 	defer restore()
 	loaded, err := loadConfigV8FileWithCredentials(configPath, dataDir, "")
 	if err != nil {
 		var secretError *config.V8SecretReferenceError
-		if !errors.As(err, &secretError) || secretError.Credential {
+		if !errors.As(err, &secretError) {
 			return nil, err
 		}
 		// Setup does not inherit environment secrets resolved by the gateway
-		// service. Compile with the same placeholder-secret path as the strict
-		// validator, then independently check runtime semantics and the roster.
+		// service. An installed credential may also have ACL drift that Repair
+		// restamps. Compile with placeholders only for environment values and
+		// with a bounded, content-checked read of installed credentials.
 		raw, err := readConfigV8Source(configPath)
 		if err != nil {
 			return nil, err
@@ -171,7 +171,7 @@ func compileStandaloneGatewayRepairRollbackConfig(configPath, dataDir string) (*
 		secretsDir := managed.StandaloneSecretsDirForConfig(runtime.GOOS, configPath)
 		compiled, err := config.ParseCompileObservabilityV8(configPath, raw, config.ObservabilityV8CompileOptions{
 			DefaultDataDir: dataDir,
-			Secrets:        standalonePathPreflightSecrets{credentialsDir: secretsDir},
+			Secrets:        standaloneRepairRollbackSecrets{credentialsDir: secretsDir},
 		})
 		if err != nil {
 			return nil, err
@@ -191,7 +191,7 @@ func compileStandaloneGatewayRepairRollbackConfig(configPath, dataDir string) (*
 		if err := validateRuntimeV8ConnectorRoster(document, runtimeConfig); err != nil {
 			return nil, err
 		}
-		loaded = &loadedConfigV8File{runtime: runtimeConfig}
+		loaded = &loadedConfigV8File{runtime: runtimeConfig, compiled: compiled}
 	}
 	if loaded == nil || loaded.runtime == nil {
 		return nil, errors.New("config compiler returned no runtime configuration")
@@ -201,6 +201,21 @@ func compileStandaloneGatewayRepairRollbackConfig(configPath, dataDir string) (*
 			loaded.runtime.EnterpriseProfile(), managed.ProfileStandalone)
 	}
 	if err := config.ValidateManagedEnterpriseListenerBindings(loaded.runtime); err != nil {
+		return nil, err
+	}
+	// The inspection loader omits the managed trust block, which also holds
+	// this Windows-only content check. A configured allowlist cannot take
+	// effect on Windows and would make the gateway refuse to restart.
+	if err := config.ValidateManagedEnterpriseWindowsPeerAuthKnobs(loaded.runtime); err != nil {
+		return nil, err
+	}
+	if err := checkJSONLDestinationPathsWithSkip(loaded.compiled,
+		strings.TrimSpace(os.Getenv(managed.WindowsServiceAccountEnv)), func(path string) bool {
+			return repairRollbackCanCreateJSONLInRestampedRuntime(path, dataDir)
+		}); err != nil {
+		return nil, fmt.Errorf("the gateway cannot use %s: %w", configPath, err)
+	}
+	if err := validateRepairRollbackPolicyInputs(loaded.runtime, configPath); err != nil {
 		return nil, err
 	}
 	// Pins and rule-pack contents cannot be repaired by an ACL restamp. Read
@@ -243,6 +258,16 @@ func (secrets standalonePathPreflightSecrets) ResolveObservabilityCredential(nam
 	return config.ResolveObservabilityV8ProtectedCredential(secrets.credentialsDir, name)
 }
 
+type standaloneRepairRollbackSecrets struct{ credentialsDir string }
+
+func (standaloneRepairRollbackSecrets) ResolveObservabilitySecret(string) (string, bool) {
+	return "preflight", true
+}
+
+func (secrets standaloneRepairRollbackSecrets) ResolveObservabilityCredential(name string) (string, bool) {
+	return resolveRepairRollbackCredential(name, secrets.credentialsDir)
+}
+
 // checkJSONLDestinationPaths refuses the first enabled jsonl destination
 // whose path local.JSONLPathProblem rejects, naming the destination, the
 // path and the rule (config validate, Windows Setup). gatewayAccount, the
@@ -251,6 +276,10 @@ func (secrets standalonePathPreflightSecrets) ResolveObservabilityCredential(nam
 // passed Setup, which runs as one, and the gateway then did not start
 // (GAP-1118).
 func checkJSONLDestinationPaths(compiled *config.ObservabilityV8CompiledConfig, gatewayAccount string) error {
+	return checkJSONLDestinationPathsWithSkip(compiled, gatewayAccount, nil)
+}
+
+func checkJSONLDestinationPathsWithSkip(compiled *config.ObservabilityV8CompiledConfig, gatewayAccount string, skipACLForMissingFile func(string) bool) error {
 	if compiled == nil || compiled.Plan == nil {
 		return nil
 	}
@@ -263,6 +292,12 @@ func checkJSONLDestinationPaths(compiled *config.ObservabilityV8CompiledConfig, 
 			continue
 		}
 		path := destination.Transport.Path
+		// Repair can restamp the exact runtime root before activation. A
+		// missing destination file directly under it then inherits the
+		// repaired ACL; all existing files and other folders remain checked.
+		if skipACLForMissingFile != nil && skipACLForMissingFile(path) {
+			continue
+		}
 		if problem := local.JSONLPathProblem(path, allowedWriters...); problem != "" {
 			return &config.V8SemanticError{
 				Path:    "$.observability.destinations",

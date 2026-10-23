@@ -1784,9 +1784,9 @@ func newWindowsServiceConfigValidationCommand() *cobra.Command {
 }
 
 // validateWindowsRepairRollbackConfig checks the config a running gateway
-// would have to restart on if Repair rolls back. ACLs are intentionally left
-// to the journaled Repair: this check only proves that the installed config
-// still parses, compiles, resolves to standalone and binds to loopback.
+// would have to restart on if Repair rolls back. It checks content and paths
+// outside Repair's ACL scope before stopping the service. Managed ACLs are
+// left to the journaled Repair and checked again after restamping.
 func validateWindowsRepairRollbackConfig(configPath, expectedDataDir, serviceAccount string) (windowsServiceConfigValidation, error) {
 	var report windowsServiceConfigValidation
 	configPath, err := filepath.Abs(strings.TrimSpace(configPath))
