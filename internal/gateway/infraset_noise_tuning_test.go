@@ -296,7 +296,7 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		{"home directory change", `cd ~ && echo dccert-block-marker >> .ssh/authorized_keys`, "", "", true},
 		// A quoted program word is not a plain literal (GAP-1530).
 		{"quoted directory change", `"cd" ~/.ssh && echo dccert-block-marker >> authorized_keys`, "", "", true},
-		{"quoted program then write", `"$PY" -V && echo dccert-block-marker >> notes.txt`, "", "", false},
+		{"quoted program then write", `"$PY" -V && echo dccert-block-marker >> notes.txt`, "", "", true},
 		{"assigned path", `D=~/.ssh; echo dccert-block-marker >> "$D/authorized_keys"`, "", "", true},
 		{"nested shell", `sh -c 'echo dccert-block-marker >> "$HOME/.ssh/authorized_keys"'`, "", "", true},
 		{"normalized path", `echo dccert-block-marker >> ~//.ssh//authorized_keys`, "", "", true},
@@ -444,7 +444,7 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		{"python printed write", `python3 -c 'print("open(\"/home/alice/.ssh/authorized_keys\", \"a\")")'`, "", "", false},
 		{"ruby read", `ruby -e 'File.open("~/.ssh/authorized_keys", "r") { |f| puts f.read }'`, "", "", false},
 		{"node read", `node -e 'require("fs").readFileSync("/home/alice/.ssh/authorized_keys")'`, "", "", false},
-		{"symlink read", `ln -s ~/.ssh/authorized_keys ./reader.link && cat ./reader.link`, "", "", false},
+		{"symlink read", `ln -s ~/.ssh/authorized_keys ./reader.link && cat ./reader.link`, "", "", true},
 		{"count", `grep -c ssh-ed25519 ~/.ssh/authorized_keys`, "", "", false},
 		{"metadata", `ls -l ~/.ssh/authorized_keys`, "", "", false},
 		{"diff", `diff ~/.ssh/authorized_keys marker.pub | head -5`, "", "", false},

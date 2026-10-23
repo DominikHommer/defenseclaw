@@ -128,6 +128,7 @@ func TestUnprovenProtectedWriteEvidence(t *testing.T) {
 				"eval mentions dormant function":            "eval-source",
 				"glob redirect with read-only link mention": "dynamic-argument",
 				"unrelated executable glob":                 "dynamic-command",
+				"unrelated wrapped executable glob":         "dynamic-command",
 				"unrelated dynamic log path":                "dynamic-argument",
 			}[tc.name]; extra != "" {
 				hookReason = extra

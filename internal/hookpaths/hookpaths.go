@@ -978,7 +978,11 @@ func incompleteEvidence(cwd string) string {
 }
 
 func unprovenEvidence(cwd, reason string) string {
-	encoded, _ := json.Marshal(map[string]string{CWDKey: cwd, UnprovenReasonKey: reason})
+	// The full target map overflowed while adding the class reason. Keep
+	// both incomplete-map and unproven-command evidence in the small header.
+	encoded, _ := json.Marshal(map[string]string{
+		CWDKey: cwd, TruncatedKey: "1", UnprovenReasonKey: reason,
+	})
 	return base64.RawURLEncoding.EncodeToString(encoded)
 }
 

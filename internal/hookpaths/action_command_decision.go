@@ -526,11 +526,34 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 	switch program {
 	case "git":
 		return actionGitDecision(words, cwd, home, depth+1)
-	case "busybox", "time", "nohup", "command", "exec":
-		if len(words) < 2 {
+	case "command", "exec", "busybox", "time", "nohup":
+		index := 1
+		for index < len(words) && strings.HasPrefix(words[index], "-") {
+			option := words[index]
+			if option == "--" {
+				index++
+				break
+			}
+			switch {
+			case program == "command" && option == "-p",
+				program == "exec" && (option == "-c" || option == "-l"),
+				program == "time" && option == "-p":
+				index++
+			case program == "command" && (option == "-v" || option == "-V"):
+				return "" // Name lookup does not run a child.
+			case program == "exec" && option == "-a":
+				if index+1 >= len(words) || words[index+1] == "" {
+					return "dynamic-command"
+				}
+				index += 2
+			default:
+				return "dynamic-command"
+			}
+		}
+		if index >= len(words) {
 			return "dynamic-command"
 		}
-		return actionWordsDecision(words[1:], cwd, home, depth+1)
+		return actionWordsDecision(words[index:], cwd, home, depth+1)
 	case "env":
 		index := 1
 		for index < len(words) {

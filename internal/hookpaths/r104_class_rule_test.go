@@ -142,6 +142,9 @@ func TestR104ActionClassWrapperRecursion(t *testing.T) {
 		{"parallel", `parallel sh -c 'echo marker >> "$destination"' ::: one`},
 		{"git inline alias", `git -c 'alias.writer=!sh -c "echo marker >> alias"' writer`},
 		{"git ssh command", `git -c 'core.sshCommand=sh -c "echo marker >> alias"' fetch origin`},
+		{"command builtin computed child", `sudo -n env MODE=check command -p /bin/r* -rf /`},
+		{"time option child", `time -p sh -c 'echo marker >> "$destination"'`},
+		{"exec named child", `exec -a chosen sh -c 'echo marker >> alias'`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if reason := ActionCommandDecision(tc.command, cwd, home); reason == "" {
