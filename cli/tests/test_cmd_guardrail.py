@@ -762,8 +762,16 @@ class PerConnectorToggleTests(unittest.TestCase):
                 )
             self.assertEqual(result.exit_code, 1, msg=result.output)
             self.assertNotIn("already enabled", result.output)
-            self.assertIn("defenseclaw guardrail enable", result.output)
-            self.assertIn("nothing was changed", result.output)
+            out = " ".join(result.output.split())
+            # The global enable keeps a connector disabled on its own off, so
+            # that case names both steps in order.
+            steps = (
+                "'defenseclaw guardrail enable', then 'defenseclaw guardrail enable --connector codex'"
+                if own is False
+                else "'defenseclaw guardrail enable' to turn it back on"
+            )
+            self.assertIn(f"Run {steps}", out)
+            self.assertIn("nothing was changed", out)
             self.assertFalse(app.cfg.guardrail.enabled)
             self.assertEqual(app.cfg.guardrail.connectors["codex"].enabled, own)
             app.cfg.save.assert_not_called()

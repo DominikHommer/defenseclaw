@@ -5466,12 +5466,19 @@ def _connector_contract_upgrade_guidance(
     connector: str,
     label: str,
     normalized_version: str = "",
+    rerun: str = "",
 ) -> str:
-    """Give range-aware remediation without calling every mismatch an upgrade."""
+    """Give range-aware remediation without calling every mismatch an upgrade.
 
-    contracts = HOOK_CONTRACTS.get(normalize_connector(connector), ())
+    *rerun* is the command to run after the agent changes; it defaults to
+    ``defenseclaw setup <connector>``.
+    """
+
+    key = normalize_connector(connector)
+    rerun = rerun or f"defenseclaw setup {'claude-code' if key == 'claudecode' else key}"
+    contracts = HOOK_CONTRACTS.get(key, ())
     if not contracts:
-        return f"Use a {label} version covered by a DefenseClaw hook contract, then rerun setup."
+        return f"Use a {label} version covered by a DefenseClaw hook contract, then run: {rerun}."
 
     contract = contracts[0]
     if len(contracts) > 1 and normalized_version:
@@ -5519,7 +5526,7 @@ def _connector_contract_upgrade_guidance(
             else:
                 return (
                     f"Use a {label} version covered by a DefenseClaw hook contract, "
-                    "then rerun setup."
+                    f"then run: {rerun}."
                 )
     requirement_parts: list[str] = []
     pins = contract.exact_agent_versions
@@ -5553,7 +5560,7 @@ def _connector_contract_upgrade_guidance(
         ) < 0:
             return (
                 f"Upgrade {label}; installed version {normalized_version} is older than the validated "
-                f"minimum. {contract.contract_id} requires {requirement}. Then rerun setup."
+                f"minimum. {contract.contract_id} requires {requirement}. Then run: {rerun}."
             )
         if contract.max_agent_version and compare_agent_versions(
             normalized_version,
@@ -5562,11 +5569,29 @@ def _connector_contract_upgrade_guidance(
             return (
                 f"{label} {normalized_version} is newer than DefenseClaw's validated range "
                 f"({requirement}). Use a validated version, or update DefenseClaw when a matching "
-                "hook contract is available; then rerun setup."
+                f"hook contract is available; then run: {rerun}."
             )
     return (
         f"{label} {normalized_version or 'version'} is outside the validated hook contract; "
-        f"{contract.contract_id} requires {requirement}. Use a covered version, then rerun setup."
+        f"{contract.contract_id} requires {requirement}. Use a covered version, then run: {rerun}."
+    )
+
+
+def _no_hook_contract_detail(label: str, version_display: str, compatibility: Any) -> str:
+    """Say that the installed version has no hook contract, as the gateway does.
+
+    Setup and first run use this sentence. "is not covered by a known hook
+    contract" is the gateway's admission refusal (sidecar.go), so the CLI and
+    the gateway log name the same cause.
+    """
+    detected_state = (
+        "detected-but-unsupported-version"
+        if compatibility.normalized_version
+        else "detected-but-unrecognized-version"
+    )
+    return (
+        f"{label}: {detected_state}; installed version {version_display} is not covered by a "
+        f"known hook contract ({compatibility.reason})."
     )
 
 
@@ -5786,15 +5811,7 @@ def _check_connector_version_supported_for_setup(
                 _emit_untrusted_prefix_setup_hints(resolved_bin, parent)
         return True
 
-    detected_state = (
-        "detected-but-unsupported-version"
-        if compatibility.normalized_version
-        else "detected-but-unrecognized-version"
-    )
-    detail = (
-        f"{label}: {detected_state}; installed version {version_display} is not covered by a "
-        f"DefenseClaw hook contract ({compatibility.reason})."
-    )
+    detail = _no_hook_contract_detail(label, version_display, compatibility)
     if probe_error:
         detail += f" Probe detail: {probe_error}."
     upgrade_guidance = _connector_contract_upgrade_guidance(
@@ -5802,10 +5819,9 @@ def _check_connector_version_supported_for_setup(
         label,
         compatibility.normalized_version,
     )
-    # Refused in observe mode too: the gateway does not start a connector
-    # whose version has no contract (Claude Code and Codex render their hooks
-    # from it), so "continuing in observe mode" left the gateway down for
-    # every connector after the restart (GAP-0554).
+    # Refused in observe mode too: a gateway started with this connector alone
+    # refuses a version with no contract in every mode, so "continuing in
+    # observe mode" left the gateway down after the restart (GAP-0554).
     if compatibility.status == STATUS_UNKNOWN and not allow_drift:
         if emit:
             ux.err(detail)
@@ -5818,8 +5834,8 @@ def _check_connector_version_supported_for_setup(
             else:
                 mode_name = "action" if action_mode else "observe"
                 ux.subhead(
-                    f"Refusing {mode_name}-mode connector setup before activation: the gateway installs no "
-                    "hooks for a version without a hook contract. Nothing was changed."
+                    f"Refusing {mode_name}-mode connector setup before activation: a gateway started with "
+                    "this connector alone refuses a version without a hook contract. Nothing was changed."
                 )
             ux.subhead("Set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing.")
         return False
