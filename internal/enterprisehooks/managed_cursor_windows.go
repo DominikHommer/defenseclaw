@@ -805,76 +805,126 @@ func RefreshWindowsCursorManagedAdapter(hookExecutable string) (bool, error) {
 	return refreshWindowsCursorManagedAdapter(hookExecutable, true)
 }
 
-// RestoreWindowsCursorManagedAdapter repairs a damaged adapter, and on a
-// standalone host also repairs a missing or changed hooks.json registration
-// from authenticated protected state. It leaves an earlier release's recorded
-// adapter alone, so a lifecycle snapshot still captures it (GAP-1068).
+// RestoreWindowsCursorManagedAdapter repairs a damaged adapter. On a
+// standalone host it rebuilds every guard artifact that is missing or changed,
+// the adapter and the hooks.json registration together, from the protected
+// state (restoreWindowsCursorManagedGuard). It leaves an earlier release's
+// recorded adapter alone, so a lifecycle snapshot still captures it (GAP-1068).
 func RestoreWindowsCursorManagedAdapter(hookExecutable string) (bool, error) {
 	return refreshWindowsCursorManagedAdapter(hookExecutable, false)
 }
 
-// The protected state and private receipt are authoritative for an existing
-// standalone guard. Repair only the registration; preserve every unrelated
-// hook in a replaced hooks.json and leave target enrollment untouched.
+// restoreWindowsCursorManagedGuard rebuilds a standalone Cursor machine guard
+// from its machine-owned record: the canonical protected state and the private
+// rollback receipt it binds. Whichever of the adapter and the hooks.json
+// registration is missing or changed is rewritten from that record in one
+// locked step, and the complete guard is validated before it returns. Any
+// failure restores every file it wrote, so a repair never stops with a
+// half-rebuilt guard. Unrelated Cursor hooks are kept; a hooks.json that is not
+// JSON cannot carry the guard and is replaced. Target enrollment never changes.
+//
+// It writes nothing and reports false when the record does not authenticate:
+// Secure Client, no state or receipt, state DefenseClaw did not write, another
+// hook executable, or a receipt the state does not bind. A hooks.json that is
+// JSON but not a version 1 Cursor hooks document is refused before any write.
 // Callers hold the Cursor transaction lock.
-func restoreWindowsCursorManagedHooksRegistration(
+func restoreWindowsCursorManagedGuard(
 	current windowsCursorManagedArtifacts,
 	hookExecutable string,
 ) (bool, error) {
-	if !windowsEnterpriseStandaloneProcess() || !current.state.existed ||
-		!current.adapter.existed || !current.receipt.existed {
+	if !windowsEnterpriseStandaloneProcess() || !current.state.existed || !current.receipt.existed {
 		return false, nil
 	}
-	var state windowsCursorManagedPolicyState
-	if err := json.Unmarshal(current.state.data, &state); err != nil {
-		return false, nil
-	}
-	canonical, err := windowsCursorManagedStateBody(state)
-	if err != nil || !bytes.Equal(canonical, current.state.data) ||
-		!sameWindowsEnterprisePath(state.HookExecutable, hookExecutable) {
-		return false, nil
-	}
-	validated, err := validateWindowsCursorManagedStateIdentity(current)
+	candidate, err := windowsCursorManagedAdapterDriftCandidate(current, hookExecutable)
 	if err != nil {
 		return false, nil
 	}
-	validated, err = validateWindowsCursorManagedReceipt(validated)
-	if err != nil {
+	var recorded windowsCursorManagedPolicyState
+	if err := json.Unmarshal(current.state.data, &recorded); err != nil {
 		return false, nil
 	}
+	if current.adapter.existed && windowsCursorManagedAdapterMatchesState(recorded, current.adapter.data) {
+		// Keep the recorded adapter, also an earlier release's (GAP-1068).
+		candidate.adapter, candidate.state = current.adapter, current.state
+	}
+	if err := json.Unmarshal(candidate.state.data, &candidate.parsed); err != nil {
+		return false, nil
+	}
+	if _, err := validateWindowsCursorManagedReceipt(candidate); err != nil {
+		return false, nil
+	}
+	failMode := cursorManagedPolicyFailMode(candidate.parsed)
+	base := []byte("{}\n")
 	if current.hooks.existed {
 		if err := windowsManagedPolicyFileTrustCheck(current.hooks.path); err != nil {
-			return false, err
+			return false, fmt.Errorf("enterprise hooks: untrusted Cursor enterprise artifact %s: %w", current.hooks.path, err)
 		}
+		base = current.hooks.data
 	}
-	base := current.hooks.data
-	if !current.hooks.existed {
-		base = []byte("{}\n")
+	hooks, err := connector.MergeWindowsCursorEnterpriseHooks(base, current.adapter.path, failMode)
+	if err != nil && current.hooks.existed && !json.Valid(current.hooks.data) {
+		fmt.Fprintf(os.Stderr,
+			"[enterprise-hooks] replacing %s, which is not JSON, to restore the Cursor machine guard\n",
+			current.hooks.path)
+		hooks, err = connector.MergeWindowsCursorEnterpriseHooks([]byte("{}\n"), current.adapter.path, failMode)
 	}
-	hooks, err := connector.MergeWindowsCursorEnterpriseHooks(
-		base, current.adapter.path, cursorManagedPolicyFailMode(validated.parsed),
-	)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("enterprise hooks: rebuild Cursor hooks.json registration: %w", err)
 	}
-	if len(hooks) > windowsCursorManagedHooksLimit ||
-		(current.hooks.existed && bytes.Equal(hooks, current.hooks.data)) {
+	if len(hooks) > windowsCursorManagedHooksLimit {
+		return false, fmt.Errorf("enterprise hooks: rebuilt Cursor hooks.json exceeds %d bytes", windowsCursorManagedHooksLimit)
+	}
+
+	type rebuild struct {
+		preimage         windowsManagedFileSnapshot
+		metadata         windowsCursorManagedFileMetadata
+		data             []byte
+		preserveMetadata bool
+	}
+	var plan []rebuild
+	if !current.adapter.existed || !bytes.Equal(current.adapter.data, candidate.adapter.data) {
+		plan = append(plan, rebuild{current.adapter, current.adapterMetadata, candidate.adapter.data, false})
+	}
+	if !bytes.Equal(current.state.data, candidate.state.data) {
+		plan = append(plan, rebuild{current.state, current.stateMetadata, candidate.state.data, false})
+	}
+	if !current.hooks.existed || !bytes.Equal(current.hooks.data, hooks) {
+		plan = append(plan, rebuild{current.hooks, current.hooksMetadata, hooks, true})
+	}
+	if len(plan) == 0 {
 		return false, nil
 	}
+	var written []rebuild
 	rollback := func(cause error) error {
-		if restoreErr := restoreWindowsCursorManagedFile(current.hooks, current.hooksMetadata); restoreErr != nil {
-			return errors.Join(cause, fmt.Errorf("restore Cursor hooks.json preimage: %w", restoreErr))
+		for index := len(written) - 1; index >= 0; index-- {
+			item := written[index]
+			if restoreErr := restoreWindowsCursorManagedFile(item.preimage, item.metadata); restoreErr != nil {
+				cause = errors.Join(cause, fmt.Errorf("restore Cursor preimage %s: %w", item.preimage.path, restoreErr))
+			}
 		}
 		return cause
 	}
-	if err := writeWindowsCursorManagedFilePreservingMetadata(current.hooks, current.hooksMetadata, hooks); err != nil {
-		return false, rollback(err)
+	for _, item := range plan {
+		written = append(written, item)
+		var writeErr error
+		if item.preserveMetadata {
+			writeErr = writeWindowsCursorManagedFilePreservingMetadata(item.preimage, item.metadata, item.data)
+		} else {
+			writeErr = windowsManagedPolicyWriter(item.preimage.path, item.data, true)
+		}
+		if writeErr != nil {
+			return false, rollback(writeErr)
+		}
 	}
 	repaired, err := snapshotWindowsCursorManagedArtifacts()
 	if err != nil {
 		return false, rollback(err)
 	}
-	if _, err := validateWindowsCursorManagedArtifacts(repaired); err != nil {
+	validated, err := validateWindowsCursorManagedArtifacts(repaired)
+	if err == nil && !validated.active {
+		err = errors.New("enterprise hooks: rebuilt Cursor machine guard is not active")
+	}
+	if err != nil {
 		return false, rollback(err)
 	}
 	return true, nil
@@ -893,11 +943,11 @@ func refreshWindowsCursorManagedAdapter(hookExecutable string, upgradeTemplate b
 		}
 		artifacts, err := validateWindowsCursorManagedArtifactsReclaimingOrphans(current)
 		if err != nil {
-			restoredHooks, restoreErr := restoreWindowsCursorManagedHooksRegistration(current, hookExecutable)
-			if restoreErr != nil {
-				return fmt.Errorf("restore Cursor hooks.json registration: %w", errors.Join(err, restoreErr))
+			rebuilt, rebuildErr := restoreWindowsCursorManagedGuard(current, hookExecutable)
+			if rebuildErr != nil {
+				return fmt.Errorf("rebuild Cursor machine guard: %w", errors.Join(err, rebuildErr))
 			}
-			if restoredHooks {
+			if rebuilt {
 				refreshed = true
 				current, err = snapshotWindowsCursorManagedArtifacts()
 				if err != nil {
