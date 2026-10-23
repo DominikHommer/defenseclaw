@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/http"
 	"runtime"
 	"testing"
 	"time"
@@ -39,7 +40,7 @@ func TestForeignHookSessionProofIsRenewedOnlyWhileTheGatewayAnswers(t *testing.T
 			}
 			t.Cleanup(func() { _ = ln.Close() })
 			server.api.serveForeignHooks(ln)
-			return func() { foreignHookServeForTest(ln) }
+			return func() { foreignHookServeForTest(t, ln) }
 		}},
 		{name: "a listener takes no connection", stall: func(t *testing.T, server *foreignHookPublishTestServer) func() {
 			ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -126,18 +127,15 @@ func TestForeignHookSessionProofIsRenewedOnlyWhileTheGatewayAnswers(t *testing.T
 // answer allow rather than revoke the account's key.
 const foreignHookTestAnswerWithin = 3 * time.Second
 
-// foreignHookServeForTest answers on ln as the hook listener does.
-func foreignHookServeForTest(ln net.Listener) {
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			_, _ = conn.Write([]byte("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n"))
-			_ = conn.Close()
-		}
-	}()
+// foreignHookServeForTest answers on ln as the hook listener does. It reads
+// each request before it answers: a reply written over an unread request
+// can reach the client as a reset instead of the answer.
+func foreignHookServeForTest(t *testing.T, ln net.Listener) {
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})}
+	t.Cleanup(func() { _ = server.Close() })
+	go func() { _ = server.Serve(ln) }()
 }
 
 // foreignHookForgetListenersForTest stops probing addr (a listener that
