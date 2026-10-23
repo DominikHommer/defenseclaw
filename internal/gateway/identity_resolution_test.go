@@ -321,7 +321,7 @@ func TestUnprovenFactsWithIncomparableProfilesApplyTheirMeet(t *testing.T) {
 		t.Fatalf("decision %+v; want the meet of default and strict", got)
 	}
 	derived, ok := set.derivedProfile(got.Name)
-	if !ok || hookModeForConfig(derived.Config, "codex") != "action" || resolveThresholds(derived.Config, "codex").Block != "LOW" ||
+	if !ok || derived.Config.HookModeForConnector("codex") != "action" || resolveThresholds(derived.Config, "codex").Block != "LOW" ||
 		!slices.Contains(derived.Sandbox.RequiredFor, "codex") {
 		t.Fatalf("meet %+v; want action, block_at LOW and codex required in a sandbox", derived)
 	}

@@ -3,7 +3,20 @@
 # DefenseClaw Hermes hook — forwards Hermes shell-hook payloads to the
 # DefenseClaw gateway.
 set -euo pipefail
-# Windows: HOME may be unset when agents spawn hooks. Fall back to USERPROFILE.
+{{if not .Sandbox}}# The macOS execution probe has a hard zero-process limit. Reach the proof
+# using shell builtins, while still sourcing the installed hardening helper
+# and applying its resource limits. The registered hook path is absolute.
+if [ "${1:-}" = "--defenseclaw-execution-probe" ] && [ "${2:-}" = "--forkless" ]; then
+  case "${BASH_SOURCE[0]}" in /*) ;; *) exit 125 ;; esac
+  _DC_PROBE_HOOK_DIR="${BASH_SOURCE[0]%/*}"
+  . "${_DC_PROBE_HOOK_DIR}/_hardening.sh"
+  declare -F defenseclaw_harden_resources >/dev/null || exit 125
+  declare -F defenseclaw_harden_env >/dev/null || exit 125
+  defenseclaw_harden_resources
+  printf '%s\n' 'defenseclaw-execution-probe-ok'
+  exit 0
+fi
+{{end}}# Windows: HOME may be unset when agents spawn hooks. Fall back to USERPROFILE.
 HOME="${HOME:-${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}}"
 export HOME
 {{if .ForeignHookGuardSH}}DEFENSECLAW_GUARD_AGENT_HOME="$HOME"
@@ -77,6 +90,12 @@ fi
 . "${HOOK_DIR}/_sandbox.sh"
 {{end}}defenseclaw_harden_resources
 defenseclaw_harden_env
+# Doctor and Verify execute the exact command Hermes has registered. The
+# bounded probe checks the shell and local helper without sending a tool event.
+if [ "${1:-}" = "--defenseclaw-execution-probe" ]; then
+  printf '%s\n' 'defenseclaw-execution-probe-ok'
+  exit 0
+fi
 
 # FAIL_MODE set BEFORE the missing-token check so the helper has a
 # stable FAIL_MODE to log against. Response-layer and transport-layer

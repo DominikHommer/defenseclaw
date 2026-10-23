@@ -10,11 +10,13 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import yaml
 from click.testing import CliRunner
 from defenseclaw import config as dcconfig
 from defenseclaw import fail_mode as fail_mode_runtime
 from defenseclaw.commands import cmd_guardrail
 from defenseclaw.context import AppContext
+from defenseclaw.doctor_hooks import _HERMES_REQUIRED_HOOKS
 from defenseclaw.fail_mode import (
     ConnectorFailModeState,
     connector_fail_mode_report,
@@ -435,7 +437,10 @@ def test_native_deny_connector_reports_the_mode_its_hook_renders(
     _register_native_deny_hook(monkeypatch, cfg, home, connector)
     script = f"{connector}-hook.sh"
     hook = Path(cfg.data_dir) / "hooks" / script
-    hook.write_text("\n".join(_HOOK_FAIL_MODE_LINES[f"{script}/closed"]) + "\n", encoding="utf-8")
+    if connector != "hermes":
+        # Hermes' read-back also seals and executes the registered script;
+        # the fixture above already installed its closed, probed render.
+        hook.write_text("\n".join(_HOOK_FAIL_MODE_LINES[f"{script}/closed"]) + "\n", encoding="utf-8")
 
     report = connector_fail_mode_report(cfg, connector)
 
@@ -456,7 +461,9 @@ def test_native_deny_connector_reports_the_mode_its_hook_renders(
     assert report["effective"] == "open"
     assert report["desired"] == "closed"
     assert report["current"] is False
-    assert report["drift"] == ["hook-script-open"]
+    assert report["drift"] == (
+        ["registration-digest-stale", "hook-script-open"] if connector == "hermes" else ["hook-script-open"]
+    )
     assert report["note"] == ""
 
 
@@ -1572,6 +1579,7 @@ def _register_native_deny_hook(
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("COPILOT_HOME", str(home / ".copilot"))
     monkeypatch.setenv("HERMES_HOME", str(home / ".hermes"))
+    selected_script = script
     script = script or str(Path(cfg.data_dir) / "hooks" / f"{connector}-hook.sh")
     binding = binding or {}
     lock_path = Path(cfg.data_dir) / "hook_contract_lock.json"
@@ -1600,8 +1608,30 @@ def _register_native_deny_hook(
             document[f"defenseclaw-antigravity-{event.lower()}"] = {event: entries}
     else:
         path = home / ".hermes" / "config.yaml"
+        current_script = Path(cfg.data_dir) / "hooks" / "hermes-hook.sh"
+        if not selected_script:
+            current_script.write_text(
+                '#!/bin/sh\nFAIL_MODE="closed"\nprintf \'defenseclaw-execution-probe-ok\\n\'\n', encoding="utf-8"
+            )
+            current_script.chmod(0o700)
+        command = "'" + script + "'"
+        lock["connectors"][connector]["locations"] = {
+            "hook_config_paths": [str(path)], "hook_script_paths": [str(current_script)]
+        }
+        lock["connectors"][connector]["hook_script_digests"] = {
+            "hermes-hook.sh": "sha256:" + hashlib.sha256(current_script.read_bytes()).hexdigest()
+        }
+        lock_path.write_text(json.dumps(lock), encoding="utf-8")
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f"hooks:\n  pre_tool_call:\n  - command: {script}\n", encoding="utf-8")
+        hooks = {
+            event: [{"command": command, "timeout": 30, **({"matcher": matcher} if matcher else {})}]
+            for event, matcher in _HERMES_REQUIRED_HOOKS.items()
+        }
+        path.write_text(yaml.safe_dump({"hooks": hooks, "hooks_auto_accept": False}), encoding="utf-8")
+        path.with_name("shell-hooks-allowlist.json").write_text(json.dumps({"approvals": [
+            {"event": event, "command": command, "defenseclaw_managed": True}
+            for event in _HERMES_REQUIRED_HOOKS
+        ]}), encoding="utf-8")
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(document), encoding="utf-8")

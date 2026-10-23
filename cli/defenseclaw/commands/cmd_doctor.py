@@ -36,8 +36,10 @@ import os
 import posixpath
 import queue
 import re
+import select
 import shlex
 import shutil
+import signal
 import socket
 import ssl
 import stat
@@ -6159,11 +6161,469 @@ def _check_windows_native_hooks(
     )
     if connector == "hermes":
         check = _hermes_idle_native_check(check, r)
+        if os.name == "nt":
+            check = _hermes_windows_execution_probe(check)
     if check.state == CODEX_PROBE_TIMEOUT_STATE:
         _emit("warn", label, f"{check.state}: {check.detail}", r=r, remediation=_CODEX_PROBE_TIMEOUT_STEP)
         return
     status = "pass" if check.healthy else "fail"
     _emit(status, label, f"{check.state}: {check.detail}", r=r, remediation=check.repair)
+
+
+_HERMES_EXECUTION_PROBE_RESPONSE = b"defenseclaw-execution-probe-ok\n"
+# One probe run, and the wait for stdout to close once the probe has exited or
+# been killed (a descendant can inherit it). Tests shorten both.
+_HERMES_EXECUTION_PROBE_TIMEOUT = 3.0
+_HERMES_EXECUTION_PROBE_PIPE_WAIT = 1.0
+# The wait for a terminated Windows probe job to empty, or for the Linux
+# supervisor to end the probe's tree.
+_HERMES_EXECUTION_PROBE_TREE_REAP = 2.0
+# The Linux supervisor's budget to kill and reap what the probe left; tests
+# set it to zero to reach the fail-closed result.
+_HERMES_EXECUTION_PROBE_SWEEP = 2.0
+# How Doctor ends what a Unix probe started. A hook could start a child in a
+# session of its own (setsid) or another process group, out of the session
+# Doctor killed, and Doctor passed while the child kept running (r104 W5b).
+# "pidns" (Linux): the probe runs below PID 1 of a PID namespace of its own,
+# owned by a user namespace unless Doctor holds CAP_SYS_ADMIN. The hook cannot
+# address the supervisor outside it, and the kernel kills everything in the
+# namespace when its init ends: a hook that SIGKILLed the subreaper custodian
+# used before left its setsid child running (r104 W5b review). "forkless"
+# (macOS): the probe drops any inherited real root UID and fixes RLIMIT_NPROC
+# at zero before it executes the registered command.
+_HERMES_PROBE_UNIX_CONTAINMENT = (
+    "pidns" if sys.platform.startswith("linux") else "forkless" if sys.platform == "darwin" else "unsupported"
+)
+# The supervisor's exit code when it cannot establish that nothing is left;
+# any other code is the probe's own (124 when Doctor ended it).
+_HERMES_PROBE_NOT_CONTAINED = 125
+_HERMES_PROBE_SUPERVISOR = r"""
+import ctypes, os, select, signal, subprocess, sys, time
+
+CLONE_NEWUSER, CLONE_NEWPID = 0x10000000, 0x20000000
+CAP_SETGID, CAP_SETUID, CAP_SYS_ADMIN = 6, 7, 21
+PR_SET_PDEATHSIG, PR_SET_CHILD_SUBREAPER = 1, 36
+
+
+def children(me):
+    found = []
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            with open("/proc/" + name + "/stat", "rb") as stat:
+                fields = stat.read().rsplit(b")", 1)[1].split()
+            if int(fields[1]) == me:
+                found.append(int(name))
+        except (OSError, IndexError, ValueError):
+            pass
+    return found
+
+
+def reap_all(budget):
+    # A subreaper is the parent of every orphaned descendant: no child left
+    # means nothing the probe started is left.
+    deadline = time.monotonic() + budget
+    me = os.getpid()
+    while True:
+        try:
+            while os.waitpid(-1, os.WNOHANG)[0]:
+                pass
+        except ChildProcessError:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        for pid in children(me):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        time.sleep(0.005)
+
+
+def effective_caps():
+    with open("/proc/self/status") as status:
+        for line in status:
+            if line.startswith("CapEff:"):
+                return int(line.split()[1], 16)
+    return 0
+
+
+def release_stdout():
+    null = os.open(os.devnull, os.O_RDWR)
+    os.dup2(null, 1)
+    os.close(null)
+
+
+def status(code):
+    if os.WIFEXITED(code):
+        return os.WEXITSTATUS(code)
+    return 128 + os.WTERMSIG(code) if os.WIFSIGNALED(code) else 125
+
+
+def init(libc, lifeline, argv):
+    # PID 1 of the namespace: when it ends, the kernel kills the rest. It
+    # ends with the process that created the namespace, also one that died
+    # before the parent-death signal was armed (the lifeline then reads EOF).
+    if libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0 or os.getpid() != 1:
+        return 125
+    if select.select([lifeline], [], [], 0)[0]:
+        return 125
+    try:
+        proc = subprocess.Popen(argv, start_new_session=True)
+    except (OSError, ValueError):
+        return 127
+    release_stdout()
+    code = proc.wait()
+    return code if code >= 0 else 128 - code
+
+
+def namespace(libc, flags, ready, mapped, argv):
+    # Below the supervisor: unshare, wait for the supervisor to write the ID
+    # maps from outside, then start the namespace's init.
+    if libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0:
+        return 125
+    if libc.unshare(flags) != 0:
+        return 125
+    os.write(ready, b"u")
+    if os.read(mapped, 1) != b"m":
+        return 125
+    lifeline, keep = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(keep)
+        os._exit(init(libc, lifeline, argv))
+    os.close(lifeline)
+    release_stdout()
+    return status(os.waitpid(pid, 0)[1])
+
+
+def write_maps(pid, caps):
+    uid, gid = os.geteuid(), os.getegid()
+    if caps & (1 << CAP_SETUID) and caps & (1 << CAP_SETGID):
+        # The identity map of every ID, so every file keeps its owner.
+        maps = (("uid_map", "0 0 2147483647\n"), ("gid_map", "0 0 2147483647\n"))
+    else:
+        maps = (("setgroups", "deny"), ("uid_map", f"{uid} {uid} 1\n"), ("gid_map", f"{gid} {gid} 1\n"))
+    for name, value in maps:
+        with open(f"/proc/{pid}/{name}", "w") as handle:
+            handle.write(value)
+
+
+def main():
+    budget = float(sys.argv[1])
+    argv = sys.argv[3:]
+    parent = os.getppid()
+    libc = ctypes.CDLL(None, use_errno=True)
+    # PR_SET_CHILD_SUBREAPER, then PR_SET_PDEATHSIG: the supervisor reaps the
+    # namespace's init however the process between them ends.
+    if libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+        return 125
+    if libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0) != 0:
+        return 125
+    if parent == 1 or os.getppid() != parent:
+        return 124
+    ruid, euid, suid = os.getresuid()
+    rgid, egid, sgid = os.getresgid()
+    if len({ruid, euid, suid}) != 1 or len({rgid, egid, sgid}) != 1:
+        return 125
+    caps = effective_caps()
+    flags = CLONE_NEWPID if caps & (1 << CAP_SYS_ADMIN) else CLONE_NEWUSER | CLONE_NEWPID
+    state = {"pid": None, "ended": False}
+
+    def end(_signum, _frame):
+        state["ended"] = True
+        if state["pid"] is not None:
+            try:
+                os.kill(state["pid"], signal.SIGKILL)
+            except OSError:
+                pass
+
+    signal.signal(signal.SIGTERM, end)
+    ready_r, ready_w = os.pipe()
+    mapped_r, mapped_w = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        os.close(ready_r)
+        os.close(mapped_w)
+        os._exit(namespace(libc, flags, ready_w, mapped_r, argv))
+    state["pid"] = pid
+    os.close(ready_w)
+    os.close(mapped_r)
+    if state["ended"]:
+        end(None, None)
+    release_stdout()
+    contained = os.read(ready_r, 1) == b"u"
+    if contained and flags & CLONE_NEWUSER:
+        try:
+            write_maps(pid, caps)
+        except OSError:
+            contained = False
+    if contained:
+        os.write(mapped_w, b"m")
+    else:
+        end(None, None)
+    os.close(mapped_w)
+    try:
+        code = status(os.waitpid(pid, 0)[1])
+    except ChildProcessError:
+        code = 125
+    if not reap_all(budget) or not contained:
+        return 125
+    if state["ended"]:
+        return 124
+    return code
+
+
+sys.exit(main())
+"""
+
+_HERMES_PROBE_FORKLESS = r"""
+import errno, os, resource, signal, sys
+
+
+def main():
+    uid, euid, egid = os.getuid(), os.geteuid(), os.getegid()
+    if euid <= 0:
+        return 125
+    if uid == 0:
+        try:
+            os.seteuid(0)
+            os.setgid(egid)
+            os.setuid(euid)
+        except OSError:
+            return 125
+    elif uid != euid:
+        return 125
+    if os.getuid() != euid or os.geteuid() != euid:
+        return 125
+    try:
+        resource.setrlimit(resource.RLIMIT_NPROC, (0, 0))
+    except (OSError, ValueError):
+        return 125
+    # The XNU limit checks the real UID. A kernel or host where it is not
+    # enforced must fail before running the registered hook.
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        if exc.errno != errno.EAGAIN:
+            return 125
+    else:
+        if pid == 0:
+            os._exit(125)
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        return 125
+    # Noninteractive bash reads BASH_ENV and imports exported functions
+    # before the registered script starts.
+    for name in tuple(os.environ):
+        if name in {"BASH_ENV", "ENV"} or name.startswith("BASH_FUNC_"):
+            os.environ.pop(name, None)
+    try:
+        os.execv(sys.argv[1], sys.argv[1:])
+    except OSError:
+        return 125
+
+
+sys.exit(main())
+"""
+
+
+def _run_hermes_execution_probe(argv: list[str]) -> tuple[int | None, bytes]:
+    """Run a registered Hermes command with bounded output and time.
+
+    Returns the exit code and stdout, or ``None`` for the exit code when the
+    command could not start, timed out, wrote more than the proof, left
+    stdout open past the pipe wait, or left descendants that could not be
+    ended. One byte more than the proof closes the pipe, so the hook's output
+    never accumulates in Doctor. Whatever the command started ends with it on
+    exit, overflow and timeout: on Linux the kernel ends every descendant
+    with the probe's PID namespace, also one in a session of its own; on macOS the probe's
+    session is killed after a forkless launcher has refused descendant
+    creation; on Windows its
+    kill-on-close job is terminated. A launcher that started a long-lived
+    child left it running, one more for each Doctor run (r104 W5b).
+    """
+    limit = len(_HERMES_EXECUTION_PROBE_RESPONSE)
+    windows = os.name == "nt"
+    creationflags = 0
+    command = list(argv)
+    supervised = False
+    lifeline: tuple[int, int] | None = None
+    if windows:
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) | getattr(
+            subprocess, "CREATE_SUSPENDED", 0x00000004
+        )
+    elif _HERMES_PROBE_UNIX_CONTAINMENT == "pidns":
+        if not sys.executable:
+            return None, b""
+        command = [
+            sys.executable, "-I", "-S", "-c", _HERMES_PROBE_SUPERVISOR,
+            str(_HERMES_EXECUTION_PROBE_SWEEP), "--", *argv,
+        ]
+        supervised = True
+    elif _HERMES_PROBE_UNIX_CONTAINMENT == "forkless":
+        if not sys.executable:
+            return None, b""
+        command = [sys.executable, "-I", "-S", "-c", _HERMES_PROBE_FORKLESS, *argv]
+        lifeline = os.pipe()
+    else:
+        return None, b""
+    try:
+        proc = subprocess.Popen(
+            command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            start_new_session=not windows, creationflags=creationflags,
+            pass_fds=(lifeline[1],) if lifeline is not None else (),
+        )
+    except (OSError, ValueError):
+        if lifeline is not None:
+            os.close(lifeline[0])
+            os.close(lifeline[1])
+        return None, b""
+    if lifeline is not None:
+        os.close(lifeline[1])
+    job = None
+    if windows:
+        from defenseclaw.tui.windows_process import WindowsJob
+
+        try:
+            # The kill-on-close job owns the suspended launcher before its
+            # first instruction runs, so nothing it starts escapes the job's
+            # termination; breakaway is refused. Then it resumes the launcher.
+            job = WindowsJob(proc.pid, allow_breakaway=False)
+        except (OSError, ValueError):
+            # A probe Doctor cannot contain never runs: it is still suspended.
+            with contextlib.suppress(OSError):
+                proc.kill()
+            with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                proc.wait(timeout=_HERMES_EXECUTION_PROBE_TREE_REAP)
+            proc.stdout.close()
+            return None, b""
+    try:
+        return _collect_hermes_execution_probe(
+            proc, job, limit, supervised=supervised, lifeline=lifeline[0] if lifeline is not None else None,
+        )
+    finally:
+        if job is not None:
+            job.close()
+        if lifeline is not None:
+            os.close(lifeline[0])
+
+
+def _hermes_probe_lifeline_closed(fd: int, wait: float) -> bool:
+    """Whether every inherited write end of the lifeline closed within ``wait``."""
+    deadline = time.monotonic() + wait
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            ready, _, _ = select.select([fd], [], [], remaining)
+            if ready and not os.read(fd, 4096):
+                return True
+        except (OSError, ValueError):
+            return False
+
+
+def _collect_hermes_execution_probe(
+    proc: subprocess.Popen, job, limit: int, *, supervised: bool = False, lifeline: int | None = None,
+) -> tuple[int | None, bytes]:
+    captured = bytearray()
+    overflow = threading.Event()
+
+    def drain() -> None:
+        fd = proc.stdout.fileno()
+        try:
+            while True:
+                chunk = os.read(fd, limit + 1 - len(captured))
+                if not chunk:
+                    return
+                captured.extend(chunk)
+                if len(captured) > limit:
+                    overflow.set()
+                    return
+        except OSError:
+            return
+        finally:
+            proc.stdout.close()
+
+    reader = threading.Thread(target=drain, name="hermes-execution-probe", daemon=True)
+    reader.start()
+
+    def kill_tree() -> bool:
+        """End the probe and everything it started; False when that is unproven."""
+        if job is not None:
+            try:
+                return job.terminate_sync(timeout=_HERMES_EXECUTION_PROBE_TREE_REAP)
+            except OSError:
+                with contextlib.suppress(OSError):
+                    proc.kill()
+                return False
+        if supervised:
+            # The supervisor ends the probe's namespace and reaps its init, so
+            # its exit means nothing is left.
+            if proc.poll() is None:
+                with contextlib.suppress(OSError):
+                    proc.send_signal(signal.SIGTERM)
+                try:
+                    proc.wait(timeout=_HERMES_EXECUTION_PROBE_TREE_REAP)
+                except subprocess.TimeoutExpired:
+                    with contextlib.suppress(OSError):
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    return False
+            # Killed by a signal (by the probe, say): what it supervised is unknown.
+            return proc.returncode >= 0 and proc.returncode != _HERMES_PROBE_NOT_CONTAINED
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        return True
+
+    deadline = time.monotonic() + _HERMES_EXECUTION_PROBE_TIMEOUT
+    returncode: int | None
+    while True:
+        try:
+            returncode = proc.wait(timeout=0.05)
+            break
+        except subprocess.TimeoutExpired:
+            if overflow.is_set() or time.monotonic() >= deadline:
+                kill_tree()
+                try:
+                    proc.wait(timeout=_HERMES_EXECUTION_PROBE_TREE_REAP)
+                except subprocess.TimeoutExpired:
+                    # A failed Job Object termination must never turn the
+                    # hard probe deadline into an unbounded leader wait.
+                    with contextlib.suppress(OSError):
+                        proc.kill()
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        proc.wait(timeout=_HERMES_EXECUTION_PROBE_TREE_REAP)
+                returncode = None
+                break
+    # The probe exited or was killed: end whatever it left running.
+    if not kill_tree():
+        returncode = None
+    reader.join(_HERMES_EXECUTION_PROBE_PIPE_WAIT)
+    if reader.is_alive() or overflow.is_set():
+        return None, bytes(captured[:limit])
+    if lifeline is not None and not _hermes_probe_lifeline_closed(lifeline, _HERMES_EXECUTION_PROBE_PIPE_WAIT):
+        # The forkless launcher or registered command still holds a stream.
+        return None, bytes(captured)
+    return returncode, bytes(captured)
+
+
+def _hermes_windows_execution_probe(check: WindowsHookCheck) -> WindowsHookCheck:
+    """Execute the exact active Windows target after the registration validator read it."""
+    if not check.healthy:
+        return check
+    returncode, stdout = _run_hermes_execution_probe(
+        [check.target, "hook", "--connector", "hermes", "--defenseclaw-execution-probe"],
+    )
+    if returncode == 0 and stdout == _HERMES_EXECUTION_PROBE_RESPONSE:
+        return check
+    return WindowsHookCheck(
+        "unexecutable", "registered Hermes command did not complete its active runtime execution probe",
+        check.command, check.target, check.raw_target,
+        "run 'defenseclaw setup hermes --yes --restart', then rerun 'defenseclaw doctor'",
+    )
 
 
 _CODEX_PROBE_TIMEOUT_STEP = "rerun defenseclaw doctor in a minute; Codex answers faster once the host is less busy"
@@ -6990,7 +7450,23 @@ def _check_hermes_hooks(
     search_path: str | None = None,
     pathext: str | None = None,
 ) -> None:
-    selected_config = config_path or hermes_config_path()
+    try:
+        current_config = hermes_config_path()
+    except ValueError as exc:
+        _emit(
+            "fail", _HERMES_HOOKS_LABEL,
+            f"Hermes active config path cannot be resolved: {exc}; live=false", r=r,
+            remediation="set HERMES_HOME to the home in use, then run 'defenseclaw setup hermes --yes --restart'",
+        )
+        return
+    selected_config = config_path or current_config
+    if selected_config != current_config:
+        _emit(
+            "fail", _HERMES_HOOKS_LABEL,
+            f"Hermes requested config {selected_config} differs from current config {current_config}; live=false",
+            r=r, remediation="run 'defenseclaw setup hermes --yes --restart' for the current HERMES_HOME",
+        )
+        return
     unsupported = hermes_profile_unsupported_reason(selected_config)
     if unsupported:
         _emit(
@@ -7001,6 +7477,11 @@ def _check_hermes_hooks(
         )
         return
     if (platform_name or os.name) == "nt":
+        if _hook_health_paths_from_lock(cfg, "hermes") != [current_config]:
+            _emit("fail", _HERMES_HOOKS_LABEL,
+                  f"Hermes lock does not bind its current effective config {current_config}; live=false", r=r,
+                  remediation="run 'defenseclaw setup hermes --yes --restart' for the current HERMES_HOME")
+            return
         _check_windows_native_hooks(
             cfg,
             "hermes",
@@ -7050,10 +7531,9 @@ def _check_devin_hooks(
 # substrings). The fallback paths mirror the Go source of truth in
 # ``internal/gateway/connector/hook_only.go`` (hermesConfigPath / cursorHooksPath
 # / devinHooksPath / opencodePluginPath); the gateway's
-# hook_contract_lock.json is consulted first and these are only the offline
-# fallback. Markers are matched as raw substrings (see _file_references_marker)
-# so the check stays format-agnostic: hermes is YAML, cursor/devin
-# are JSON, opencode is a flat ``.js`` plugin (existence + substring).
+# hook_contract_lock.json is consulted first. Hermes requires a lock for the
+# current HERMES_HOME and parses its YAML matrix and approvals. Other entries
+# retain offline fallbacks and marker checks.
 _HOOK_HEALTH_FALLBACK: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "hermes": (
         (os.path.join(".hermes", "config.yaml"),),
@@ -7255,9 +7735,8 @@ def _check_kiro_custom_default_agent(r: _DoctorResult) -> None:
 def _file_references_marker(path: str, markers: tuple[str, ...]) -> bool:
     """Report whether the file at ``path`` contains any ``markers`` substring.
 
-    Deliberately format-agnostic — no JSON/YAML parse — because these
-    connectors this serves store hook entries in different shapes: Hermes uses
-    YAML, Cursor and Devin use JSON, and OpenCode uses a flat ``.js`` plugin.
+    Deliberately format-agnostic for Cursor/Devin JSON and the OpenCode
+    ``.js`` plugin. Hermes has a structured read-back in _check_hook_health.
     Mirrors the Go self-heal guard's ``configFileReferencesHook`` (raw-bytes
     substring match) so doctor and the guard agree on what "the hook is
     installed" means. A missing/unreadable file reports ``False``.
@@ -8028,25 +8507,30 @@ def _hook_health_paths_from_lock(cfg, connector: str) -> list[str]:
     """Return the hook config path(s) the gateway actually wrote for
     ``connector``, read from ``hook_contract_lock.json``.
 
-    This is the authoritative source — exactly what Setup patched, captured
-    from ``HookConfigPathsForConnector`` / ``ResolvedConnectorLocations`` on
-    the Go side — so doctor watches the real files rather than guessing.
-    Returns ``[]`` when the lock file is absent/unreadable or carries no path
-    for the connector; the caller then falls back to the static map.
+    These paths are captured from Go's ``HookConfigPathsForConnector`` /
+    ``ResolvedConnectorLocations``. Hermes compares the receipt with the
+    current effective config path; other callers may use a static fallback.
     """
+    from defenseclaw.doctor_hooks import _InspectionError, _read_config
+
     data_dir = getattr(cfg, "data_dir", "") or ""
     if not data_dir:
         return []
     try:
-        with open(os.path.join(data_dir, "hook_contract_lock.json"), encoding="utf-8") as fh:
-            lock = json.load(fh)
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        lock = _read_config(os.path.join(data_dir, "hook_contract_lock.json"), "hook-lock")
+    except _InspectionError:
         return []
-    entry = (lock.get("connectors") or {}).get(connector) or {}
-    locations = entry.get("locations") or {}
+    connectors = lock.get("connectors")
+    entry = connectors.get(connector) if isinstance(connectors, dict) else None
+    if not isinstance(entry, dict):
+        return []
+    locations = entry.get("locations")
     if not isinstance(locations, dict):
         return []
-    return [str(p) for p in (locations.get("hook_config_paths") or []) if p]
+    paths = locations.get("hook_config_paths")
+    if not isinstance(paths, list) or not all(isinstance(path, str) and path for path in paths):
+        return []
+    return paths
 
 
 def _hook_runtime_paths_from_lock(cfg, connector: str) -> list[str]:
@@ -8568,13 +9052,9 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
     Covers active generic-hook connectors that previously got no Services hook
     row at all, so an operator
     could not tell from doctor whether their hooks were installed (D4).
-    Resolves the hook file from ``hook_contract_lock.json`` first (what the
-    gateway actually wrote), then the static fallback map, and
-    checks it for a DefenseClaw registration. Cursor and Kiro use the parsed
-    registration check when the lock records their paths, because Windows
-    encodes the native hook command in PowerShell. (The Connectors section's
-    ``_check_hook_contract_lock`` validates contract/version drift — a
-    different concern from "does the hook file exist and reference us".)
+    Hermes binds the current config path to the lock, then checks its matrix,
+    approvals and sealed execution proof. Other hooks use their lock path or
+    static fallback. The Connectors section checks contract/version drift.
     """
     fallback = _HOOK_HEALTH_FALLBACK.get(connector)
     if fallback is None:
@@ -8582,13 +9062,29 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
     rel_candidates, markers = fallback
     label = _HOOK_HEALTH_LABELS.get(connector, f"{connector} hooks")
     home = os.path.expanduser("~")
-    # Prefer the lock-file's recorded paths; fall back to the static map.
+    # Hermes must read the path the agent resolves now. A lock for a former
+    # HERMES_HOME cannot prove the active registration, even if it still runs.
     locked_paths = _hook_health_paths_from_lock(cfg, connector)
-    candidates = locked_paths
+    if connector == "hermes":
+        try:
+            current_config = hermes_config_path()
+        except ValueError as exc:
+            _emit(
+                "fail", label, f"Hermes active config path cannot be resolved: {exc}; live=false", r=r,
+                remediation="set HERMES_HOME to the home in use, then run 'defenseclaw setup hermes --yes --restart'",
+            )
+            return
+        if locked_paths != [current_config]:
+            _emit("fail", label,
+                  f"Hermes lock does not bind its current effective config {current_config}; live=false", r=r,
+                  remediation="run 'defenseclaw setup hermes --yes --restart' for the current HERMES_HOME")
+            return
+        candidates = [current_config]
+    else:
+        # Other connectors retain their existing lock-path and fallback rules.
+        candidates = locked_paths
     if not candidates:
-        if connector == "hermes":
-            candidates = [hermes_config_path()]
-        elif connector == "opencode":
+        if connector == "opencode":
             # The official custom config directory is also a plugin search
             # root. Match Setup/discovery instead of silently inspecting the
             # unrelated default home when the lock is unavailable.
@@ -8599,6 +9095,12 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
             candidates = [os.path.join(home, rel) for rel in rel_candidates]
     present = [p for p in candidates if os.path.isfile(p)]
     if not present:
+        if connector == "hermes":
+            _emit(
+                "fail", label, f"Hermes active hook registration is missing at {candidates[0]}; live=false", r=r,
+                remediation="run 'defenseclaw setup hermes --yes --restart' for the current HERMES_HOME",
+            )
+            return
         if connector == "opencode" and (loose := opencode_writable_plugin_folder(candidates)):
             # The gateway refuses to publish the plugin into a folder other
             # accounts can write, and stops; the other rows only showed the
@@ -8618,7 +9120,8 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
         _emit("fail", label, edited, r=r, remediation=edited.repair)
         return
     for path in present:
-        registered = _file_references_marker(path, markers)
+        # The Hermes branch below parses the bounded YAML matrix directly.
+        registered = connector == "hermes" or _file_references_marker(path, markers)
         if not registered and connector in ("cursor", "kiro") and locked_paths:
             from defenseclaw.hook_integrity import _registers_defenseclaw_hooks
 
@@ -8661,6 +9164,11 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                         )
                 _check_opencode_later_plugins(cfg, path, r)
             elif connector == "hermes":
+                problem = _hermes_registered_execution_problem(cfg, path)
+                if problem:
+                    _emit("fail", label, problem, r=r,
+                          remediation="run 'defenseclaw setup hermes --yes --restart', then rerun 'defenseclaw doctor'")
+                    return
                 if r.list_processes and _hermes_host_running() is False:
                     _emit(
                         "pass",
@@ -8715,6 +9223,111 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
         "hook file exists but does not reference DefenseClaw: " + ", ".join(present),
         r=r,
     )
+
+
+def _hermes_registered_execution_problem(cfg, config_path: str) -> str:
+    """Read Hermes' active matrix and execute its sealed command as a bounded probe."""
+    from defenseclaw.doctor_hooks import _HERMES_REQUIRED_HOOKS, _InspectionError, _read_config
+    from defenseclaw.hook_integrity import _locked_hook_scripts
+
+    try:
+        current_config = hermes_config_path()
+    except ValueError:
+        return "Hermes current effective config path cannot be resolved"
+    if config_path != current_config:
+        return f"Hermes config {config_path} differs from current effective config {current_config}"
+
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    expected = os.path.join(data_dir, "hooks", "hermes-hook.sh")
+    scripts, digests = _locked_hook_scripts(cfg, "hermes")
+    if not data_dir or [os.fspath(script) for script in scripts] != [expected]:
+        return f"Hermes execution probe for {config_path} has no exact sealed hook script; live=false; run setup"
+    digest = digests.get("hermes-hook.sh", "")
+    try:
+        config_stat = os.lstat(config_path)
+        script_stat = os.lstat(expected)
+        if not stat.S_ISREG(config_stat.st_mode) or config_stat.st_size > 2 * 1024 * 1024:
+            return "Hermes active registration is not a bounded regular file"
+        if not stat.S_ISREG(script_stat.st_mode) or not script_stat.st_mode & 0o111:
+            return "Hermes registered hook is not a regular executable file"
+        if script_stat.st_size > 4 * 1024 * 1024:
+            return "Hermes registered hook exceeds the bounded script size"
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        with os.fdopen(os.open(expected, flags), "rb") as script_file:
+            opened = os.fstat(script_file.fileno())
+            if not os.path.samestat(script_stat, opened):
+                return "Hermes registered hook changed during inspection"
+            script_body = script_file.read(4 * 1024 * 1024 + 1)
+            after = os.fstat(script_file.fileno())
+        if len(script_body) > 4 * 1024 * 1024 or not os.path.samestat(opened, after) or opened.st_size != after.st_size:
+            return "Hermes registered hook changed or exceeded the bounded script size"
+        actual_digest = "sha256:" + hashlib.sha256(script_body).hexdigest()
+        if not hmac.compare_digest(digest, actual_digest):
+            return "Hermes registered hook has no matching sealed digest"
+        document = _read_config(config_path, "hermes")
+    except (OSError, UnicodeError, _InspectionError) as exc:
+        return f"Hermes active registration or hook cannot be read: {type(exc).__name__}"
+    hooks = document.get("hooks") if isinstance(document, dict) else None
+    if not isinstance(hooks, dict):
+        return "Hermes active registration has no hooks table"
+    registered_commands: set[str] = set()
+    for event, matcher in _HERMES_REQUIRED_HOOKS.items():
+        entries = hooks.get(event)
+        if not isinstance(entries, list):
+            return f"Hermes active registration is missing {event}"
+        owned = []
+        for entry in entries:
+            command = entry.get("command") if isinstance(entry, dict) else None
+            if not isinstance(command, str) or "hermes-hook.sh" not in command:
+                continue
+            try:
+                argv = shlex.split(command)
+            except ValueError:
+                argv = []
+            if argv != [expected]:
+                return f"Hermes {event} does not run the sealed hook command"
+            owned.append(entry)
+            registered_commands.add(command)
+        if len(owned) != 1:
+            return f"Hermes {event} has {len(owned)} registered DefenseClaw commands; expected one"
+        entry = owned[0]
+        if type(entry.get("timeout")) is not int or entry["timeout"] != 30:
+            return f"Hermes {event} timeout differs from the registered contract"
+        if entry.get("matcher") != matcher:
+            return f"Hermes {event} matcher differs from the registered contract"
+    for event, entries in hooks.items():
+        if event not in _HERMES_REQUIRED_HOOKS and isinstance(entries, list) and any(
+            isinstance(entry, dict) and "hermes-hook.sh" in str(entry.get("command", ""))
+            for entry in entries
+        ):
+            return f"unexpected Hermes event {event} registers a DefenseClaw hook"
+    if len(registered_commands) != 1:
+        return "Hermes events do not use one exact approved hook command"
+    command = registered_commands.pop()
+    allowlist_path = os.path.join(os.path.dirname(config_path), "shell-hooks-allowlist.json")
+    try:
+        allowlist = _read_config(allowlist_path, "hermes-allowlist")
+    except _InspectionError as exc:
+        return f"Hermes hook approvals cannot be read at {allowlist_path}: {exc.detail}"
+    approvals = allowlist.get("approvals")
+    if not isinstance(approvals, list):
+        return f"Hermes hook approvals are missing at {allowlist_path}"
+    approved = {
+        entry["event"] for entry in approvals
+        if isinstance(entry, dict) and isinstance(entry.get("event"), str) and entry.get("command") == command
+    }
+    for event in _HERMES_REQUIRED_HOOKS:
+        if event not in approved:
+            return f"Hermes hook approval for {event} is missing at {allowlist_path}"
+    probe_argv = [expected, "--defenseclaw-execution-probe"]
+    if sys.platform == "darwin":
+        probe_argv.append("--forkless")
+    returncode, stdout = _run_hermes_execution_probe(probe_argv)
+    if returncode is None:
+        return "Hermes registered hook execution probe could not run"
+    if returncode != 0 or stdout != _HERMES_EXECUTION_PROBE_RESPONSE:
+        return f"Hermes registered hook execution probe failed (exit {returncode})"
+    return ""
 
 
 def _check_amp_native_policy_surfaces(cfg, r: _DoctorResult) -> None:
@@ -14957,6 +15570,8 @@ def _check_hook_contract_lock(
         )
         if connector == "hermes":
             native_runtime = _hermes_idle_native_check(native_runtime, r)
+            if os.name == "nt":
+                native_runtime = _hermes_windows_execution_probe(native_runtime)
     if isinstance(locations, dict):
         workspace_dir = str(locations.get("workspace_dir") or "").strip()
         hook_paths = [str(v) for v in locations.get("hook_config_paths", []) if v]

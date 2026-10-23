@@ -687,11 +687,11 @@ func (set *guardrailProfileSet) profileCovers(a, b string, connectors []string) 
 		return false
 	}
 	for _, name := range connectors {
-		hookB, inspectB := hookModeForConfig(cb, name) == "action", inspectMode(cb, name) == "action"
+		hookB, inspectB := cb.HookModeForConnector(name) == "action", inspectMode(cb, name) == "action"
 		if !hookB && !inspectB {
 			continue
 		}
-		if (hookB && hookModeForConfig(ca, name) != "action") || (inspectB && inspectMode(ca, name) != "action") {
+		if (hookB && ca.HookModeForConnector(name) != "action") || (inspectB && inspectMode(ca, name) != "action") {
 			return false
 		}
 		if effectiveRulePackKey(ca, name) != effectiveRulePackKey(cb, name) ||
@@ -735,7 +735,7 @@ func (set *guardrailProfileSet) profileSandbox(name string) *config.OpenShellAdm
 // configuration.
 func (set *guardrailProfileSet) profileStricter(a, b, connectorName string) bool {
 	ca, cb := set.profileConfig(a), set.profileConfig(b)
-	modeA, modeB := hookModeForConfig(ca, connectorName), hookModeForConfig(cb, connectorName)
+	modeA, modeB := ca.HookModeForConnector(connectorName), cb.HookModeForConnector(connectorName)
 	if modeA != modeB {
 		return modeA == "action"
 	}

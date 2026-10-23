@@ -62,6 +62,7 @@ const (
 	hermesAllowlistLogicalName      = "shell-hooks-allowlist.json"
 	hermesAllowlistFileName         = "shell-hooks-allowlist.json"
 	hermesAllowlistOwnerField       = "defenseclaw_managed"
+	hermesAllowlistMaxBytes         = 2 << 20
 	hermesDirectNativeStateFileName = "hermes-direct-native-state.json"
 	hermesDirectNativeStateVersion  = 1
 	hermesDirectNativePending       = "pending_reload"
@@ -1198,21 +1199,26 @@ func (c *hookOnlyConnector) ownedHookContractPresent(opts SetupOpts) (bool, erro
 		hermesConfig := ""
 		if c.name == "hermes" {
 			// Without a resolved config the generic reader finds no path
-			// and reports the hooks present.
+			// and reports the hooks present; an unresolved home is an
+			// error, and more than one active config proves nothing.
 			var err error
 			if hermesConfig, err = hermesVerifiedConfigPath(opts); err != nil {
 				return false, err
 			}
+			if len(HookConfigPathsForConnector(c, opts)) != 1 {
+				return false, nil
+			}
 		}
 		present, err := ownedHooksPresentInConfig(c, opts)
-		if err != nil || !present || c.name != "hermes" || !opts.ManagedEnterprise {
+		if err != nil || !present || c.name != "hermes" {
 			return present, err
 		}
-		// Hermes runs a shell hook only once it is approved, so a managed
-		// registration includes DefenseClaw's approvals: a user who empties
-		// the allowlist and declines the prompt otherwise runs every tool
-		// call unchecked while verify passes and the guardian repairs
-		// nothing.
+		if !hermesRegisteredCommandExecutable(opts, c.hookCommand(opts)) {
+			return false, nil
+		}
+		// Hermes runs a shell hook only once it is approved. Both per-user
+		// and managed verification must read back every required approval;
+		// an emptied allowlist makes the registration ineffective.
 		command := hermesConfiguredHookCommand(c.hookCommand(opts), opts.HookExecutable)
 		return hermesOwnedApprovalsPresent(filepath.Join(filepath.Dir(hermesConfig), hermesAllowlistFileName), command)
 	}
@@ -3577,7 +3583,7 @@ func hermesHookExecutablePath(hookScript, hookExecutable string) string {
 }
 
 func readHermesAllowlist(path string) (map[string]interface{}, error) {
-	data, err := os.ReadFile(path)
+	data, err := safefile.ReadRegularFileBounded(path, hermesAllowlistMaxBytes)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return map[string]interface{}{"approvals": []interface{}{}}, nil
@@ -3607,12 +3613,6 @@ func readHermesAllowlist(path string) (map[string]interface{}, error) {
 // hermesOwnedApprovalsPresent reports whether the allowlist holds
 // DefenseClaw's approval of command for every required Hermes event.
 func hermesOwnedApprovalsPresent(path, command string) (bool, error) {
-	if _, err := os.Stat(path); err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, err
-	}
 	document, err := readHermesAllowlist(path)
 	if err != nil {
 		return false, err

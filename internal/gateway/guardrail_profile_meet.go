@@ -183,7 +183,7 @@ func (set *guardrailProfileSet) meetSettingsFor(members []string, connectorName 
 	blockRank, alertRank, hiltRank := 0, 0, 0
 	for _, member := range members {
 		cfg := set.profileConfig(member)
-		hookBlock := hookModeForConfig(cfg, connectorName) == "action"
+		hookBlock := cfg.HookModeForConnector(connectorName) == "action"
 		inspectBlock := inspectMode(cfg, connectorName) == "action"
 		_, alert := guardrailThresholdRanks(resolveThresholds(cfg, connectorName))
 		if alertRank == 0 || alert < alertRank {

@@ -56,8 +56,8 @@
     "/usr/local/lib/defenseclaw/hooks/hermes-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 7736,
-      "sha256": "6c8c0c7f70f7a389461c66d08b8d26172133cf605e8b43ff74557c679080a81b"
+      "size": 8006,
+      "sha256": "5be2a29eb28b520cac4854274efe444b011aae6de8bd55594d7ec97c4bf6519f"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",

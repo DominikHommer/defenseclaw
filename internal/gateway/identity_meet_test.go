@@ -82,7 +82,7 @@ func TestProfileMeetTable(t *testing.T) {
 				t.Fatalf("meet named %q", name)
 			}
 			cfg := set.profileConfig(name)
-			if got := hookModeForConfig(cfg, tc.connector); got != tc.mode {
+			if got := cfg.HookModeForConnector(tc.connector); got != tc.mode {
 				t.Errorf("hook mode %q, want %q", got, tc.mode)
 			}
 			if got := inspectMode(cfg, tc.connector); got != tc.mode {
@@ -102,10 +102,10 @@ func TestProfileMeetTable(t *testing.T) {
 			// The meet is never weaker than a member that blocks.
 			for _, member := range []string{"a", "b"} {
 				m := set.profileConfig(member)
-				if hookModeForConfig(m, tc.connector) == "action" {
+				if m.HookModeForConnector(tc.connector) == "action" {
 					mb, _ := guardrailThresholdRanks(resolveThresholds(m, tc.connector))
 					cb, _ := guardrailThresholdRanks(resolveThresholds(cfg, tc.connector))
-					if hookModeForConfig(cfg, tc.connector) != "action" || cb > mb {
+					if cfg.HookModeForConnector(tc.connector) != "action" || cb > mb {
 						t.Errorf("the meet blocks less than %s", member)
 					}
 				}
