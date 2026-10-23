@@ -358,9 +358,9 @@ func syncEnterpriseHookManagedMachineEnrollments(
 
 	currentCursor, cursorActive, err := enterpriseHookCursorPolicyTargetsReader()
 	if err != nil && cfg.StandaloneEnterprise() && configured["cursor"] {
-		// The protected state can outlive a deleted adapter. Restore only
-		// that authenticated adapter, then read its enrollment before any
-		// pre-sync narrowing can publish a smaller target set.
+		// The protected state can outlive a deleted adapter or hooks.json.
+		// Restore its registration from authenticated state, then read its
+		// enrollment before pre-sync can publish a smaller target set.
 		restored, restoreErr := enterpriseHookCursorPolicyRestorer(codexOpts.HookBinary)
 		if restoreErr != nil {
 			return fmt.Errorf("restore configured Cursor machine policy: %w", errors.Join(err, restoreErr))
