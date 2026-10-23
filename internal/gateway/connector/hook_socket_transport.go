@@ -62,15 +62,15 @@ defenseclaw_hook_socket_trusted() {
 // point and follows the hook's fail mode. The rendered TCP hook contains
 // none of this. @GUARD@ is the standalone Hermes foreign-hook guard
 // (shellHookForeignGuard), or nothing: it runs after the trust functions it
-// uses and before the socket checks, because a missing or untrusted socket
-// ends the hook through fail_unreachable, which allows under fail mode open.
+// uses and before the socket checks. A missing socket follows the outage
+// mode; a failed socket trust check blocks through fail_response.
 // The guard's check denies a guarded connector whose session the gateway
 // cannot answer for, in every fail mode (GAP-0354).
 const shellHookSocketTransportBlock = shellHookSocketTrustFunctions + `@GUARD@if [ ! -e "$DEFENSECLAW_HOOK_SOCKET" ] && [ ! -L "$DEFENSECLAW_HOOK_SOCKET" ]; then
   fail_unreachable "` + shellManagedGatewayStoppedText + `"
 fi
 if ! defenseclaw_hook_socket_trusted; then
-  fail_unreachable "the DefenseClaw hook socket or its directory is not owned by root or the gateway account (enterprise_managed_gateway_peer_unverified)"
+  fail_response "the DefenseClaw hook socket or its directory is not owned by root or the gateway account (enterprise_managed_gateway_peer_unverified)"
 fi
 API_TOKEN=
 @FACTS@

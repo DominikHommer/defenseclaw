@@ -207,7 +207,7 @@ func TestOnlyToolCallsOfNativeHooksHaveTheAnswerBudget(t *testing.T) {
 
 // A gateway that answers 429 (too busy) is sent the call again only while
 // a resend can still be answered within the budget (GAP-0205 kept within
-// GAP-0155): the call is blocked within the budget, not after four resends.
+// GAP-0155): the answered 429 blocks within the budget, not after four resends.
 func TestBusyResendsEndWithinTheAnswerBudget(t *testing.T) {
 	shortAnswerBudget(t, 1500*time.Millisecond)
 	var calls atomic.Int32
@@ -223,8 +223,8 @@ func TestBusyResendsEndWithinTheAnswerBudget(t *testing.T) {
 	if got := calls.Load(); got < 1 || got > 2 {
 		t.Fatalf("the gateway saw %d calls, want the resends that fit the budget (1 or 2)", got)
 	}
-	if !blocked(result) || !strings.Contains(result.stdout+result.stderr, managedGatewayNoAnswerReason) {
-		t.Fatalf("code=%d stdout=%q stderr=%q, want a block naming the slow gateway", result.code, result.stdout, result.stderr)
+	if !blocked(result) || !strings.Contains(result.stdout+result.stderr, "gateway returned HTTP 429") {
+		t.Fatalf("code=%d stdout=%q stderr=%q, want a block naming HTTP 429", result.code, result.stdout, result.stderr)
 	}
 }
 

@@ -146,6 +146,11 @@ func renderNoAnswer(opts Options, sp spec, failMode string) (stdout, stderr []by
 	// The rendered answer already carries any fail-open warning.
 	logged.Stderr = io.Discard
 	logFailure = func() {
+		if managedNativeDecision(logged) && logged.answeredErrorStatus != 0 {
+			logged.FailMode = "closed"
+			logHookFailure(logged, sp, answeredErrorReason(logged), "response", "closed", true)
+			return
+		}
 		if logged.ManagedEnterprise {
 			logHookFailure(logged, sp, managedGatewayNoAnswerReason, "transport", failMode,
 				logged.StrictAvailability || failMode == "closed")
@@ -176,11 +181,9 @@ func (w *answerWatchdog) adopt(opts *Options, sp spec, failMode string) {
 	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = stdout, stderr, code, logFailure
 }
 
-// closeForBusyGateway makes the watchdog's answer the closed one of a call
-// the gateway answered 429 (opts.gatewayBusy): a deadline that passes while
-// the call waits to resend, or on a resend, is no outage. Safe on a nil
-// watchdog.
-func (w *answerWatchdog) closeForBusyGateway(opts Options, sp spec) {
+// closeForAnsweredError makes the watchdog's answer the closed response of a
+// call the gateway already answered with an HTTP error. Safe on a nil watchdog.
+func (w *answerWatchdog) closeForAnsweredError(opts Options, sp spec) {
 	if w == nil {
 		return
 	}
