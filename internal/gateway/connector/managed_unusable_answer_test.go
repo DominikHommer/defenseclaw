@@ -31,14 +31,16 @@ import (
 // successful gateway answer that carries no usable verdict (no action, an
 // unknown one, a block without a directive or with one that does not deny),
 // with DEFENSECLAW_FAIL_MODE=open in the environment. The allow and alert
-// answers of observe mode still let the call run.
+// answers of observe mode still let the call run. r104 W8 review P2 adds
+// Claude Code and Codex.
 func TestManagedStandaloneShellHooksBlockAnUnusableAnswer(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq is required to run the shell hooks")
 	}
 	for _, conn := range []Connector{
 		NewHermesConnector(), NewKiroConnector(), NewCursorConnector(),
-		NewDevinConnector(), NewAntigravityConnector(),
+		NewDevinConnector(), NewAntigravityConnector(), NewClaudeCodeConnector(),
+		NewCodexConnector(),
 	} {
 		hook := hookArgvConnectorCase(t, conn.Name())
 		for _, answer := range []struct {
@@ -171,7 +173,8 @@ func TestPerUserShellHooksHonorClosedOnAnUnusableAnswer(t *testing.T) {
 // gateway outage (here the stopped service: no hook socket). A rate limit
 // (HTTP 429 after the resends, or a resend that fails after a 429), a 5xx,
 // an unusable answer and input too large to inspect are no outage and block,
-// as in the native hook runner.
+// as in the native hook runner. r104 W8 review P2: Claude Code and Codex
+// let a 4xx, a 429 and an unusable answer through in open.
 func TestManagedStandaloneShellHooksOpenOnlyForAnOutage(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq is required to run the shell hooks")
@@ -187,7 +190,8 @@ func TestManagedStandaloneShellHooksOpenOnlyForAnOutage(t *testing.T) {
 	rateLimited := `{"error":"rate_limited","reason":"enterprise_managed_rate_limited","retry_after_seconds":1}`
 	for _, conn := range []Connector{
 		NewHermesConnector(), NewKiroConnector(), NewCursorConnector(),
-		NewDevinConnector(), NewAntigravityConnector(),
+		NewDevinConnector(), NewAntigravityConnector(), NewClaudeCodeConnector(),
+		NewCodexConnector(),
 	} {
 		hook := hookArgvConnectorCase(t, conn.Name())
 		for _, tc := range []struct {
