@@ -968,10 +968,12 @@ func TestHookConfigGuard_DoesNotReportRepairWhenClaudePolicyStillDisablesHooks(t
 		t.Fatalf("restore disabled Claude settings: %v", err)
 	}
 
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(hookGuardSetupTimeout + 5*time.Second)
 	for {
 		guard.mu.Lock()
-		failure := guard.lastPolicyFailure
+		// An inactive effective policy can fail before Setup or during its
+		// post-Setup verification. Both paths must retain the exact source.
+		failure := guard.lastPolicyFailure + "\n" + guard.lastHealFailure
 		guard.mu.Unlock()
 		if strings.Contains(failure, "disableAllHooks=true") && strings.Contains(failure, settingsPath) {
 			break
