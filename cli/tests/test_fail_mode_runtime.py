@@ -116,6 +116,7 @@ def _write_current_runtime(cfg: SimpleNamespace, home: Path, modes: dict[str, st
         script_path = hook_dir / script_name
         script_body = ("\n".join(_HOOK_FAIL_MODE_LINES[f"{script_name}/{mode}"]) + "\n").encode()
         script_path.write_bytes(script_body)
+        script_path.chmod(0o700)
         config_path = home / (".claude/settings.json" if name == "claudecode" else ".codex/managed_config.toml")
         entries[name] = {
             "connector": name,
