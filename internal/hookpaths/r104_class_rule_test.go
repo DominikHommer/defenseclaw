@@ -252,6 +252,29 @@ func TestR104ActionWindowsJoinPathAssignment(t *testing.T) {
 	}
 }
 
+func TestR104ActionWindowsUninspectedScripts(t *testing.T) {
+	const cwd = `C:\Users\alice\project`
+	const home = `C:\Users\alice`
+	for _, tc := range []struct {
+		command string
+		blocked bool
+	}{
+		{`. C:\Users\alice\outside.ps1`, true},
+		{`source C:\Users\alice\outside.ps1`, true},
+		{`C:\Users\alice\outside.ps1`, true},
+		{`.\local.ps1`, true},
+		{`cmd /c C:\Users\alice\outside.cmd`, true},
+		{`python C:\Users\alice\outside.py`, true},
+		{`python -c "open('C:/Users/alice/.ssh/authorized_keys','w').write('x')"`, true},
+		{`node C:\Users\alice\outside.js`, true},
+		{`Get-Content C:\Users\alice\project\report.txt`, false},
+	} {
+		if got := ActionCommandDecision(tc.command, cwd, home) != ""; got != tc.blocked {
+			t.Errorf("%q blocked=%t, want %t", tc.command, got, tc.blocked)
+		}
+	}
+}
+
 func TestR104ActionBoundedFunctionAndProcessInputs(t *testing.T) {
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
