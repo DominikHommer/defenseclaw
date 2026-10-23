@@ -54,10 +54,10 @@ func TestAgentIdentitiesRecordUPNAndSubagentsAcrossTheV9Upgrade(t *testing.T) {
 		Connector: "codex", MachineHash: "m", FirstSeen: t0, LastSeen: t0, LastSessionID: "s1", SessionsSeen: 1, SessionIDs: []string{"s1"},
 	}
 	subagents := []AgentIdentitySubagent{
-		{AgentID: carol.AgentID, InstanceID: "ais-00000000000000b2", Seen: t0.Add(2 * time.Second)},
-		{AgentID: carol.AgentID, InstanceID: "ais-00000000000000a1", Seen: t0.Add(time.Second)},
+		{AgentID: carol.AgentID, InstanceID: "ais-00000000000000b2", FirstSeen: t0.Add(2 * time.Second), LastSeen: t0.Add(2 * time.Second)},
+		{AgentID: carol.AgentID, InstanceID: "ais-00000000000000a1", FirstSeen: t0.Add(time.Second), LastSeen: t0.Add(time.Second)},
 		// An identity the store has no row for gets none.
-		{AgentID: "agt-0000000000000099", InstanceID: "ais-0000000000000099", Seen: t0},
+		{AgentID: "agt-0000000000000099", InstanceID: "ais-0000000000000099", FirstSeen: t0, LastSeen: t0},
 	}
 	if err := st.UpsertAgentIdentityBatch(ctx, []AgentIdentityRecord{carol}, nil, subagents); err != nil {
 		t.Fatal(err)
@@ -67,7 +67,7 @@ func TestAgentIdentitiesRecordUPNAndSubagentsAcrossTheV9Upgrade(t *testing.T) {
 	again := carol
 	again.UPN, again.SessionIDs, again.SessionsSeen, again.LastSeen = "", nil, 0, t0.Add(time.Hour)
 	if err := st.UpsertAgentIdentityBatch(ctx, []AgentIdentityRecord{again}, nil,
-		[]AgentIdentitySubagent{{AgentID: carol.AgentID, InstanceID: "ais-00000000000000a1", Seen: t0.Add(time.Hour)}}); err != nil {
+		[]AgentIdentitySubagent{{AgentID: carol.AgentID, InstanceID: "ais-00000000000000a1", FirstSeen: t0.Add(time.Hour), LastSeen: t0.Add(time.Hour)}}); err != nil {
 		t.Fatal(err)
 	}
 	rows, _, err = st.ListAgentIdentities(ctx, AgentIdentityFilter{})
@@ -106,5 +106,44 @@ func TestAgentIdentitiesRecordUPNAndSubagentsAcrossTheV9Upgrade(t *testing.T) {
 	}
 	if rows, _, err = st.ListAgentIdentities(ctx, AgentIdentityFilter{}); err != nil || rows[0].SubagentsSeen != 2 {
 		t.Fatalf("count after the prune = %+v, err %v; want 2", rows, err)
+	}
+}
+
+func TestAgentIdentitySubagentsOrderByFirstSeenAndRetainByLastSeen(t *testing.T) {
+	st, err := NewInventoryStore(filepath.Join(t.TempDir(), "inventory.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	t0 := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
+	const (
+		agentID = "agt-00000000000000c1"
+		firstID = "ais-00000000000000a1"
+		lastID  = "ais-00000000000000b2"
+	)
+	identity := AgentIdentityRecord{AgentID: agentID, UserID: "u1", Connector: "codex", MachineHash: "m", FirstSeen: t0, LastSeen: t0}
+	subagents := []AgentIdentitySubagent{
+		{AgentID: agentID, InstanceID: firstID, FirstSeen: t0, LastSeen: t0.Add(3 * time.Second)},
+		{AgentID: agentID, InstanceID: lastID, FirstSeen: t0.Add(time.Second), LastSeen: t0.Add(time.Second)},
+	}
+	if err := st.UpsertAgentIdentityBatch(ctx, []AgentIdentityRecord{identity}, nil, subagents); err != nil {
+		t.Fatal(err)
+	}
+	rows, _, err := st.ListAgentIdentities(ctx, AgentIdentityFilter{})
+	if err != nil || len(rows) != 1 || rows[0].SubagentsSeen != 2 || rows[0].LastSubagentID != lastID {
+		t.Fatalf("stored identities = %+v, err %v; want two sub-agents, last %s", rows, err, lastID)
+	}
+	var firstAt, lastAt string
+	if err := st.db.QueryRowContext(ctx, `SELECT first_seen, last_seen FROM agent_identity_subagents WHERE agent_id = ? AND instance_id = ?`,
+		agentID, firstID).Scan(&firstAt, &lastAt); err != nil {
+		t.Fatal(err)
+	}
+	if firstAt != formatAgentIdentityTime(t0) || lastAt != formatAgentIdentityTime(t0.Add(3*time.Second)) {
+		t.Fatalf("first sub-agent sighting range = %q..%q; want %q..%q", firstAt, lastAt,
+			formatAgentIdentityTime(t0), formatAgentIdentityTime(t0.Add(3*time.Second)))
+	}
+	if removed, err := st.PruneAgentIdentitySessions(ctx, t0.Add(2*time.Second)); err != nil || removed != 1 {
+		t.Fatalf("prune removed %d rows, err %v; want only the inactive sub-agent", removed, err)
 	}
 }

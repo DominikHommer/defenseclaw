@@ -87,12 +87,14 @@ type AgentIdentityRecord struct {
 	LastSubagentID string `json:"last_subagent_id,omitempty"`
 }
 
-// AgentIdentitySubagent is one sighting of a sub-agent instance of an
-// agent identity.
+// AgentIdentitySubagent is the first and last sightings of a sub-agent
+// instance in a batch. FirstSeen orders distinct instances; LastSeen keeps
+// an active instance in the deduplication table during retention.
 type AgentIdentitySubagent struct {
 	AgentID    string
 	InstanceID string
-	Seen       time.Time
+	FirstSeen  time.Time
+	LastSeen   time.Time
 }
 
 // agentIdentityBatchSessionCap bounds the session ids a batch names. A
@@ -373,24 +375,31 @@ func (s *InventoryStore) UpsertAgentIdentityBatch(
 }
 
 // upsertAgentIdentitySubagents counts each sub-agent instance of a stored
-// agent identity once, oldest sighting first, so the last one counted is the
-// newest. A sub-agent of an identity the store has no row for is dropped:
-// the hooks that report it record the identity in the same batch.
+// agent identity once, oldest first sighting first, so the last one counted
+// is the newest distinct instance. A sub-agent of an identity the store has
+// no row for is dropped: the hooks that report it record the identity in the
+// same batch.
 func upsertAgentIdentitySubagents(ctx context.Context, tx *sql.Tx, subagents []AgentIdentitySubagent) error {
 	subagents = slices.Clone(subagents)
-	slices.SortStableFunc(subagents, func(a, b AgentIdentitySubagent) int { return a.Seen.Compare(b.Seen) })
+	slices.SortStableFunc(subagents, func(a, b AgentIdentitySubagent) int { return a.FirstSeen.Compare(b.FirstSeen) })
 	for _, sub := range subagents {
 		if sub.AgentID == "" || sub.InstanceID == "" {
 			continue
 		}
-		seen := sub.Seen
-		if seen.IsZero() {
-			seen = time.Now()
+		first, last := sub.FirstSeen, sub.LastSeen
+		if last.IsZero() {
+			last = first
 		}
-		at := formatAgentIdentityTime(seen)
+		if last.IsZero() {
+			last = time.Now()
+		}
+		if first.IsZero() || first.After(last) {
+			first = last
+		}
+		firstAt, lastAt := formatAgentIdentityTime(first), formatAgentIdentityTime(last)
 		inserted, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO agent_identity_subagents (agent_id, instance_id, first_seen, last_seen)
 			SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM agent_identities WHERE agent_id = ?)`,
-			sub.AgentID, sub.InstanceID, at, at, sub.AgentID)
+			sub.AgentID, sub.InstanceID, firstAt, lastAt, sub.AgentID)
 		if err != nil {
 			return err
 		}
@@ -399,8 +408,8 @@ func upsertAgentIdentitySubagents(ctx context.Context, tx *sql.Tx, subagents []A
 			return err
 		}
 		if added == 0 {
-			if _, err := tx.ExecContext(ctx, `UPDATE agent_identity_subagents SET last_seen = max(last_seen, ?)
-				WHERE agent_id = ? AND instance_id = ?`, at, sub.AgentID, sub.InstanceID); err != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE agent_identity_subagents SET first_seen = min(first_seen, ?), last_seen = max(last_seen, ?)
+				WHERE agent_id = ? AND instance_id = ?`, firstAt, lastAt, sub.AgentID, sub.InstanceID); err != nil {
 				return err
 			}
 			continue

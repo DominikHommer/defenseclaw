@@ -155,15 +155,20 @@ func (r *agentIdentityRecorder) observeSubagent(agentID, sessionID, subagentInst
 	if instance == "" {
 		return
 	}
-	r.noteSubagentLocked(inventory.AgentIdentitySubagent{AgentID: agentID, InstanceID: instance, Seen: time.Now().UTC()})
+	seen := time.Now().UTC()
+	r.noteSubagentLocked(inventory.AgentIdentitySubagent{AgentID: agentID, InstanceID: instance, FirstSeen: seen, LastSeen: seen})
 }
 
 func (r *agentIdentityRecorder) noteSubagentLocked(sub inventory.AgentIdentitySubagent) {
 	key := subSessionKey(sub.AgentID, sub.InstanceID)
 	if known, ok := r.subagents[key]; ok {
-		if sub.Seen.After(known.Seen) {
-			r.subagents[key] = sub
+		if sub.FirstSeen.Before(known.FirstSeen) {
+			known.FirstSeen = sub.FirstSeen
 		}
+		if sub.LastSeen.After(known.LastSeen) {
+			known.LastSeen = sub.LastSeen
+		}
+		r.subagents[key] = known
 		return
 	}
 	if len(r.subagents) >= agentIdentityRecorderMaxPending {
@@ -301,8 +306,8 @@ func (r *agentIdentityRecorder) snapshot() (map[string]inventory.AgentIdentityRe
 			continue
 		}
 		rec.SubagentsSeen++
-		if sub.Seen.After(newest[sub.AgentID]) {
-			newest[sub.AgentID] = sub.Seen
+		if sub.FirstSeen.After(newest[sub.AgentID]) {
+			newest[sub.AgentID] = sub.FirstSeen
 			rec.LastSubagentID = sub.InstanceID
 		}
 		pending[sub.AgentID] = rec

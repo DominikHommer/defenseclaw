@@ -101,3 +101,59 @@ func TestAgentIdentitiesListTheSubagentsOfEachAgent(t *testing.T) {
 	agentIdentityForGenericHook(peer, child)
 	check("after a restart")
 }
+
+// A repeat hook of an older instance must not make it the newest distinct
+// sub-agent, including while an inventory write is in flight and restored.
+func TestAgentIdentityRecorderOrdersSubagentsByFirstSighting(t *testing.T) {
+	const (
+		agentID = "agt-00000000000000c1"
+		firstID = "ais-00000000000000a1"
+		lastID  = "ais-00000000000000b2"
+	)
+	t0 := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
+	for _, restore := range []bool{false, true} {
+		name := "ordinary flush"
+		if restore {
+			name = "failed write restored after a newer hook"
+		}
+		t.Run(name, func(t *testing.T) {
+			r := &agentIdentityRecorder{pending: map[string]*inventory.AgentIdentityRecord{
+				agentID: {AgentID: agentID, UserID: "u1", Connector: "codex", MachineHash: "m", FirstSeen: t0, LastSeen: t0},
+			}}
+			first := inventory.AgentIdentitySubagent{AgentID: agentID, InstanceID: firstID, FirstSeen: t0, LastSeen: t0}
+			last := inventory.AgentIdentitySubagent{AgentID: agentID, InstanceID: lastID, FirstSeen: t0.Add(time.Second), LastSeen: t0.Add(time.Second)}
+			r.noteSubagentLocked(first)
+			r.noteSubagentLocked(last)
+			if restore {
+				batch, excluded, subagents := r.take()
+				r.noteSubagentLocked(inventory.AgentIdentitySubagent{AgentID: agentID, InstanceID: firstID, FirstSeen: t0.Add(3 * time.Second), LastSeen: t0.Add(3 * time.Second)})
+				r.restore(batch, excluded, subagents)
+			} else {
+				r.noteSubagentLocked(inventory.AgentIdentitySubagent{AgentID: agentID, InstanceID: firstID, FirstSeen: t0.Add(2 * time.Second), LastSeen: t0.Add(2 * time.Second)})
+			}
+			wantLast := t0.Add(2 * time.Second)
+			if restore {
+				wantLast = t0.Add(3 * time.Second)
+			}
+			if got := r.subagents[subSessionKey(agentID, firstID)]; !got.FirstSeen.Equal(t0) || !got.LastSeen.Equal(wantLast) {
+				t.Errorf("first sub-agent sightings = %s..%s; want %s..%s", got.FirstSeen, got.LastSeen, t0, wantLast)
+			}
+			pending, _ := r.snapshot()
+			if got := pending[agentID]; got.SubagentsSeen != 2 || got.LastSubagentID != lastID {
+				t.Errorf("buffered identity = %+v; want two sub-agents, last %s", got, lastID)
+			}
+			store, err := inventory.NewInventoryStore(filepath.Join(t.TempDir(), "inventory.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			if err := r.flush(context.Background(), store); err != nil {
+				t.Fatal(err)
+			}
+			rows, _, err := store.ListAgentIdentities(context.Background(), inventory.AgentIdentityFilter{})
+			if err != nil || len(rows) != 1 || rows[0].SubagentsSeen != 2 || rows[0].LastSubagentID != lastID {
+				t.Errorf("stored identities = %+v, err %v; want two sub-agents, last %s", rows, err, lastID)
+			}
+		})
+	}
+}
