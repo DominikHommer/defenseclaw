@@ -271,7 +271,7 @@ func TestDoctorChecksWhatLinuxMicroVMsNeed(t *testing.T) {
 			_ = os.Remove(f.linuxDriverPath())
 			f.fake.FailNext(openshelltest.MethodHealth, errors.New("connection refused"))
 		}, want: checkWant{"vm-driver", fail, "openshell-driver-vm is not installed (NVIDIA's openshell package does not ship it)"},
-			fix: &fixWant{text: "openshell-driver-vm-aarch64-unknown-linux-gnu.tar.gz", manual: true}},
+			fix: &fixWant{text: "the gateway version is unknown; restore the gateway connection", manual: true}},
 		// An in-place upgrade of NVIDIA's package leaves the driver it
 		// does not ship (GAP-0652): one older than the gateway fails.
 		{name: "driver older than the gateway", setup: func(f *doctorFixture) {
@@ -376,4 +376,116 @@ func TestDoctorOffersMicroVMsOnALinuxHostWithKVM(t *testing.T) {
 		t.Fatalf("a docker host got MicroVM checks:\n%s", r)
 	}
 	expectCheck(t, r, openshell.CheckIDLandlock, openshell.StatusPass, "ABI 6")
+}
+
+// The Linux host probe also runs while Docker is selected. A found driver
+// must not turn an unreachable gateway into a panic or an invented version.
+func TestLinuxMicroVMProbeWithUnknownGatewayVersion(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*doctorFixture)
+	}{
+		{"no registration", func(f *doctorFixture) {
+			if err := os.RemoveAll(filepath.Join(f.dir, "gateways")); err != nil {
+				f.t.Fatal(err)
+			}
+		}},
+		{"dial fails", func(f *doctorFixture) {
+			f.doctor.Dial = func(*openshell.Registration) (openshell.Client, error) {
+				return nil, errors.New("connection refused")
+			}
+		}},
+		{"health fails", func(f *doctorFixture) {
+			f.fake.FailNext(openshelltest.MethodHealth, errors.New("connection refused"))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDoctorFixture(t)
+			f.kvm = nil
+			touchExecutable(t, f.linuxDriverPath())
+			tc.setup(f)
+			r := f.run()
+			if r.GatewayVersion != "" || r.MicroVM == nil || r.MicroVM.DriverBinary != f.linuxDriverPath() ||
+				r.MicroVM.DriverVersion != "" || r.MicroVM.DriverOlderThan != "" || r.Get(openshell.CheckIDVMDriver) != nil {
+				t.Fatalf("gateway version %q, MicroVM facts %+v; checks:\n%s", r.GatewayVersion, r.MicroVM, r)
+			}
+			if c := r.Get(openshell.CheckIDGatewayVersion); c == nil || !strings.Contains(c.Detail, "version unknown") {
+				t.Fatalf("gateway check = %+v; want unknown version", c)
+			}
+		})
+	}
+}
+
+// The pinned 0.1.5 driver cannot repair a newer supported gateway: doctor
+// must give a manual matching-release path instead of a stale install command.
+func TestNewerSupportedGatewayNeedsMatchingMicroVMDriver(t *testing.T) {
+	for _, goarch := range []string{"amd64", "arm64"} {
+		t.Run(goarch, func(t *testing.T) {
+			f := newDoctorFixture(t)
+			f.onLinuxMicroVMs()
+			f.doctor.GOARCH = goarch
+			f.atRelease("0.1.6")
+			f.runner.On(f.linuxDriverPath()+" --version", "openshell-driver-vm "+openshell.InstallerVersion+"\n", nil)
+			r := f.run()
+			c := expectCheck(t, r, openshell.CheckIDVMDriver, openshell.StatusFail, "older than the gateway's 0.1.6")
+			if r.MicroVM.DriverOlderThan != "0.1.6" || c.Fix == nil || c.Fix.Command != "" || c.Fix.Automatic ||
+				!strings.Contains(c.Fix.Summary, "OpenShell 0.1.6") || !strings.Contains(c.Fix.Summary, filepath.Dir(f.linuxDriverPath())) ||
+				!strings.Contains(c.Fix.Summary, "verify") || !strings.Contains(c.Fix.Summary, "restart the OpenShell gateway") {
+				t.Fatalf("gateway %q, driver %+v, repair %+v", r.GatewayVersion, r.MicroVM, c.Fix)
+			}
+		})
+	}
+}
+
+// An absent driver on a Docker gateway is a future MicroVM setup problem.
+// The repair must still use that gateway's release rather than the build pin.
+func TestNewerSupportedGatewayMissingMicroVMDriver(t *testing.T) {
+	f := newDoctorFixture(t)
+	f.kvm = nil
+	f.atRelease("0.1.6")
+	r := f.run()
+	if r.MicroVM == nil || r.MicroVM.DriverBinary != "" || r.MicroVM.DriverRunning {
+		t.Fatalf("MicroVM facts = %+v", r.MicroVM)
+	}
+	fixes := r.MicroVM.Fixes("arm64")
+	if len(fixes) != 2 || fixes[1].Command != "" ||
+		!strings.Contains(fixes[1].Summary, "OpenShell 0.1.6") ||
+		!strings.Contains(fixes[1].Summary, "independently trusted SHA-256") {
+		t.Fatalf("MicroVM fixes = %+v", fixes)
+	}
+}
+
+// An unsupported gateway must be repaired before a driver is selected. In
+// particular, a prerelease of the pinned version is not the pinned release.
+func TestUnsupportedGatewayDoesNotOfferPinnedMicroVMDriver(t *testing.T) {
+	for _, version := range []string{"0.1.5-pre.3", "0.2.0"} {
+		t.Run(version, func(t *testing.T) {
+			f := newDoctorFixture(t)
+			f.kvm = nil
+			f.atRelease(version)
+			r := f.run()
+			if r.MicroVM == nil {
+				t.Fatal("missing MicroVM facts")
+			}
+			fixes := r.MicroVM.Fixes("arm64")
+			if len(fixes) != 2 || fixes[1].Command != "" || !strings.Contains(fixes[1].Summary, "move the gateway to a supported OpenShell release first") {
+				t.Fatalf("OpenShell %s: MicroVM fixes = %+v", version, fixes)
+			}
+		})
+	}
+}
+
+// A driver prerelease is older than the stable gateway even when their
+// numeric release is identical; its pinned stable replacement must be offered.
+func TestPrereleaseMicroVMDriverIsOlderThanStableGateway(t *testing.T) {
+	f := newDoctorFixture(t)
+	f.onLinuxMicroVMs()
+	f.atRelease(openshell.InstallerVersion)
+	f.runner.On(f.linuxDriverPath()+" --version", "openshell-driver-vm 0.1.5-pre.3\n", nil)
+	r := f.run()
+	c := expectCheck(t, r, openshell.CheckIDVMDriver, openshell.StatusFail, "older than the gateway's "+openshell.InstallerVersion)
+	if c.Fix == nil || !strings.Contains(c.Fix.Command, openshell.TarballBaseURL+openshell.InstallerTag) ||
+		!strings.Contains(c.Fix.Summary, "restart the OpenShell gateway") {
+		t.Fatalf("prerelease driver fix = %+v", c.Fix)
+	}
 }

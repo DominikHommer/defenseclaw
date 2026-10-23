@@ -90,11 +90,14 @@ type MicroVMHost struct {
 	// DriverBinary is the openshell-driver-vm the gateway starts; empty
 	// when none was found.
 	DriverBinary string `json:"driver_binary,omitempty"`
+	// gatewayVersion is the version the answering gateway reports. An empty
+	// value means no version was available, so no driver release can be chosen.
+	gatewayVersion string
 	// userRepairDir is the earlier user directory when DriverBinary was
 	// found beside the gateway on PATH without an explicit driver_dir.
 	userRepairDir string
-	// DriverVersion is the release DriverBinary reports (Linux), and
-	// DriverOlderThan the gateway's release when that is newer: an in-place
+	// DriverVersion is the version DriverBinary reports (Linux), and
+	// DriverOlderThan the gateway's version when that is newer: an in-place
 	// upgrade of NVIDIA's package leaves the driver, which it does not ship,
 	// as it was (GAP-0652).
 	DriverVersion   string `json:"driver_version,omitempty"`

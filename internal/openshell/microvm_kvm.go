@@ -260,11 +260,14 @@ func (r *doctorRun) linuxMicroVMHost(ctx context.Context) *MicroVMHost {
 	m.E2fsprogs = e2fsprogsIn(r.E2fsprogsDirs)
 	m.DriverRunning = r.running.Name == DriverVM
 	m.DriverBinary, m.userRepairDir = r.findVMDriver(ctx)
-	if m.DriverBinary != "" && r.gateway.Version != (Version{}) {
+	if r.gateway != nil && r.gateway.Version != (Version{}) {
+		m.gatewayVersion = r.gateway.Version.String()
+	}
+	if m.DriverBinary != "" && m.gatewayVersion != "" {
 		if v, err := r.vmDriverVersion(ctx, m.DriverBinary); err == nil {
 			m.DriverVersion = v.String()
-			if v.Release().Compare(r.gateway.Version.Release()) < 0 {
-				m.DriverOlderThan = r.gateway.Version.Release().String()
+			if v.Compare(r.gateway.Version) < 0 {
+				m.DriverOlderThan = m.gatewayVersion
 			}
 		}
 	}
@@ -291,18 +294,52 @@ func (r *doctorRun) vmDriverVersion(ctx context.Context, path string) (Version, 
 	return ParseVersion(fields[len(fields)-1])
 }
 
-// vmDriverFix installs the pinned driver where the gateway selects an old
-// one. A PATH-adjacent driver is searched after the user's default directory,
-// so a new copy there wins without writing beside the gateway.
+// vmDriverFix repairs a missing or stale driver for the answering gateway.
+// A PATH-adjacent driver is searched after the user's default directory, so
+// a new copy there wins without writing beside the gateway. Only the build's
+// pinned release gets an install command; other releases need a verified
+// matching driver, and an unknown gateway release needs a fresh probe.
 func (m *MicroVMHost) vmDriverFix(goarch string) *Fix {
-	if m.DriverOlderThan == "" || m.DriverBinary == "" {
+	release := m.gatewayVersion
+	if release == "" {
+		release = m.DriverOlderThan
+	}
+	if release == "" {
+		return &Fix{Summary: "the gateway version is unknown; restore the gateway connection and rerun `defenseclaw sandbox doctor` before choosing a MicroVM driver release"}
+	}
+	if release == InstallerVersion && m.DriverBinary == "" {
 		return InstallVMDriverFix(goarch)
 	}
-	dir := filepath.Dir(m.DriverBinary)
-	var fix *Fix
+	dir := "~/.local/libexec/openshell"
+	if m.DriverBinary != "" {
+		dir = filepath.Dir(m.DriverBinary)
+	}
 	if m.userRepairDir != "" && !vmDriverDirNeedsSudo(m.userRepairDir) {
-		fix = installVMDriverFixIn(goarch, m.userRepairDir)
-	} else if vmDriverDirNeedsSudo(dir) {
+		dir = m.userRepairDir
+	}
+	if release != InstallerVersion {
+		v, err := ParseVersion(release)
+		if err != nil {
+			return &Fix{Summary: "the gateway version is unrecognized; restore a supported gateway and rerun `defenseclaw sandbox doctor` before choosing a MicroVM driver release"}
+		}
+		if CheckSupported(v) != nil {
+			return &Fix{Summary: "move the gateway to a supported OpenShell release first (see the Gateway check), then rerun `defenseclaw sandbox doctor` for its matching MicroVM driver"}
+		}
+		archive := vmDriverArchive(goarch)
+		if archive == "" {
+			return &Fix{Summary: "OpenShell publishes its MicroVM driver for amd64 and arm64 Linux only"}
+		}
+		ownership := ""
+		sudo := dir != "~/.local/libexec/openshell" && vmDriverDirNeedsSudo(dir)
+		if sudo {
+			ownership = " with administrator rights and root ownership"
+		}
+		return &Fix{Summary: "if a matching OpenShell " + release + " " + archive + " and independently trusted SHA-256 digest are available, verify the archive and install its " +
+			vmDriverBinary + " into " + dir + ownership + "; this DefenseClaw build pins no digest for that release, so it cannot offer an install command; restart the OpenShell gateway and run `defenseclaw sandbox doctor` to verify its effective driver",
+			Sudo: sudo}
+	}
+	var fix *Fix
+	if vmDriverDirNeedsSudo(dir) {
 		fix = adminVMDriverFixIn("linux", goarch, dir)
 	} else {
 		fix = installVMDriverFixIn(goarch, dir)
