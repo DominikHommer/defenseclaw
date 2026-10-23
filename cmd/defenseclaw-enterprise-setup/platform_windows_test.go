@@ -323,3 +323,19 @@ func TestEnterpriseLifecycleArgumentsAlwaysForwardsBootstrapParent(t *testing.T)
 		})
 	}
 }
+
+// GAP-0608: the lifecycle receives TRUSTANCHORS= with the CONFIG= it is
+// refused with (and on any mutation), so it refuses the run and records the
+// refused anchor install.
+func TestEnterpriseLifecycleForwardsTrustAnchorsItRefuses(t *testing.T) {
+	stage := `C:\ProgramData\DefenseClaw-Enterprise-Setup-0123456789abcdef0123456789abcdef`
+	for _, action := range []string{"ensure", "repair"} {
+		got := strings.Join(enterpriseLifecycleArguments(stage, enterpriseSetupOptions{Action: action, Standalone: true,
+			Config: `C:\c.yaml`, TrustAnchors: `C:\b\a.json`, JSON: true}), " ")
+		for _, want := range []string{`--config C:\c.yaml`, `--trust-anchors C:\b\a.json`, "--profile standalone"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("%s arguments %q lack %q", action, got, want)
+			}
+		}
+	}
+}

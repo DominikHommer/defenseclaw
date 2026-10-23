@@ -66,6 +66,22 @@ func newWindowsBundleRestoreHost(t *testing.T) *windowsBundleRestoreHost {
 	}
 	stubWindowsEnterpriseDeployments(t, nil)
 	layout := stubWindowsBundleHost(t)
+	// A rollback test must not inspect or retire the machine's installed
+	// scanner runtime when its stub installer runs as LocalSystem.
+	scannerRuntime := windowsScannerRuntimeDir
+	t.Cleanup(func() { windowsScannerRuntimeDir = scannerRuntime })
+	noScannerRuntime := filepath.Join(t.TempDir(), "absent-scanner-runtime")
+	windowsScannerRuntimeDir = func() (string, error) {
+		return noScannerRuntime, nil
+	}
+	// The fixture has no enrolled agents. A managed test host can have real
+	// enrollments that would make this fixture's minimal config invalid.
+	connectors, targets := windowsEnterpriseEnrolledConnectors, windowsEnterpriseEnrolledTargets
+	t.Cleanup(func() {
+		windowsEnterpriseEnrolledConnectors, windowsEnterpriseEnrolledTargets = connectors, targets
+	})
+	windowsEnterpriseEnrolledConnectors = func() ([]string, error) { return nil, nil }
+	windowsEnterpriseEnrolledTargets = func() (map[string]bool, error) { return map[string]bool{}, nil }
 	ctx := context.Background()
 	cmd, out := windowsBundleCommand()
 	opts := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: e.anchors,

@@ -3024,7 +3024,9 @@ func warningCodes(result *enterprisestatus.Result) []string {
 func TestWindowsEnterpriseLifecycleReportsIgnoredLocalEnforcementEntries(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")
-	runtimeDir := t.TempDir()
+	// This test exercises migration reporting. A present TempDir is not a
+	// trusted scanner runtime on Windows, especially under Administrator.
+	runtimeDir := filepath.Join(t.TempDir(), "absent-scanner-runtime")
 	layoutSeam, runnerSeam, scannerSeam := windowsEnterpriseHotConfigLayout, windowsEnterpriseStandaloneRunner, windowsScannerRuntimeDir
 	t.Cleanup(func() {
 		windowsEnterpriseHotConfigLayout, windowsEnterpriseStandaloneRunner, windowsScannerRuntimeDir = layoutSeam, runnerSeam, scannerSeam
@@ -3036,7 +3038,7 @@ func TestWindowsEnterpriseLifecycleReportsIgnoredLocalEnforcementEntries(t *test
 	migrate := false
 	windowsEnterpriseStandaloneRunner = func(context.Context, *cobra.Command, string, []string) (windowsEnterpriseStandaloneRun, error) {
 		if migrate {
-			record := `{"schema_version":1,"from_version":8,"to_version":9,"actions_rows_ignored":2}`
+			record := `{"schema_version":1,"from_version":8,"to_version":9,"migrated_at":"2026-10-01T00:00:00Z","actor":"lifecycle","source_sha256":"` + strings.Repeat("a", 64) + `","result_sha256":"` + strings.Repeat("b", 64) + `","actions_rows_ignored":2}`
 			if err := os.WriteFile(config.MigrationRecordPath(configPath), []byte(record), 0o600); err != nil {
 				return windowsEnterpriseStandaloneRun{}, err
 			}

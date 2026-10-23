@@ -4002,7 +4002,7 @@ func (l *lifecycle) recordPackageResult(failure int) {
 	}
 	path := filepath.Join(env.P(env.Layout.LifecycleDir), lastPackageResultFile)
 	if err := env.writeFileAtomic(path, append(data, '\n'), 0o600, rootOwner()); err != nil {
-		l.result.AddWarning(codeState, "could not record this run in "+filepath.Join(env.Layout.LifecycleDir, lastPackageResultFile)+": "+err.Error())
+		l.result.AddWarning(stateWriteCode(err, codeState), "could not record this run in "+filepath.Join(env.Layout.LifecycleDir, lastPackageResultFile)+": "+err.Error())
 	}
 }
 

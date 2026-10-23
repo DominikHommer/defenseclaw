@@ -264,7 +264,9 @@ type Env struct {
 	// bundleFault is a test seam: it runs at each named phase of a bundle
 	// apply (received, verified, staged, transaction, applied, committed)
 	// and an error fails the apply there; at committed the run stops before
-	// the swap, as a crash after the commit would. Production leaves it nil.
+	// the swap, as a crash after the commit would; "private-dir <name>"
+	// runs before the bundle store creates its private directory <name>
+	// (receipts). Production leaves it nil.
 	bundleFault func(phase string) error
 
 	// SelfUnit names the service unit or launchd job this lifecycle run

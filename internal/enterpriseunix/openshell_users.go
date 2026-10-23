@@ -798,7 +798,7 @@ func (l *lifecycle) settleOpenShell(ctx context.Context, op *openshellPlan) {
 	l.settlePending(ctx, state, cur)
 	l.reconcileMacOSAgents(ctx, state)
 	if err := env.saveOpenShellState(state); err != nil {
-		l.result.AddWarning(codeState, "could not record the applied sandbox configuration: "+err.Error())
+		l.result.AddWarning(stateWriteCode(err, codeState), "could not record the applied sandbox configuration: "+err.Error())
 	}
 }
 
@@ -853,7 +853,7 @@ func (l *lifecycle) retryOpenShell(ctx context.Context) {
 	l.settlePending(ctx, state, state.Applied)
 	l.reconcileMacOSAgents(ctx, state)
 	if err := l.env.saveOpenShellState(state); err != nil {
-		l.result.AddWarning(codeState, "could not record the sandbox changes still waiting: "+err.Error())
+		l.result.AddWarning(stateWriteCode(err, codeState), "could not record the sandbox changes still waiting: "+err.Error())
 	}
 	if len(l.result.Changes) > before {
 		l.result.Noop = false
