@@ -624,11 +624,14 @@ func jsonValuesEqual(left, right interface{}) bool {
 // so every Claude Code prompt was blocked (GAP-1062). Windows keeps
 // refusing links.
 func claudeCodeUserSettingsReadPath(path string) (string, error) {
+	if runtime.GOOS == "windows" {
+		return path, nil
+	}
 	info, err := os.Lstat(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return "", fmt.Errorf("inspect settings source %s: %w", path, err)
 	}
-	if err == nil && info.Mode()&os.ModeSymlink != 0 && runtime.GOOS != "windows" {
+	if err == nil && info.Mode()&os.ModeSymlink != 0 {
 		target, err := filepath.EvalSymlinks(path)
 		if err != nil {
 			return "", fmt.Errorf("settings source is a link that cannot be followed: %w", err)
@@ -646,14 +649,16 @@ func claudeCodeUserSettingsReadPath(path string) (string, error) {
 		}
 		return target, nil
 	}
-	// A linked parent can also carry an ordinary or absent settings.json out
-	// of the home. Inspect the full path before treating absence as safe.
-	target, outside, err := AgentConfigOutsideHome(userHomeDir(), path)
-	if err != nil {
-		return "", fmt.Errorf("inspect settings source %s: %w", path, err)
-	}
-	if outside {
-		return "", fmt.Errorf("settings source %s leads outside your home folder, to %s; move it into your home folder or replace the link", path, target)
+	// The enterprise per-user writer confines linked parent folders. An OSS
+	// account may keep its entire .claude folder on a user-owned volume.
+	if home := activeUserHomeOverride(); home != "" {
+		target, outside, err := AgentConfigOutsideHome(home, path)
+		if err != nil {
+			return "", fmt.Errorf("inspect settings source %s: %w", path, err)
+		}
+		if outside {
+			return "", fmt.Errorf("settings source %s leads outside your home folder, to %s; move it into your home folder or replace the link", path, target)
+		}
 	}
 	return path, nil
 }

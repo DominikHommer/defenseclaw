@@ -291,3 +291,113 @@ func TestCheckAgentSettingsAllowsMissingUserSettings(t *testing.T) {
 		})
 	}
 }
+
+// An OSS upgrade must keep the hooks active when the account keeps its agent
+// settings on a user-owned dotfiles volume outside the home directory.
+func TestOSSSetupKeepsHooksThroughExternalDotfileLinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix dotfile links; Windows path behavior is covered separately")
+	}
+	for _, tc := range []struct {
+		name, connector, linkKind string
+	}{
+		{"codex config link", "codex", "file"},
+		{"codex home link", "codex", "parent"},
+		{"claude code home link", "claudecode", "parent"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			home := filepath.Join(root, "home")
+			outside := filepath.Join(root, "dotfiles")
+			if err := os.MkdirAll(home, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(outside, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("HOME", home)
+			filename := "config.toml"
+			folder := ".codex"
+			body := []byte("model = \"gpt-5\"\n")
+			conn := Connector(NewCodexConnector())
+			if tc.connector == "claudecode" {
+				filename, folder, body = "settings.json", ".claude", []byte("{}\n")
+				conn = NewClaudeCodeConnector()
+			}
+			settingsDir := filepath.Join(home, folder)
+			settingsPath := filepath.Join(settingsDir, filename)
+			outsidePath := filepath.Join(outside, filename)
+			if err := os.WriteFile(outsidePath, body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if tc.linkKind == "parent" {
+				if err := os.Symlink(outside, settingsDir); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.MkdirAll(settingsDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outsidePath, settingsPath); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.connector == "codex" {
+				t.Setenv("CODEX_HOME", settingsDir)
+				pointCodexConfig(t, settingsPath)
+			} else {
+				t.Setenv("CLAUDE_CONFIG_DIR", settingsDir)
+				previous := ClaudeCodeSettingsPathOverride
+				ClaudeCodeSettingsPathOverride = settingsPath
+				t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previous })
+			}
+			opts := SetupOpts{DataDir: filepath.Join(home, ".defenseclaw"), APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+			if err := CheckAgentSettings(conn, opts); err != nil {
+				t.Fatalf("upgrade precheck refused user-owned settings at %s: %v", settingsPath, err)
+			}
+			if err := conn.Setup(context.Background(), opts); err != nil {
+				t.Fatalf("upgrade setup through %s: %v", settingsPath, err)
+			}
+			if present, err := OwnedHooksPresent(conn, opts); err != nil || !present {
+				t.Fatalf("hooks after upgrade: present=%v, err=%v", present, err)
+			}
+			if tc.linkKind == "parent" {
+				if info, err := os.Lstat(settingsDir); err != nil || info.Mode()&os.ModeSymlink == 0 {
+					t.Fatalf("setup replaced the dotfile directory link: %v", err)
+				}
+			}
+			if tc.connector == "claudecode" {
+				if _, err := conn.(*ClaudeCodeConnector).ConvertHooksForRollback(opts); err != nil {
+					t.Fatalf("rollback conversion through linked .claude: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestClaudeCodeUserSettingsReadPathKeepsWindowsBehavior(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows keeps its original settings path for the native reader")
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	outside := filepath.Join(root, "dotfiles")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("USERPROFILE", home)
+	parent := filepath.Join(home, ".claude")
+	if err := os.Symlink(outside, parent); err != nil {
+		t.Skipf("directory symlinks are unavailable: %v", err)
+	}
+	path := filepath.Join(parent, "settings.json")
+	if err := os.WriteFile(filepath.Join(outside, "settings.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := claudeCodeUserSettingsReadPath(path); err != nil || got != path {
+		t.Fatalf("Windows settings read path = %q, %v; want %q", got, err, path)
+	}
+}

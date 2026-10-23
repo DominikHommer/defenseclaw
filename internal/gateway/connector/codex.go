@@ -375,12 +375,16 @@ func (c *CodexConnector) checkAgentSettings(opts SetupOpts) error {
 		return nil
 	}
 	path := codexConfigPath()
-	target, outside, err := AgentConfigOutsideHome(userHomeDir(), path)
-	if err != nil {
-		return refuseForAgentConfig(fmt.Errorf("inspect Codex config %s: %w; fix the link, then run: defenseclaw-gateway restart", path, err)) //nolint:staticcheck // Preserve the product name in this operator diagnostic.
-	}
-	if outside {
-		return refuseForAgentConfig(&AgentConfigOutsideHomeError{Path: path, Target: target})
+	// Match the writer's boundary: an OSS account may keep its dotfiles on a
+	// user-owned volume, while an enterprise per-user home binding is confined.
+	if home := activeUserHomeOverride(); home != "" && runtime.GOOS != "windows" {
+		target, outside, err := AgentConfigOutsideHome(home, path)
+		if err != nil {
+			return refuseForAgentConfig(fmt.Errorf("inspect Codex config %s: %w; fix the link, then run: defenseclaw-gateway restart", path, err)) //nolint:staticcheck // Preserve the product name in this operator diagnostic.
+		}
+		if outside {
+			return refuseForAgentConfig(&AgentConfigOutsideHomeError{Path: path, Target: target})
+		}
 	}
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
